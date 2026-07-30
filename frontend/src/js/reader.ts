@@ -370,7 +370,11 @@ export function render(o: IShowFeed) {
 // (nav.switchFilter) — a →/D/swipe/click steps onto the first unread, so reading
 // starts from the reader without a detour through the list; its pill carries the
 // full-backlog count (== the picker badge).
-function renderEmptyReader(o: IShowFeed) {
+// `resting` = the split view's idle pane (renderResting below), which is NOT a
+// navigation: the LIST still owns the surface, so the three tail steps that
+// belong to an arrival — the document title, the reader's scroll, and the focus
+// grab — are skipped. Everything above them is the same panel either way.
+function renderEmptyReader(o: IShowFeed, resting = false) {
    el.article.classList.add("srr-reader-empty")
    el.article.classList.remove("srr-reader-titleless")
    delete el.article.dataset.src
@@ -404,6 +408,7 @@ function renderEmptyReader(o: IShowFeed) {
    el.content.replaceChildren(list.emptyStateEl({ notStarted: o.notStarted, startFeed: o.startFeed }))
 
    refreshFeedLabel()
+   if (resting) return
    d.setTitle("SRR")
    scrollReaderTop()
    // The empty state hides the whole title row; focus the (visible) content host,
@@ -412,6 +417,28 @@ function renderEmptyReader(o: IShowFeed) {
    // keep keyboard focus inside the reader region; preventScroll as in render()
    el.content.focus({ preventScroll: true })
    d.persistHash(location.hash)
+}
+
+// Is an ARTICLE mounted in the reader right now? Read off the DOM this module
+// owns — render() unhides the host and drops .srr-reader-empty, every
+// placeholder path adds it back — rather than inferred from nav.pos, which is
+// the shared cursor the LIST also moves (its anchor seed, its keyboard row
+// selection). Under split those two questions come apart constantly: pos can
+// name an article the pane has never rendered.
+export function hasArticle(): boolean {
+   return !el.article.hidden && !el.article.classList.contains("srr-reader-empty")
+}
+
+// The split view's RESTING pane. Both surfaces are on screen there, so "nothing
+// open yet" is not an absence to hide — it is two thirds of the window, and a
+// blank one reads as a broken app with dead arrows. Mount the reader's own empty
+// panel instead: the same directed copy the reader shows at a dead end, with
+// Next armed off o.has_right so "Tap Next to start reading" is a true sentence.
+// Not a navigation — no surface flip, no title change, no focus grab (the list
+// keeps the keyboard), no hash write.
+export function renderResting(o: IShowFeed): void {
+   el.article.hidden = false
+   renderEmptyReader(o, true)
 }
 
 // The active mount's display label, or "" when only one store is mounted (the

@@ -120,6 +120,9 @@ const nav = vi.hoisted(() => {
       first: vi.fn(async () => sf()),
       last: vi.fn(async () => sf()),
       listAnchor: vi.fn(async () => -1),
+      // The split view's resting-pane placeholder (paintRestingPane): a paint,
+      // not a navigation, so the mock is a plain placeholder IShowFeed.
+      restingState: vi.fn(async () => ({ ...sf(), placeholder: true, notStarted: true, has_right: true })),
       switchFilter: vi.fn(async () => sf()),
       seek: vi.fn(async () => 0),
       filterKey: vi.fn(() => ""),
@@ -467,12 +470,22 @@ describe("split view (body.srr-split)", () => {
       // Narrow showList force-disables prev/next; the split branch must not.
       expect(prevBtn().disabled).toBe(false)
       expect(nextBtn().disabled).toBe(false)
-      // No article on screen (-1): the reader pane hides — the deliberate
-      // blank right side before the session's first open.
+      // No article on screen (-1): the pane RESTS rather than blanking — two
+      // thirds of a desktop window with nothing in it (and dead arrows) read as
+      // a broken app, so the reader's own directed empty panel stands in until
+      // the first open.
       nav.currentChron.mockReturnValue(-1)
       hashTo("#!other")
       await flush()
-      expect(reader().hasAttribute("hidden")).toBe(true)
+      expect(reader().hasAttribute("hidden")).toBe(false)
+      expect(reader().classList.contains("srr-reader-empty")).toBe(true)
+      expect(reader().querySelector(".srr-list-empty")).not.toBeNull()
+      // Armed off the placeholder's has_right: "Tap Next to start reading" has
+      // to be a true sentence.
+      expect(nextBtn().disabled).toBe(false)
+      // The LIST still owns the surface: a resting paint is not a navigation,
+      // so it must not pull focus into the reader region.
+      expect(document.activeElement).not.toBe(reader().querySelector(".srr-content"))
    })
 
    it("brings the list cursor along after a guarded navigation — split only", async () => {
@@ -487,6 +500,142 @@ describe("split view (body.srr-split)", () => {
       hashTo("#3")
       await flush()
       expect(list.followCursor).not.toHaveBeenCalled()
+   })
+
+   // A store refresh has TWO cues (the reader's pending-pill pulse, the list's
+   // "N new" pill) and the pre-split code picked one by `view`. Under split both
+   // surfaces are on screen, so both are owed — and the list half is the one
+   // that mattered: while you read (the normal split state) a whole fetch cycle
+   // landed with the always-visible pane showing neither a new row nor a pill.
+   it("reconciles BOTH panes after a store refresh, whichever surface has focus", async () => {
+      const afterStore = () => refresh.init.mock.calls[0][1] as () => void
+      await boot("#2") // reader surface
+      nav.fromHash.mockResolvedValue(showFeed({ has_right: true, right_count: 2 }))
+      hashTo("#5")
+      await flush()
+      nav.currentChron.mockReturnValue(5)
+      list.onStoreGrown.mockClear()
+      nav.probeCurrent.mockClear()
+      afterStore()()
+      await flush()
+      expect(list.onStoreGrown).toHaveBeenCalledTimes(1) // the pane grows…
+      expect(nav.probeCurrent).toHaveBeenCalled() // …and the reader re-probes
+   })
+
+   // Same shape, sync half: a pulled profile changes what is read, and the pane
+   // is on screen showing those rows.
+   it("rebuilds the pane after a profile merge while the reader has focus", async () => {
+      await boot("#2")
+      hashTo("#5")
+      await flush()
+      nav.currentChron.mockReturnValue(5)
+      list.rerender.mockClear()
+      const afterMerge = dropdown.setProfileImportHook.mock.calls[0][0] as (m?: boolean) => void
+      afterMerge(false)
+      await flush()
+      expect(list.rerender).toHaveBeenCalled()
+   })
+
+   // The row cursor IS the reader's article under split (list.followCursor), and
+   // the reader's ‹ › sit enabled on both surfaces — so ←/→ must step the
+   // article, not walk a second list-only cursor that leaves the two panes
+   // naming different articles.
+   it("steps the reader with ←/→ from the LIST surface when the pane is live", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
+      hashTo("#2")
+      await flush()
+      nav.currentChron.mockReturnValue(2)
+      hashTo("#!news") // back to the list surface, article still in the pane
+      await flush()
+      list.moveSelection.mockClear()
+      nav.right.mockClear()
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }))
+      await flush()
+      expect(nav.right).toHaveBeenCalled()
+      expect(list.moveSelection).not.toHaveBeenCalled()
+   })
+
+   // A lane picked from the LIST surface re-filters the list, and the pane may
+   // be left showing an article that is not in the new lane — with the live
+   // toolbar arrows stepping from a position nothing on screen names. Land the
+   // pane on the same answer the list anchored at… and record NOTHING: a mere
+   // switch must not consume an unread article (nav.switchFilter's own rule, and
+   // the reader-surface path through this picker IS switchFilter).
+   describe("a lane pick brings the resting pane along without consuming an article", () => {
+      // The pane must really HOLD an article — the follow-up asks the reader,
+      // not nav.pos (which the list moves too), so these open one for real.
+      const withArticleOpen = async () => {
+         await boot()
+         nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
+         hashTo("#20")
+         await flush()
+         nav.currentChron.mockReturnValue(20)
+         // …then back to the LIST surface with the article still in the pane:
+         // picker.onSelect routes a pick by `view`, and the reader-surface path
+         // (nav.switchFilter) has always brought the reader along on its own.
+         hashTo("#!news")
+         await flush()
+         // The follow-up asks the READER whether a real article is mounted.
+         expect(reader().hasAttribute("hidden")).toBe(false)
+         expect(reader().classList.contains("srr-reader-empty")).toBe(false)
+      }
+
+      it("lands the pane on the lane's anchor, unrecorded", async () => {
+         await withArticleOpen()
+         nav.listAnchor.mockResolvedValue(40) // the new lane anchors elsewhere
+         nav.goTo.mockClear()
+         pickerHooks()!.onSelect("42")
+         await flush()
+         expect(nav.goTo).toHaveBeenCalledWith(40, false) // record = false
+      })
+
+      it("does nothing when the open article is still a member of the new lane", async () => {
+         await withArticleOpen()
+         nav.listAnchor.mockResolvedValue(20) // listAnchor keeps the live article
+         nav.goTo.mockClear()
+         nav.last.mockClear()
+         pickerHooks()!.onSelect("42")
+         await flush()
+         expect(nav.goTo).not.toHaveBeenCalled()
+         expect(nav.last).not.toHaveBeenCalled()
+      })
+
+      it("falls back to the newest when the new lane has no anchor — still unrecorded", async () => {
+         await withArticleOpen()
+         nav.listAnchor.mockResolvedValue(-1)
+         nav.goTo.mockClear()
+         nav.last.mockClear()
+         pickerHooks()!.onSelect("42")
+         await flush()
+         expect(nav.goTo).not.toHaveBeenCalled()
+         expect(nav.last).toHaveBeenCalledWith(false, false)
+      })
+
+      it("leaves the pane alone in the narrow layout", async () => {
+         await withArticleOpen()
+         document.body.classList.remove("srr-split")
+         nav.listAnchor.mockResolvedValue(40)
+         nav.goTo.mockClear()
+         nav.last.mockClear()
+         pickerHooks()!.onSelect("42")
+         await flush()
+         expect(nav.goTo).not.toHaveBeenCalled()
+         expect(nav.last).not.toHaveBeenCalled()
+      })
+   })
+
+   // …and with NOTHING in the pane the list keeps its own row stepping: there is
+   // no article to step, and the resting panel is not a cursor.
+   it("keeps the list's row stepping when the split pane is resting", async () => {
+      await boot()
+      nav.currentChron.mockReturnValue(-1)
+      list.moveSelection.mockClear()
+      nav.right.mockClear()
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }))
+      await flush()
+      expect(list.moveSelection).toHaveBeenCalledWith("newer")
+      expect(nav.right).not.toHaveBeenCalled()
    })
 })
 

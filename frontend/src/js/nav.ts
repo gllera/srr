@@ -814,6 +814,39 @@ function resolveNoMatch(replace = false, notStarted = false): IShowFeed {
    }
 }
 
+// The split view's resting pane (reader.renderResting): what the reader shows
+// while the LIST surface holds focus and nothing is open. Same placeholder shape
+// resolveNoMatch builds, with NONE of its side effects — this is a paint, not a
+// navigation: pos stays where it is, the hash stays the list's, no prefetch is
+// aborted and no saved ghost cleared.
+//
+// It answers with the lane's own state, so the panel can't contradict the list
+// beside it: an unread backlog reads "Not started" (Next armed, and startFeed
+// names the feed it would open, exactly as switchFilter's placeholder does),
+// while a caught-up unseen-only lane falls through to "All caught up" — the
+// same line the empty list shows. Show-read mode has no unread to point at, so
+// a non-empty store still counts as not-started rather than claiming the filter
+// is empty.
+export async function restingState(): Promise<IShowFeed> {
+   const anchor = await listAnchor().catch(() => -1)
+   const notStarted = anchor >= 0 || (!unseenActive() && data.db.total_art > 0)
+   return {
+      article: { f: 0, a: 0, p: 0, t: "", l: "", c: "" },
+      has_left: false,
+      // Next is the "start reading" affordance here: armed whenever the store
+      // has anything at all, since a →-step from pos = -1 resolves the first
+      // match itself (and reports its own no-match placeholder if there is none).
+      has_right: data.db.total_art > 0,
+      // pos is -1, so the pill has no cursor to floor at and reads the lane's
+      // whole unread backlog — the picker badge, which is the right readout for
+      // "here is what is waiting".
+      right_count: await pendingRight().catch(() => -1),
+      placeholder: true,
+      notStarted,
+      startFeed: anchor >= 0 ? await Promise.resolve(data.getFeedId(anchor)).catch(() => undefined) : undefined,
+   }
+}
+
 export async function fromHash(hash: string): Promise<IShowFeed> {
    const posStr = hashPos(hash)
 

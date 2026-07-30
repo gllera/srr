@@ -13,6 +13,7 @@ import { refreshNow } from "./refresh"
 // element building lives below.
 import { matchSpans } from "./search"
 import { windowScroller, type Scroller } from "./scroller"
+import { isSplit } from "./split"
 // The two frontier-write primitives, taken from ./seen rather than through nav's
 // facade — the one place in the reader that does so, and deliberately:
 // nav.markAllRead/markUnreadFrom bake in the ACTIVE FILTER's scope (that is what
@@ -1019,6 +1020,20 @@ async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promis
 // the reader would open; the newest-default anchor (-1: [ALL]/saved/search) is
 // left unselected. `renderSearch` selects the newest hit for a query. Sets
 // builtKey so show() can later refresh-vs-rebuild.
+//
+// May this REBUILD seed the shared cursor? nav.pos is one cursor for two
+// surfaces, and under split the reader is on screen holding an article of its
+// own: re-seeding from the list's anchor there would leave the pane highlighting
+// one article while the reader shows another, and — worse — step the toolbar
+// arrows from the highlight rather than from what you are reading (a Show-read
+// flip jumped 20 → 25; a search keystroke left the arrows dead). So a rebuild
+// claims the cursor only when nothing holds it: the single-surface layout (the
+// list IS the cursor there) or a split pane with no article open. Explicit
+// navigation — a row tap, a picker lane pick, the arrows — still moves it.
+function mayClaimCursor(): boolean {
+   return !isSplit() || nav.currentChron() < 0
+}
+
 export async function render(anchorNow = false, onInteractive?: () => void): Promise<void> {
    const my = (tok = {})
    teardownObserver()
@@ -1071,7 +1086,7 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    // still establishes the cursor on the row in view (moveSelection) and a fresh
    // [ALL] boot shows no selection.
    // getFeedId is resident — feedLeft just walked the seed's idx pack — no fetch.
-   if (anchoredMid && seed !== nav.currentChron()) {
+   if (anchoredMid && seed !== nav.currentChron() && mayClaimCursor()) {
       nav.select(seed, await data.getFeedId(seed))
       if (my !== tok) return
    }
@@ -1263,8 +1278,10 @@ async function renderSearch(my: object, onInteractive?: () => void): Promise<voi
    }
    // The newest hit is the cursor position for a search render (the article
    // switchFilter → last() opens); select it before building rows so
-   // rowEl paints .srr-row-current on it.
-   if (seed !== nav.currentChron()) nav.select(seed, await data.getFeedId(seed))
+   // rowEl paints .srr-row-current on it. Under split the reader's open article
+   // keeps the cursor instead (mayClaimCursor) — a query is typed WHILE reading,
+   // and the arrows must keep stepping from what is on screen.
+   if (seed !== nav.currentChron() && mayClaimCursor()) nav.select(seed, await data.getFeedId(seed))
    if (my !== tok) return
 
    const older = await walk(my, seed, BATCH, "older")
@@ -1873,11 +1890,16 @@ function scrollRowIntoView(row: HTMLElement): void {
    else if (rect.bottom > bottom - margin) sc.to(sc.y() + rect.bottom - bottom)
 }
 
-// Height the bottom-fixed toolbar occupies. selectRow reveals it after every move
-// (notifyScroll), so its full rendered height is reserved unconditionally of the
-// current slide state — offsetHeight ignores the slide transform and reads 0 only
-// when the toolbar is display:none (no list surface).
+// Height the bottom-fixed toolbar occupies OVER THE LIST. selectRow reveals it
+// after every move (notifyScroll), so its full rendered height is reserved
+// unconditionally of the current slide state — offsetHeight ignores the slide
+// transform and reads 0 only when the toolbar is display:none (no list surface).
+// Under split it covers nothing here: the bar starts at the pane's right edge
+// (styles.css), so reserving its height would stop the pane's keyboard stepping
+// a bar-height short of the bottom against chrome that isn't there — the same
+// phantom reserve the pane's own padding-bottom shed.
 function toolbarInset(): number {
+   if (isSplit()) return 0
    const bar = document.querySelector<HTMLElement>(".srr-toolbar")
    return bar ? bar.offsetHeight : 0
 }

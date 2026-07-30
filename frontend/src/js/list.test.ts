@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest"
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 
 // list.ts captures its container at setup() and holds module-scoped paging
 // state, so each test gets a fresh instance via vi.resetModules() + dynamic
@@ -1071,6 +1071,46 @@ describe("list", () => {
       expect(current()).toEqual([3]) // the resolved article is the highlighted row
       expect(nav.select).toHaveBeenCalledWith(3, 3) // pos + feed synced from the anchor
       expect(nav.currentChron()).toBe(3)
+   })
+
+   // …but under split that same seeding would STEAL the cursor: nav.pos is one
+   // cursor for two surfaces, and the reader pane is on screen holding an
+   // article of its own. A Show-read flip or a search keystroke rebuilds the
+   // list underneath it, and re-seeding there left the pane highlighting one
+   // article while the reader showed another — with the toolbar arrows stepping
+   // from the highlight (measured: 20 → 25, skipping four).
+   describe("split view: a rebuild must not claim the reader's cursor", () => {
+      beforeEach(() => document.body.classList.add("srr-split"))
+      afterEach(() => document.body.classList.remove("srr-split"))
+
+      it("leaves the cursor on the open article when the rebuild re-anchors", async () => {
+         setIndex(10, (c) => c)
+         nav._setPos(7) // the reader's live article
+         nav._setListAnchor(3) // …and the rebuild would anchor somewhere else
+         nav.select.mockClear()
+         await list.render()
+         expect(nav.select).not.toHaveBeenCalled()
+         expect(nav.currentChron()).toBe(7)
+      })
+
+      it("still seeds when the pane is resting (nothing open)", async () => {
+         setIndex(10, (c) => c)
+         nav._setPos(-1) // no article in the pane — nothing holds the cursor
+         nav._setListAnchor(3)
+         nav.select.mockClear()
+         await list.render()
+         expect(nav.select).toHaveBeenCalledWith(3, 3)
+      })
+
+      it("leaves the cursor alone on a search rebuild too (the query is typed while reading)", async () => {
+         setIndex(10, (c) => c)
+         nav._setPos(7)
+         nav._setSearch("title")
+         nav.select.mockClear()
+         await list.render()
+         expect(nav.select).not.toHaveBeenCalled()
+         expect(nav.currentChron()).toBe(7)
+      })
    })
 
    it("does not move the cursor when the anchor is already the current article (reader return)", async () => {

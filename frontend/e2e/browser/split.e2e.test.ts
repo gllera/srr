@@ -86,8 +86,19 @@ describe("browser: split view (two-pane desktop)", () => {
       await waitList(page)
 
       expect(await page.evaluate(() => document.body.classList.contains("srr-split"))).toBe(true)
-      // Blank right pane before the session's first open (v1 contract).
-      expect(await visible(page, "article.srr-reader")).toBe(false)
+      // The pane RESTS before the session's first open — it does not blank. Two
+      // thirds of a desktop window with nothing in it, under a toolbar whose
+      // arrows are all disabled, is what "the desktop view looks broken" meant;
+      // the reader's own directed panel stands in until something is opened, and
+      // Next is armed so its "Tap Next to start reading" is a true sentence.
+      await page.waitForFunction(
+         () => document.querySelector("article.srr-reader.srr-reader-empty .srr-empty-eyebrow"),
+         { timeout: 20_000 },
+      )
+      expect(await visible(page, "article.srr-reader")).toBe(true)
+      expect(await page.$eval(".srr-next", (b) => (b as HTMLButtonElement).disabled)).toBe(false)
+      // A resting paint is not a navigation: the LIST keeps the keyboard.
+      expect(await page.evaluate(() => document.activeElement?.closest(".srr-content") !== null)).toBe(false)
 
       // Open the OLDEST article, not the first (newest) row: the next case
       // steps → (newer) from here, which the newest article could not.
@@ -111,11 +122,37 @@ describe("browser: split view (two-pane desktop)", () => {
    })
 
    it("window scroll (reader) leaves the list pane's scroll untouched", async () => {
-      const paneBefore = await page.evaluate(() => document.querySelector(".srr-list")!.scrollTop)
+      // Both scrolls must be REAL for this to assert anything: park the pane
+      // off its top, then scroll the window and prove only the window moved. The
+      // article has to be tall enough for the window to have somewhere to go —
+      // asserted, because a short one makes the whole case vacuous (scrollBy on
+      // an unscrollable document leaves 0 === 0).
+      // The fixture's articles are SHORTER than the viewport, so the document has
+      // nowhere to scroll and the case was vacuous (0 === 0 proves nothing about
+      // independence). Give the reader column real height for the measurement —
+      // the pane is already taller than any viewport at 30 rows.
+      await page.evaluate(() => {
+         ;(document.querySelector(".srr-content") as HTMLElement).style.minHeight = "3000px"
+      })
+      const pane = await page.evaluate(() => {
+         const l = document.querySelector(".srr-list")!
+         l.scrollTop = Math.min(300, l.scrollHeight - l.clientHeight)
+         return { top: l.scrollTop, scrollH: l.scrollHeight, clientH: l.clientHeight }
+      })
+      expect(pane.top, `pane must be scrollable to park it (${JSON.stringify(pane)})`).toBeGreaterThan(0)
+      const paneBefore = pane.top
       await page.evaluate(() => window.scrollBy(0, 400))
-      const paneAfter = await page.evaluate(() => document.querySelector(".srr-list")!.scrollTop)
-      expect(paneAfter).toBe(paneBefore)
-      await page.evaluate(() => window.scrollTo(0, 0))
+      const { paneAfter, scrolled } = await page.evaluate(() => ({
+         paneAfter: document.querySelector(".srr-list")!.scrollTop,
+         scrolled: window.scrollY,
+      }))
+      expect(scrolled).toBeGreaterThan(0) // the window really moved…
+      expect(paneAfter).toBe(paneBefore) // …and the pane did not follow it
+      await page.evaluate(() => {
+         window.scrollTo(0, 0)
+         document.querySelector(".srr-list")!.scrollTop = 0
+         ;(document.querySelector(".srr-content") as HTMLElement).style.minHeight = ""
+      })
    })
 
    it("browser-back to a list hash keeps the list intact (the pane keeps its article)", async () => {
@@ -194,6 +231,20 @@ describe("browser: split view (two-pane desktop)", () => {
             await clickRow(p, "news title 0")
             await waitReader(p)
             await p.waitForFunction(() => !document.body.classList.contains("srr-loading"), { timeout: 20_000 })
+            // Three of the four left-edge rules used to be asserted by NOTHING:
+            // only the toolbar is up in this state, so every other bar took the
+            // `continue` below and its rule could have been deleted silently.
+            // Raise the other two by un-hiding them ([hidden] is the only thing
+            // keeping either off screen): what is under test here is a
+            // POSITIONING rule — where the box lands once it exists — not the
+            // transport's or the snackbar's own show/hide logic, which their own
+            // suites cover. Raising them "for real" is not available anyway:
+            // headless Chromium decodes none of the fixture's media, so nothing
+            // ever plays.
+            await p.evaluate(() => {
+               document.querySelector(".srr-player")!.removeAttribute("hidden")
+               document.querySelector(".srr-snackbar")!.removeAttribute("hidden")
+            })
 
             const m = await p.evaluate(() => {
                const box = (sel: string) => {
@@ -210,9 +261,12 @@ describe("browser: split view (two-pane desktop)", () => {
                return { col, pane, bars, pill: box(".srr-new-pill") }
             })
 
-            // Non-vacuity: the toolbar is permanent chrome, so if it did not
-            // measure, the loop below is asserting nothing at all.
+            // Non-vacuity, per bar: a rule nothing measured is a rule nothing
+            // asserts. Three of the four are up by construction above; only
+            // .srr-pin-progress is genuinely conditional and keeps the `continue`.
             expect(m.bars[".srr-toolbar"], `toolbar measured at ${width}px`).not.toBeNull()
+            expect(m.bars[".srr-player"], `player measured at ${width}px`).not.toBeNull()
+            expect(m.bars[".srr-snackbar"], `snackbar measured at ${width}px`).not.toBeNull()
             for (const [sel, bar] of Object.entries(m.bars)) {
                if (!bar) continue // not up in this state — nothing to place
                // Centred on the reader column (±1px for subpixel rounding)…
@@ -247,10 +301,24 @@ describe("browser: split view (two-pane desktop)", () => {
          await p.waitForFunction(() => !!document.querySelector(".srr-content video.srr-broken"), {
             timeout: 20_000,
          })
-         const chipShown = await p.evaluate(
-            () => (document.querySelector(".srr-content .srr-queue-chip")?.getClientRects().length ?? 0) > 0,
-         )
-         expect(chipShown).toBe(false)
+         const chip = await p.evaluate(() => {
+            const c = document.querySelector(".srr-content .srr-queue-chip")
+            // EXISTS (the queue entry stays — an `error` can be transient) but
+            // paints nothing. Asserting only "not visible" would pass just as
+            // happily if injectQueueChips had stopped making chips at all.
+            return { present: !!c, shown: (c?.getClientRects().length ?? 0) > 0 }
+         })
+         expect(chip.present).toBe(true)
+         expect(chip.shown).toBe(false)
+         // …and the `p` key must not queue that invisible dead enclosure: with
+         // the broken video the article's ONLY media, the key is a no-op rather
+         // than a silent queueing of bytes that will never play.
+         const queuedAfterKey = await p.evaluate(async () => {
+            document.dispatchEvent(new KeyboardEvent("keydown", { key: "p", bubbles: true }))
+            await new Promise((r) => setTimeout(r, 200))
+            return (document.querySelector(".srr-content .srr-queue-chip") as HTMLElement)?.getAttribute("aria-pressed")
+         })
+         expect(queuedAfterKey).toBe("false")
       } finally {
          await ctx.close()
       }
@@ -310,9 +378,9 @@ describe("browser: split view (two-pane desktop)", () => {
       // The LIST-surface lane change specifically: picker.onSelect routes a pick
       // to nav.switchFilter when view is "reader" (the reader has always followed
       // there) but to selectFilter when it is "list" — and in split the reader
-      // pane is still on screen with its arrows live. list.render() then makes the
-      // new lane's anchor the cursor (nav.select) because the open article is not a
-      // member, so without the follow-up the pane would keep showing a news
+      // pane is still on screen with its arrows live. selectTokens asks the same
+      // question the list just anchored on (nav.listAnchor) and lands the pane on
+      // that answer, unrecorded; without it the pane would keep showing a news
       // article while Next stepped from an invisible sport position.
       const ctx = await browser.createBrowserContext()
       try {
@@ -356,6 +424,80 @@ describe("browser: split view (two-pane desktop)", () => {
                document.querySelector(".srr-title")?.textContent,
             { timeout: 20_000 },
          )
+      } finally {
+         await ctx.close()
+      }
+   })
+
+   // nav.pos is ONE cursor for two surfaces. A rebuild of the list — a Show-read
+   // flip, a search keystroke — used to re-seed it from the list's own anchor
+   // while the reader kept its article: the pane then highlighted one article,
+   // the reader showed another, and the toolbar arrows stepped from the
+   // highlight (measured: Next from a displayed chron 20 landed on 25).
+   it("a list rebuild leaves the cursor with the article the pane is showing", async () => {
+      const ctx = await browser.createBrowserContext()
+      try {
+         const p = await ctx.newPage()
+         await p.setViewport({ width: 1280, height: 900 })
+         await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
+         await waitList(p)
+         await clickRow(p, "news title 3")
+         await waitReader(p)
+         const before = await p.evaluate(() => location.hash)
+
+         // Show read ON, then OFF: the second flip re-anchors the list at the
+         // lane's oldest unread — a different article from the one on screen.
+         const flipShowRead = async () => {
+            await p.evaluate(() => document.querySelector<HTMLElement>(".srr-toolbar .srr-filter")?.click())
+            await p.waitForFunction(() => !!document.querySelector(".srr-picker-showread"), { timeout: 20_000 })
+            await p.evaluate(() => document.querySelector<HTMLElement>(".srr-picker-showread")?.click())
+            await new Promise((r) => setTimeout(r, 400))
+            await p.keyboard.press("Escape")
+            await p.waitForFunction(() => !document.body.classList.contains("srr-loading"), { timeout: 20_000 })
+         }
+         await flipShowRead()
+         await flipShowRead()
+
+         // The reader never moved…
+         expect(await p.evaluate(() => location.hash)).toBe(before)
+         // …and the step from here is the NEXT article, not a jump from wherever
+         // the rebuild would have parked the cursor.
+         const chron = Number(before.slice(1).split("!")[0])
+         await p.evaluate(() => document.querySelector<HTMLButtonElement>(".srr-next")?.click())
+         await p.waitForFunction((h) => location.hash !== h, { timeout: 20_000 }, before)
+         expect(Number((await p.evaluate(() => location.hash)).slice(1).split("!")[0])).toBe(chron + 1)
+      } finally {
+         await ctx.close()
+      }
+   })
+
+   // Typing a query is the same rebuild from the other direction — and it used to
+   // leave the toolbar arrows DEAD as well as desynced, because nav's cursor had
+   // moved to a hit while the reader still showed the article behind it.
+   it("keeps the reader steppable while a search query rebuilds the pane", async () => {
+      const ctx = await browser.createBrowserContext()
+      try {
+         const p = await ctx.newPage()
+         await p.setViewport({ width: 1280, height: 900 })
+         await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
+         await waitList(p)
+         await clickRow(p, "news title 2")
+         await waitReader(p)
+         const shown = await p.evaluate(() => document.querySelector(".srr-title")?.textContent)
+
+         await p.keyboard.press("/")
+         await p.waitForFunction(() => document.body.classList.contains("srr-searching"), { timeout: 20_000 })
+         await p.keyboard.type("sport")
+         await p.waitForFunction(
+            () => [...document.querySelectorAll(".srr-list a.srr-row")].some((r) => /sport/i.test(r.textContent || "")),
+            { timeout: 20_000 },
+         )
+         // The pane rebuilt into the results, the reader kept its article…
+         expect(await p.evaluate(() => document.querySelector(".srr-title")?.textContent)).toBe(shown)
+         // …and Next still steps it rather than sitting inert.
+         const before = await p.evaluate(() => location.hash)
+         await p.evaluate(() => document.querySelector<HTMLButtonElement>(".srr-next")?.click())
+         await p.waitForFunction((h) => location.hash !== h, { timeout: 20_000 }, before)
       } finally {
          await ctx.close()
       }

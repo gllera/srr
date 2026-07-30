@@ -786,8 +786,19 @@ function bindChipMenu(chip: HTMLButtonElement, index: number): void {
 // enclosure in the playlist — keyboard parity with b-for-save, so queueing
 // never needs a pointer. Routed through the chip's own click so there is ONE
 // path (the full-queue door included); a no-enclosure article is a quiet no-op.
+//
+// FIRST as the reader SEES it: media that failed to load is collapsed
+// (fmt.ts stamps .srr-broken, styles.css display:none) and takes its chip with
+// it, so keying the first chip in DOM ORDER would queue an invisible dead
+// enclosure ahead of the playable one below it. Keyed on the same class the
+// stylesheet hides them by — one fact, not two that can disagree.
 export function queueKey(): void {
-   el.content.querySelector<HTMLButtonElement>(".srr-queue-chip")?.click()
+   for (const chip of el.content.querySelectorAll<HTMLButtonElement>(".srr-queue-chip")) {
+      // The chip is inserted directly after its media element (injectQueueChips).
+      if (chip.previousElementSibling?.classList.contains("srr-broken")) continue
+      chip.click()
+      return
+   }
 }
 
 // Called by reader.ts as step 6 of its fixed media order (after rehome): one

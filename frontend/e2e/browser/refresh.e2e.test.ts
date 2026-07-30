@@ -212,4 +212,46 @@ describe("browser: in-place refresh via a background trigger", () => {
          await ctx.close()
       }
    })
+   // SPLIT: the pane is on screen WHILE you read, so the surface-picking gate
+   // that was fine on the phone ("reader → pulse the pill, else grow the list")
+   // silenced the list half exactly when it was visible — a whole fetch cycle
+   // could land with the always-visible pane showing neither a new row nor the
+   // "N new" pill, until some unrelated rebuild happened by. Both halves are
+   // owed here, so this asserts the LIST half from the READER surface.
+   it("grows the split list pane from a store refresh while the reader has focus", async () => {
+      const ctx = await browser.createBrowserContext()
+      try {
+         const p = await ctx.newPage()
+         // Wide enough for split, short enough that the pane scrolls (same
+         // reserve reasoning as the shared page's 500x200 viewport).
+         await p.setViewport({ width: 1280, height: 320 })
+         await p.goto(`${baseUrl}#`, { waitUntil: "load" })
+         await waitList(p)
+         await p.evaluate(() => (window.__srrStamp = 1))
+         expect(await p.evaluate(() => document.body.classList.contains("srr-split"))).toBe(true)
+
+         // Read the oldest article: the READER surface, the normal split state.
+         await p.evaluate(() => (location.hash = "#0"))
+         await waitReader(p)
+         await p.waitForFunction(() => !document.body.classList.contains("srr-view-list"), { timeout: 20_000 })
+         const rowsBefore = await p.evaluate(() => document.querySelectorAll(".srr-list a.srr-row").length)
+
+         feeds.set("/live.xml", rssFeed("Live", nItems(5, "live")))
+         await srr(packsDir, "fetch")
+         await p.evaluate(() => window.dispatchEvent(new Event("online")))
+         await p.waitForNetworkIdle({ timeout: 20_000 })
+
+         // The pane picked the arrivals up without leaving the reader…
+         await p.waitForFunction(
+            (n) => document.querySelectorAll(".srr-list a.srr-row").length > n,
+            { timeout: 20_000 },
+            rowsBefore,
+         )
+         // …with no reload, and the reader still on its article.
+         expect(await p.evaluate(() => window.__srrStamp)).toBe(1)
+         expect(await p.evaluate(() => location.hash.startsWith("#0"))).toBe(true)
+      } finally {
+         await ctx.close()
+      }
+   })
 })

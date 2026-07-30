@@ -97,6 +97,21 @@ function showReader() {
    el.article.hidden = false
 }
 
+// Is the reader pane a LIVE article right now? Under split both surfaces are on
+// screen, so `view` names which one has focus, not which one exists — every
+// "can the reader be acted on" question (the keymap, the lane-change follow-up)
+// has to ask this instead. It asks the READER, not nav.pos: the list moves that
+// shared cursor too (its anchor seed at boot, its keyboard row stepping), so
+// pos >= 0 routinely names an article the pane has never rendered — inferring
+// from it left the resting panel unpainted at boot, because the list's own seed
+// had already made the pane look "live".
+// BOTH halves are required, and they fail in opposite directions: the reader may
+// hold an article nav has since left behind (a filter change that dropped the
+// position), and nav may name one the pane has never rendered.
+function readerLive(): boolean {
+   return isSplit() && reader.hasArticle() && nav.currentChron() >= 0
+}
+
 function showList() {
    view = "list"
    document.body.classList.add("srr-view-list")
@@ -104,9 +119,11 @@ function showList() {
    el.listView.hidden = false
    if (isSplit()) {
       // Split view: both panes stay live — the reader keeps its article beside
-      // the list (blank only before the first open of the session) and its
-      // toolbar prev/next stay usable.
-      el.article.hidden = nav.currentChron() < 0
+      // the list, and its toolbar prev/next stay usable. With nothing open the
+      // pane shows the reader's own resting panel rather than a blank third of
+      // the window (paintRestingPane).
+      if (readerLive()) el.article.hidden = false
+      else void paintRestingPane()
       return
    }
    el.article.hidden = true
@@ -117,6 +134,16 @@ function showList() {
    // resistance reads when the reader IS showing.
    el.prev.disabled = true
    el.next.disabled = true
+}
+
+// Paint the split view's resting pane — the reader's own empty panel where a
+// blank two thirds of the window used to be. Fire-and-forget: it is a resting
+// state, not a navigation, so no caller waits on it, and a probe that lands
+// after an article opened (or after the breakpoint dropped) simply drops.
+async function paintRestingPane(): Promise<void> {
+   const o = await nav.restingState().catch(() => null)
+   if (!o || !isSplit() || readerLive()) return
+   reader.renderResting(o)
 }
 
 // The shared "go to the article surface" resolver, reused by every → reader
@@ -461,20 +488,31 @@ async function selectTokens(tokens: string[]) {
    const beforeChron = nav.currentChron()
    nav.applyFilter(tokens)
    await goToList(true)
-   // Split view: the reader pane never left, so a moved cursor cannot stay
-   // invisible. list.render() makes the new filter's anchor the CURRENT cursor
-   // (nav.select — list.ts) exactly when the article on screen is NOT a member of
-   // the filter just picked; nav.listAnchor keeps the cursor untouched whenever it
-   // still matches, so this fires only on a genuine lane change. On the phone that
-   // move is invisible — the reader is hidden and re-derives on its next open. Here
-   // it would leave the reader showing an article outside the active filter while
-   // the still-live toolbar arrows stepped from a position nothing on screen names,
-   // so land the pane on that anchor with the same call a list row tap makes.
-   // Requires an article already on screen: a pane still blank before the
-   // session's first open stays blank (the v1 contract).
-   const after = nav.currentChron()
-   if (isSplit() && beforeChron >= 0 && after >= 0 && after !== beforeChron) {
-      await guard(() => nav.goTo(after))
+   // Split view: the reader pane never left, so the article on screen may not
+   // belong to the lane just picked — and the still-live toolbar arrows would
+   // then step from a position nothing on screen names. Ask the SAME question
+   // the list just asked (nav.listAnchor: the live article while it still
+   // matches, else the lane's oldest unread, else -1 = newest) and land the pane
+   // on that answer, so both panes name one article. An unchanged answer means
+   // the article is still a member: no re-render, no scroll back to its top.
+   //
+   // record: FALSE. A mere lane switch must not consume an unread article —
+   // nav.switchFilter passes record = false at every one of its landings for
+   // exactly that reason, and the READER-surface path through the picker IS
+   // switchFilter, so recording here would make one pick mean two different
+   // things depending on which surface had focus. On the phone none of this
+   // runs: the reader is hidden and re-derives on its next open. A pane that is
+   // RESTING is left resting — showList repaints its panel for the new lane; a
+   // pick is not a reason to start reading something.
+   //
+   // SEARCH is exempt, and not as a special case: a query is a LIST presentation
+   // mode (nav.listAnchor answers -1 = newest-first for it, which is a statement
+   // about row order, not a landing), and it is typed WHILE reading. Following it
+   // would yank the pane onto the newest hit at every keystroke — and onto the
+   // no-match placeholder the moment the bar opens empty.
+   if (readerLive() && !nav.isSearchFilter()) {
+      const anchor = await nav.listAnchor()
+      if (anchor !== beforeChron) await guard(() => (anchor < 0 ? nav.last(false, false) : nav.goTo(anchor, false)))
    }
 }
 
@@ -574,12 +612,17 @@ function onCycle(dir: number) {
 // content image is enlarged, so it must not step the article behind. (Its key
 // input is already swallowed at the capture phase — lightbox.ts onKey — so that
 // flag is belt to this brace; pagerCommit mirrors both guards for the drag.)
+// "The reader is steppable" is a LAYOUT question under split, where the pane is
+// live beside the list and its prev/next buttons stay enabled on both surfaces:
+// a key must reach the same article the button beside it does, or ← / → go dead
+// on the list surface while the arrows a centimetre away still work.
+const readerSteppable = () => (view === "reader" || readerLive()) && !picker.isOpen() && !lightbox.isOpen()
 const stepLeft = () => {
-   if (view !== "reader" || picker.isOpen() || lightbox.isOpen()) return
+   if (!readerSteppable()) return
    return el.prev.disabled ? reader.bumpReaderEdge("prev") : guard(() => nav.left())
 }
 const stepRight = () => {
-   if (view !== "reader" || picker.isOpen() || lightbox.isOpen()) return
+   if (!readerSteppable()) return
    return el.next.disabled ? reader.bumpReaderEdge("next") : guard(() => nav.right())
 }
 const cycle = (dir: -1 | 1) => () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(dir))
@@ -723,7 +766,14 @@ async function init() {
          // would be wrong in both cases.
          nav.applyFilter([...nav.filterTokens()])
          void list.render()
-      } else if (view !== "reader") {
+      } else if (view !== "reader" || isSplit()) {
+         // Under split the "gentle" branch is not optional: the list pane is on
+         // screen next to the reader, so the display:none reasoning above (a
+         // rebuild would pin zero row heights, and the return path re-derives
+         // anyway) simply does not hold — there is no return path, and skipping
+         // it leaves another device's reads showing as unread beside the article
+         // you are on. list.rerender keeps the cursor with the reader
+         // (list.mayClaimCursor), so the gentle rebuild costs the pane nothing.
          void list.rerender()
       }
       if (picker.isOpen()) picker.render()
@@ -740,10 +790,16 @@ async function init() {
    // ONE non-disruptive cue that content landed — the list's overlay "N new"
    // pill (list.onStoreGrown → the prepend that feeds it) and, in the reader,
    // a one-shot pulse on the pending pill when its count actually grew.
+   //
+   // Under split the two branches are not alternatives: BOTH surfaces are on
+   // screen, so both cues are owed. Gating the list half on `view` was the
+   // feature's worst silence — while you read (the normal split state) a whole
+   // fetch cycle could land and the always-visible pane would never show a row
+   // or the pill, until some unrelated rebuild happened by.
    const refreshAfterStore = () => {
       reader.refreshFeedLabel()
-      if (view === "reader") reader.reprobeReaderChrome(true)
-      else void list.onStoreGrown()
+      if (view === "reader" || isSplit()) reader.reprobeReaderChrome(true)
+      if (view !== "reader" || isSplit()) void list.onStoreGrown()
       if (picker.isOpen()) picker.render()
       // New articles landed: the launcher badge is the one readout that is
       // supposed to notice without anyone opening the app (RDR12).
@@ -978,20 +1034,35 @@ async function init() {
       // both surfaces — except with a single lane to rotate, where they fall
       // through to native scrolling instead of going dead.
       // The rest of the reader keymap stays reader-only.
+      //
+      // …except under split with an article in the pane, where the row cursor IS
+      // the reader's article (list.followCursor keeps them one) and the reader's
+      // controls are on screen and enabled on BOTH surfaces. A/← there must step
+      // the article the ‹ button beside it steps — a second, list-only cursor
+      // would leave the pane highlighting one article while the reader shows
+      // another, and the toolbar arrows stepping from the highlight. So the
+      // horizontal keys (and the rest of the reader keymap, whose actions all
+      // target the same visible article) fall through; only the cycle keys stay
+      // here, because onCycle's list path re-filters the LIST in place.
       if (view === "list") {
-         if (e.key === "a" || e.key === "ArrowLeft") {
-            e.preventDefault()
-            void list.moveSelection("older")
-         } else if (e.key === "d" || e.key === "ArrowRight") {
-            e.preventDefault()
-            void list.moveSelection("newer")
-         } else if (e.key === "w" || e.key === "ArrowUp" || e.key === "s" || e.key === "ArrowDown") {
+         const cycleKey = e.key === "w" || e.key === "ArrowUp" || e.key === "s" || e.key === "ArrowDown"
+         if (cycleKey) {
             if (nav.getFilterEntries().length > 1) {
                e.preventDefault()
                onCycle(e.key === "w" || e.key === "ArrowUp" ? -1 : 1)
             }
+            return
          }
-         return
+         if (!readerLive()) {
+            if (e.key === "a" || e.key === "ArrowLeft") {
+               e.preventDefault()
+               void list.moveSelection("older")
+            } else if (e.key === "d" || e.key === "ArrowRight") {
+               e.preventDefault()
+               void list.moveSelection("newer")
+            }
+            return
+         }
       }
       const action = KEY_ACTIONS[e.key]
       if (action) {

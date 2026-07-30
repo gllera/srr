@@ -645,6 +645,18 @@ describe("playlist", () => {
       expect(chips()[0].getAttribute("aria-pressed")).toBe("false")
    })
 
+   // "First" means first as the reader SEES it: media whose bytes are gone is
+   // collapsed (.srr-broken) and takes its chip with it, so keying DOM order
+   // would queue an invisible dead enclosure ahead of the playable one below.
+   it("queueKey skips an enclosure whose media is broken", () => {
+      putAudio(2)
+      player.injectQueueChips()
+      content().querySelectorAll("audio")[0].classList.add("srr-broken")
+      player.queueKey()
+      expect(chips()[0].getAttribute("aria-pressed")).toBe("false")
+      expect(chips()[1].getAttribute("aria-pressed")).toBe("true")
+   })
+
    it("a video's corner chip goes offstage while the video plays and returns on pause", () => {
       content().innerHTML = `<video src="v.webm" controls></video>`
       player.injectQueueChips()
