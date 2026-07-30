@@ -35,6 +35,35 @@ describe("pane", () => {
       expect(pane.clampPaneW(9000, 400)).toBe(pane.PANE_MIN_W)
    })
 
+   // A 380px pane beside a 680px measure on a 2560px monitor leaves ~750px of
+   // nothing on BOTH sides of the text: the column centres in what the pane
+   // leaves, so the emptier the remainder, the further the text drifts from the
+   // pane. The ceiling therefore grows with the viewport — and the fraction is
+   // chosen so it lands exactly on the old constant at 1600, which is why no
+   // width at or below that moves.
+   it("lets the ceiling grow on a wide monitor, without moving any narrower one", async () => {
+      const pane = await import("./pane")
+      // The seam: 35% of 1600 IS 560, so the two rules agree here to the pixel.
+      expect(pane.clampPaneW(9000, 1600)).toBe(pane.PANE_MAX_W)
+      // Below it the old constant still floors the ceiling — 35% of 1200 is 420,
+      // which must NOT become the max.
+      expect(pane.clampPaneW(9000, 1200)).toBe(pane.PANE_MAX_W)
+      // Above it the pane may genuinely grow.
+      expect(pane.clampPaneW(9000, 2560)).toBe(896)
+      // …but not without end: a 4K monitor stops at the absolute ceiling rather
+      // than handing over 1344px of pane.
+      expect(pane.clampPaneW(9000, 3840)).toBe(pane.PANE_MAX_CEIL)
+   })
+
+   it("re-clamps a wide-monitor width down on a narrower screen", async () => {
+      const pane = await import("./pane")
+      localStorage.setItem(PANE_WIDTH_KEY, "896")
+      expect(pane.storedPaneW(2560)).toBe(896)
+      // The same stored preference on a 1600 laptop is over that screen's
+      // ceiling, and READ-clamping is what stops it leaking across machines.
+      expect(pane.storedPaneW(1600)).toBe(pane.PANE_MAX_W)
+   })
+
    // Math.min/max propagate NaN, so an unguarded clamp hands setPaneW a NaN and
    // the property becomes the invalid string "NaNpx" — the pane snapping back to
    // the token default mid-drag rather than stopping at its floor.

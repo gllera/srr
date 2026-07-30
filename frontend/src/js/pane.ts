@@ -41,8 +41,33 @@ export const PANE_MIN_W = 280
 // grip's exit gesture. Deliberately under the minimum so ordinary resizing near
 // the floor cannot trip it.
 export const PANE_COLLAPSE_W = 240
-// The absolute ceiling; the viewport cap below can only lower it.
+// The FLOOR of the ceiling: every viewport at or under 1600 gets exactly this,
+// and the viewport cap below can only lower it.
 export const PANE_MAX_W = 560
+// The ceiling of the ceiling. Past here a wider monitor buys no more pane: at
+// some point the list stops being a list of headlines and becomes a second
+// article column, and 900px is where titles already have more room than the
+// measure beside them.
+export const PANE_MAX_CEIL = 900
+// Why the ceiling moves at all: the reading column centres in what the pane
+// LEAVES, so the emptier the remainder the further the text drifts away from the
+// pane. At 2560 a 380px pane leaves ~750px of nothing on both sides of a 680px
+// measure, and the pane reads marooned rather than docked. Letting it grow with
+// the screen closes that gap from the side that has the room, without jamming
+// the measure against the pane (which would only move the imbalance).
+// 0.35 is not arbitrary: 35% of 1600 is 560 EXACTLY, so this rule meets the old
+// constant at the seam and nothing at or below 1600 moves by a pixel.
+const PANE_WIDE_FRACTION = 0.35
+
+// Internal: clampPaneW is the only caller, and deliberately so — the grip's
+// aria-valuemax has to go through the clamp rather than this, because the
+// half-viewport cap below can still lower the answer.
+// Total over a NaN viewport for the same reason clampPaneW is (see below).
+function paneCeiling(viewportW: number): number {
+   if (!Number.isFinite(viewportW)) return PANE_MAX_W
+   const wide = Math.round(viewportW * PANE_WIDE_FRACTION)
+   return Math.min(PANE_MAX_CEIL, Math.max(PANE_MAX_W, wide))
+}
 
 const HIDDEN_CLASS = "srr-pane-hidden"
 
@@ -82,7 +107,7 @@ function lsGet(key: string): string {
 // "NaN" then has to be caught again on the way back out.
 export function clampPaneW(px: number, viewportW: number): number {
    const half = Number.isFinite(viewportW) ? Math.round(viewportW * 0.5) : PANE_MAX_W
-   const max = Math.max(PANE_MIN_W, Math.min(PANE_MAX_W, half))
+   const max = Math.max(PANE_MIN_W, Math.min(paneCeiling(viewportW), half))
    const want = Number.isFinite(px) ? Math.round(px) : PANE_DEFAULT_W
    return Math.min(max, Math.max(PANE_MIN_W, want))
 }

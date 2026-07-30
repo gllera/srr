@@ -427,6 +427,51 @@ describe("browser: split pane width + visibility", () => {
       })
    })
 
+   // The ceiling follows the screen, and the REASON is a gap you can measure:
+   // the reading column centres in what the pane leaves, so on a 2560 monitor a
+   // 380px pane parks the text ~750px away from it. End takes the pane to its
+   // ceiling, and the gap has to close by most of that.
+   it("lets a wide monitor's pane reach 896, closing the gap to the column", async () => {
+      await page.evaluate(() => localStorage.clear())
+      await page.setViewport({ width: 2560, height: 900 })
+      await page.reload({ waitUntil: "load" })
+      await page.waitForFunction(() => document.body.classList.contains("srr-split"), { timeout: 10_000 })
+      await waitList(page)
+
+      const gapAt = async () => {
+         const pane = (await box(page, ".srr-list"))!
+         const col = (await box(page, ".srr-container"))!
+         return col.left - pane.right
+      }
+      const wide = await gapAt()
+      expect(wide).toBeGreaterThan(600)
+
+      // The grip publishes the same ceiling it enforces, so a screen reader is
+      // told the real range rather than the 1600px one.
+      const grip = await box(page, ".srr-pane-grip")
+      await page.evaluate(() => (document.querySelector(".srr-pane-grip") as HTMLElement).focus())
+      expect(await page.$eval(".srr-pane-grip", (g) => g.getAttribute("aria-valuemax"))).toBe("896")
+
+      await page.keyboard.press("End")
+      await page.waitForFunction(
+         () => parseFloat(getComputedStyle(document.body).getPropertyValue("--split-pane-w")) === 896,
+         { timeout: 10_000 },
+      )
+      await waitList(page)
+      expect((await box(page, ".srr-list"))!.width).toBe(896)
+      expect(await gapAt()).toBeLessThan(wide - 250)
+      expect(grip).not.toBeNull()
+
+      // …and that width does NOT follow the user down to a laptop: the ceiling
+      // there is 560, and storedPaneW re-clamps on READ rather than on write.
+      await page.setViewport({ width: 1600, height: 900 })
+      await page.reload({ waitUntil: "load" })
+      await page.waitForFunction(() => document.body.classList.contains("srr-split"), { timeout: 10_000 })
+      await waitList(page)
+      expect(await reserved(page)).toBe(560)
+      await page.evaluate(() => localStorage.clear())
+   })
+
    // The reset gesture, through the browser's own event synthesis rather than a
    // dispatched MouseEvent — which is the only way to see it at all. The drag
    // cancels `pointerdown`, and that suppresses the compatibility `mousedown`
