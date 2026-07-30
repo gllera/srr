@@ -220,4 +220,55 @@ describe("browser: a11y (axe-core)", () => {
          await close()
       }
    })
+
+   // Split view is a different a11y surface, not a wider one: both panes are on
+   // screen at once, the toolbar is a two-segment rail, and the resize grip is a
+   // focusable role=separator — which axe holds to `aria-required-attr`
+   // (aria-valuenow), NOT to any accessible-name rule. Worth knowing before
+   // reaching for DEFERRED: axe has no name rule for separator at all, so a grip
+   // finding here is about its VALUE, and the name is on the two cases below only
+   // because nothing else in the suite would notice it going missing.
+   //
+   // The reload is not a convenience. `open()` navigates at puppeteer's default
+   // viewport, which is BELOW the 1000px breakpoint, so the page boots in the
+   // single-surface layout; and setViewport lands the resize before the
+   // matchMedia change split.ts listens on, so the class arrives a turn later.
+   // Waiting on body.srr-split — not on the viewport number — is what makes the
+   // audit see the layout it names.
+   const openSplit = async (): Promise<[Page, () => Promise<void>]> => {
+      const [page, close] = await open()
+      await page.setViewport({ width: 1600, height: 900 })
+      await page.reload({ waitUntil: "load" })
+      await page.waitForFunction(() => document.body.classList.contains("srr-split"))
+      await waitList(page)
+      return [page, close]
+   }
+
+   it("split view with the pane open has no serious/critical violations", async () => {
+      const [page, close] = await openSplit()
+      try {
+         await audit(page, "split (pane open)")
+      } finally {
+         await close()
+      }
+   })
+
+   // The hidden pane is its own audit because the CHROME changes state, not just
+   // the layout: the toggle flips to aria-expanded="false" and renames itself,
+   // and the rail restates its template around a zero reserve. Both were
+   // mutation-checked — a bogus aria-expanded value reds THIS case and leaves the
+   // open one green. What it does NOT prove is the rows leaving the a11y tree:
+   // deleting `visibility: hidden` from the hidden rule keeps every case green
+   // here (axe does not police merely-offscreen content), and the assertion that
+   // covers that is pane.e2e.test.ts's tab walk.
+   it("split view with the pane hidden has no serious/critical violations", async () => {
+      const [page, close] = await openSplit()
+      try {
+         await page.click(".srr-pane-toggle")
+         await page.waitForFunction(() => document.body.classList.contains("srr-pane-hidden"))
+         await audit(page, "split (pane hidden)")
+      } finally {
+         await close()
+      }
+   })
 })
