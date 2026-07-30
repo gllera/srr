@@ -3794,6 +3794,13 @@ html:has(body.srr-view-list) {
    mixes viewport-relative rects with the pane's scrollTop and assumes the two
    share an origin. */
 body.srr-split {
+   /* The reserve is DERIVED from the width pane.ts writes on <html>. Declaring
+      it here (on body) rather than in :root is what makes the hidden state pure
+      CSS: body's own declaration governs body and its whole subtree, which is
+      every rule that reads it — including body's own padding-left below. So
+      hiding the pane is one class toggle re-resolving one property, with no
+      JS layout pass and no rule below this line changed. */
+   --split-pane-w: var(--split-pane-open-w);
    /* Reserve the pane's width at the PAGE level (body padding), so the reader
       column's own `margin: 0 auto` centers it in the REMAINING width — a
       margin-left on .srr-container would pin it against the pane instead (the
@@ -3828,6 +3835,16 @@ body.srr-split {
          their heights here would just be an unexplained blank strip. */
       padding: 0 0.75rem 1rem;
    }
+   /* The measure keeps a gutter at ANY pane width — the same clamp idiom the
+      snackbar already uses (`min(680px, calc(100% - 1.5rem))` above), where
+      100% is body's content box and so already the window minus the pane.
+      Without it, a window barely over the breakpoint hands the column every
+      remaining pixel: at 1024px the 380px pane leaves 596px, under the 680px
+      measure, so the text ran from html's page padding straight to the page
+      edge with the pane's border at its shoulder. */
+   & .srr-container {
+      max-width: min(680px, calc(100% - 3rem));
+   }
    /* Surface-transition chrome has no meaning when both surfaces are always on
       screen: back returns to a list that never left, open-article opens a
       reader that is already open. */
@@ -3851,6 +3868,19 @@ body.srr-split {
    & .srr-snackbar,
    & .srr-pin-progress {
       left: var(--split-pane-w);
+   }
+   /* …and held to the column's measure, so a bar is never wider than the text
+      it controls. They cannot borrow the percentage above: a fixed box resolves
+      percentages against the VIEWPORT, never against body's padding box, so the
+      pane and BOTH page gutters (html's 1.5rem each side, plus the 1.5rem each
+      side the clamp above adds) are subtracted here by hand — 6rem in total,
+      which lands the bar on exactly .srr-container's box instead of letting it
+      span pane→window-edge. (.srr-toolbar is absent on purpose: a later task
+      makes it full-width.) */
+   & .srr-player,
+   & .srr-snackbar,
+   & .srr-pin-progress {
+      max-width: min(680px, calc(100% - var(--split-pane-w) - 6rem));
    }
    /* The arrivals pill is the LIST's affordance (a .srr-list child), so it goes
       the other way — pinned over the PANE. `right` on a fixed box resolves
@@ -3881,5 +3911,48 @@ body.srr-split {
       the paint before the first measurement. */
    &.srr-searching .srr-list {
       padding-top: var(--split-searchbar-h, 3.2rem);
+   }
+}
+
+/* ══ Hidden pane (body.srr-pane-hidden) ════════════════════════════════════
+   The reserve goes to zero and the page recentres; every fixed bar follows for
+   free, because they all read --split-pane-w and nothing else. Only meaningful
+   under split — the class is never stamped below the breakpoint. */
+body.srr-split.srr-pane-hidden {
+   --split-pane-w: 0px;
+   /* The pane keeps its REAL width and stays laid out, moved off screen.
+      display:none would destroy its scrollTop and force a re-measure and a
+      re-anchor on every show — the deferred-scroll bug class round 6 was spent
+      on. Laid out at its true width, both the scroll position and the row
+      wrapping survive, so showing it again is a pure class removal: no
+      invalidate, no rebuild, nothing to race.
+      visibility:hidden is what takes it out of hit-testing and the
+      accessibility tree; the transform is what makes that true of everything
+      INSIDE it, since a transformed element becomes the containing block for
+      its position:fixed descendants. The arrivals pill is one — the list's own
+      affordance, whose single action scrolls this pane — so it travels with the
+      pane rather than staying pinned to a window that no longer shows a list.
+      No transition: the page's own recentre cannot be animated without
+      transitioning padding-left on body, a full-page layout thrash per frame,
+      so a sliding pane would only race a jumping page. */
+   & .srr-list {
+      width: var(--split-pane-open-w);
+      transform: translateX(-100%);
+      visibility: hidden;
+   }
+   /* The pinned search bar is the pane's chrome as much as the pill is, but it
+      is a .srr-container child rather than a .srr-list one, so the transform
+      above does not carry it: a zero reserve alone would leave it fixed at the
+      window's left edge at width 0 — a live search mode with an input nobody
+      can see or click, over results that are themselves hidden. State it. */
+   &.srr-searching .srr-searchbar {
+      display: none;
+   }
+   /* The grip has no edge to sit on; a 3px sliver at the window edge is not a
+      discoverable way back. The toolbar toggle and the L key are. (The class
+      itself arrives with the resize grip a later task adds — the hidden state
+      is stated in one place, so it states this here too.) */
+   & .srr-pane-grip {
+      display: none;
    }
 }

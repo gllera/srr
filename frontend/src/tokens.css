@@ -17,7 +17,12 @@
    --hover: rgba(0, 0, 0, 0.04);
    --accent: #b35650;
    --radius: 4px;
-   --split-pane-w: 380px; /* split view (two-pane desktop): the list pane's fixed width */
+   /* Split view (two-pane desktop). TWO properties, because "hidden" must not
+      cost a JS layout pass: pane.ts writes --split-pane-open-w on <html> (the
+      width the pane is SET to, never zero), and styles.css derives
+      --split-pane-w from it on <body> (the width the page RESERVES, 0 while
+      hidden). Every layout rule reads the DERIVED one. */
+   --split-pane-open-w: 380px;
    --shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 12px 28px rgba(0, 0, 0, 0.08);
    /* modal backdrop — a FIXED dark veil, not --fg (which inverts to a pale fog in dark mode) */
    --scrim: rgba(0, 0, 0, 0.5);
@@ -38,6 +43,7 @@
    --z-sticky: 1; /* list day dividers, reader spine */
    --z-searchbar: 5; /* pinned search bar */
    --z-toolbar: 6; /* bottom toolbar + its upward-opening menus */
+   --z-grip: 7; /* the split pane's resize handle — over the toolbar's layer, under the picker overlay */
    --z-overlay: 10; /* full-viewport filter-picker overlay (above toolbar, below popups) */
    --z-popup: 1000; /* error popup / imgproxy backdrop + card */
    --z-popup-top: 1001; /* topmost popup layer (popup accent bar) */
