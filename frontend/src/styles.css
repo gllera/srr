@@ -3934,7 +3934,7 @@ body.srr-split {
          which is exactly why the two literals are the pair that drifts. */
       padding: 0 0.75rem calc(3.35rem + 1px + 1rem + env(safe-area-inset-bottom));
    }
-   /* The column rule. 7px of hit area around a 1px seam — the pane's own
+   /* The column rule. 7px of hit area over a 1px seam — the pane's own
       border-right is what you see at rest; this sits on top of it and only
       declares itself on hover or while dragging. Stops above the rail so the
       two never overlap, which is why it needs no z-index contest with it —
@@ -3956,10 +3956,16 @@ body.srr-split {
       cursor: col-resize;
       /* The pointer stream must not be interrupted by scroll/zoom gestures. */
       touch-action: none;
+      /* The visible rule is 3 of the 7, not 1: the grip spans [pane−3, pane+4],
+         so a 2px inset covers the pane's own border AND 2px of the page beside
+         it. At 1px the accent landed just to the RIGHT of the border and read as
+         a second hairline next to the seam rather than the seam thickening —
+         and on a hi-DPI screen a 1px tint is not an affordance at all. This is
+         the round's one new visual; it can afford to be seen when reached for. */
       &::after {
          content: "";
          position: absolute;
-         inset: 0 3px;
+         inset: 0 2px;
          background: transparent;
          transition: background 0.15s;
       }
