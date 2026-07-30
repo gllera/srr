@@ -218,6 +218,9 @@ describe("browser: split view (two-pane desktop)", () => {
    // starts at (vw − 680)/2 — painting over the pane at any width below
    // pane + 2*column. Asserted as an identity against .srr-container rather than
    // against numbers, so it holds if the pane width or the column ever changes.
+   // The toolbar answers it a second way: it spans the window and centres a
+   // SEGMENT on the column instead of moving its own edge, so the box measured
+   // for it below is that segment.
    it("aligns every fixed bar with the reader column and clears the pane", async () => {
       const ctx = await browser.createBrowserContext()
       try {
@@ -256,7 +259,12 @@ describe("browser: split view (two-pane desktop)", () => {
                const col = box(".srr-container")!
                const pane = box(".srr-list")!
                const bars: Record<string, { left: number; right: number } | null> = {}
-               for (const sel of [".srr-toolbar", ".srr-player", ".srr-snackbar", ".srr-pin-progress"])
+               // .srr-tb-reader, not .srr-toolbar: the bar is a full-width rail
+               // now, and what has to land on the column is its READER SEGMENT
+               // — the segment over the pane holds the list's own controls and
+               // is asserted against the pane in pane.e2e.test.ts. The identity
+               // under test is unchanged; only which box carries it moved.
+               for (const sel of [".srr-tb-reader", ".srr-player", ".srr-snackbar", ".srr-pin-progress"])
                   bars[sel] = box(sel)
                return { col, pane, bars, pill: box(".srr-new-pill") }
             })
@@ -264,7 +272,7 @@ describe("browser: split view (two-pane desktop)", () => {
             // Non-vacuity, per bar: a rule nothing measured is a rule nothing
             // asserts. Three of the four are up by construction above; only
             // .srr-pin-progress is genuinely conditional and keeps the `continue`.
-            expect(m.bars[".srr-toolbar"], `toolbar measured at ${width}px`).not.toBeNull()
+            expect(m.bars[".srr-tb-reader"], `toolbar measured at ${width}px`).not.toBeNull()
             expect(m.bars[".srr-player"], `player measured at ${width}px`).not.toBeNull()
             expect(m.bars[".srr-snackbar"], `snackbar measured at ${width}px`).not.toBeNull()
             for (const [sel, bar] of Object.entries(m.bars)) {

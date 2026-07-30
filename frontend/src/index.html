@@ -171,51 +171,67 @@
             </header>
             <div class="srr-picker-filter" aria-label="Filter"></div>
          </section>
-         <!-- One row of slots (styles.css: grid). DOM order interleaves the
-              list + reader controls so each surface's visible controls read
-              left→right correctly — list: open-article · now-viewing readout ·
-              filter; reader: back · prev · next · save · filter. The filter
-              button (right edge, BOTH surfaces) opens the filter picker
-              overlay. The now-viewing readout is a button: tapping it opens
-              the anchored settings menu (LIST-ONLY — the readout is hidden in
-              the reader); the reader's next pill doubles as the frontier-menu
-              anchor (right-click / long-press). The list's open-article button
-              (left edge) jumps to the article you were reading (the tap
-              counterpart of the reader's back-to-list button). The other
-              surface's controls are display:none per the view rules in
-              styles.css. -->
+         <!-- The bottom bar, in two SEGMENTS — one per pane. Split view parks
+              .srr-tb-pane exactly over the list pane and .srr-tb-reader over
+              the reading column, so a control sits above the surface it acts
+              on: the now-viewing readout and the filter funnel govern the
+              LIST, and pinned over the article instead they were ~700px from
+              the pane they steer. The readout is a button — tapping it opens
+              the anchored settings menu; the filter button opens the filter
+              picker overlay; the open-article button jumps to the article you
+              were reading (the tap counterpart of the reader's back button);
+              the reader's next pill doubles as the frontier-menu anchor
+              (right-click / long-press).
+              Below the split breakpoint the two wrappers are display:contents
+              (styles.css), so every button is a direct grid item of the bar
+              again and the phone templates place exactly the elements they
+              always did. That retires the DOM-interleaving trick this bar used
+              to encode — the phone reader bar now NAMES its columns, because
+              one filter button shared by both surfaces cannot be ordered
+              correctly for both by document order alone. The other surface's
+              controls are display:none per the view rules in styles.css. -->
          <nav class="srr-toolbar" aria-label="Article navigation">
-            <button class="srr-back" aria-label="Back to list" title="Back to list">
-               <span class="srr-back-icon" aria-hidden="true"></span>
-               <!-- Active-filter breadcrumb: names the filtered list this button
-                    returns to (#tag / feed name / ★ Saved). Empty (hidden) when
-                    reading the full unfiltered wire. aria-hidden: the button's
-                    aria-label carries the filter for AT (app.ts). -->
-               <span class="srr-back-label" aria-hidden="true"></span>
-            </button>
-            <button class="srr-open-reader" aria-label="Open the current article" title="Article">
-               <span class="srr-open-reader-icon" aria-hidden="true"></span>
-            </button>
-            <button class="srr-feed" aria-haspopup="menu" aria-label="Settings" title="Settings">
-               <span class="srr-feed-name"></span>
-            </button>
-            <button class="srr-prev" disabled aria-label="Previous article" aria-keyshortcuts="ArrowLeft a" title="Previous article (←/A)">
-               <span class="srr-prev-icon" aria-hidden="true"></span>
-            </button>
-            <button class="srr-next" disabled aria-label="Next article" aria-keyshortcuts="ArrowRight d" title="Next article (→/D)">
-               <span class="srr-next-count" aria-hidden="true"></span>
-               <span class="srr-next-icon" aria-hidden="true"></span>
-            </button>
-            <button class="srr-save" aria-label="Save article" aria-keyshortcuts="b" aria-pressed="false" title="Save article (B)" disabled>
-               <svg class="srr-save-icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M12 3.4l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z" />
-               </svg>
-            </button>
-            <button class="srr-filter" aria-haspopup="dialog" aria-label="Filter by feed or tag" title="Filter by feed or tag">
-               <svg class="srr-filter-icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M3.5 5h17l-6.6 7.6v5.1l-3.8 2v-7.1z" />
-               </svg>
-            </button>
+            <span class="srr-tb-pane">
+               <!-- Split-view only: collapse / restore the list pane. aria-expanded
+                    (not aria-pressed) because it discloses a region, and
+                    aria-controls names it; pane.ts owns the label swap (Task 5). -->
+               <button class="srr-pane-toggle" aria-expanded="true" aria-controls="srr-list" aria-keyshortcuts="l" aria-label="Hide list" title="Hide list (L)">
+                  <span class="srr-pane-toggle-icon" aria-hidden="true"></span>
+               </button>
+               <button class="srr-open-reader" aria-label="Open the current article" title="Article">
+                  <span class="srr-open-reader-icon" aria-hidden="true"></span>
+               </button>
+               <button class="srr-feed" aria-haspopup="menu" aria-label="Settings" title="Settings">
+                  <span class="srr-feed-name"></span>
+               </button>
+               <button class="srr-filter" aria-haspopup="dialog" aria-label="Filter by feed or tag" title="Filter by feed or tag">
+                  <svg class="srr-filter-icon" viewBox="0 0 24 24" aria-hidden="true">
+                     <path d="M3.5 5h17l-6.6 7.6v5.1l-3.8 2v-7.1z" />
+                  </svg>
+               </button>
+            </span>
+            <span class="srr-tb-reader">
+               <button class="srr-back" aria-label="Back to list" title="Back to list">
+                  <span class="srr-back-icon" aria-hidden="true"></span>
+                  <!-- Active-filter breadcrumb: names the filtered list this button
+                       returns to (#tag / feed name / ★ Saved). Empty (hidden) when
+                       reading the full unfiltered wire. aria-hidden: the button's
+                       aria-label carries the filter for AT (app.ts). -->
+                  <span class="srr-back-label" aria-hidden="true"></span>
+               </button>
+               <button class="srr-prev" disabled aria-label="Previous article" aria-keyshortcuts="ArrowLeft a" title="Previous article (←/A)">
+                  <span class="srr-prev-icon" aria-hidden="true"></span>
+               </button>
+               <button class="srr-next" disabled aria-label="Next article" aria-keyshortcuts="ArrowRight d" title="Next article (→/D)">
+                  <span class="srr-next-count" aria-hidden="true"></span>
+                  <span class="srr-next-icon" aria-hidden="true"></span>
+               </button>
+               <button class="srr-save" aria-label="Save article" aria-keyshortcuts="b" aria-pressed="false" title="Save article (B)" disabled>
+                  <svg class="srr-save-icon" viewBox="0 0 24 24" aria-hidden="true">
+                     <path d="M12 3.4l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z" />
+                  </svg>
+               </button>
+            </span>
          </nav>
          <!-- Podcast mini-player (player.ts) — the transport for whatever is
               playing right now, a sibling of the toolbar it stacks on top of.

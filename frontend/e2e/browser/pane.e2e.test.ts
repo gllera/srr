@@ -237,4 +237,62 @@ describe("browser: split pane width + visibility", () => {
       expect(m.player.left, "player left vs column").toBeCloseTo(m.col.left, 0)
       expect(m.player.right, "player right vs column").toBeCloseTo(m.col.right, 0)
    })
+
+   it("spans the window and lands each segment over its own pane", async () => {
+      await page.setViewport({ width: 1600, height: 900 })
+      await page.goto(`${baseUrl}#!`, { waitUntil: "load" })
+      await waitList(page)
+      // The app rewrites the hash on boot, so a goto back to `#!` is a
+      // same-document navigation, NOT a reload — an earlier case's inline
+      // --split-pane-open-w is still on <html>. Every number below is stated
+      // against the shipped 380, so say so rather than assume a fresh document.
+      await setOpen(page, null)
+      const bar = await box(page, ".srr-toolbar")
+      expect(bar!.left).toBe(0)
+      expect(bar!.width).toBe(1600)
+      // The pane segment is exactly pane-wide, at the left edge.
+      const seg = await box(page, ".srr-tb-pane")
+      expect(seg!.left).toBe(0)
+      expect(seg!.width).toBeCloseTo(380, 0)
+      // The reader group centers on the reading column, not on the window.
+      const grp = await box(page, ".srr-tb-reader")
+      expect((grp!.left + grp!.right) / 2).toBeCloseTo(380 + (1600 - 380) / 2, 0)
+      // The list's controls now sit over the list.
+      const filter = await box(page, ".srr-filter")
+      expect(filter!.right).toBeLessThanOrEqual(380)
+   })
+
+   it("centers the reader group on the full window while the pane is hidden", async () => {
+      await page.evaluate(() => document.body.classList.add("srr-pane-hidden"))
+      const grp = await box(page, ".srr-tb-reader")
+      expect((grp!.left + grp!.right) / 2).toBeCloseTo(800, 0)
+      await page.evaluate(() => document.body.classList.remove("srr-pane-hidden"))
+   })
+
+   it("reserves the rail's height at the bottom of the pane", async () => {
+      const pad = await page.evaluate(() => getComputedStyle(document.querySelector(".srr-list")!).paddingBottom)
+      expect(parseFloat(pad)).toBeGreaterThan(60)
+   })
+
+   it("leaves the phone bar's control order untouched below the breakpoint", async () => {
+      await page.setViewport({ width: 420, height: 900 })
+      await page.goto(`${baseUrl}#!`, { waitUntil: "load" })
+      await waitList(page)
+      // List surface: open-article at the left edge, filter at the right.
+      const open = await box(page, ".srr-open-reader")
+      const filter = await box(page, ".srr-filter")
+      expect(open!.left).toBeLessThan(filter!.left)
+      // Reader surface: back at the left edge, filter still at the right.
+      await page.evaluate(() => (document.querySelector(".srr-list a.srr-row") as HTMLElement)?.click())
+      await page.waitForFunction(() => !(document.querySelector(".srr-reader") as HTMLElement).hidden, {
+         timeout: 20_000,
+      })
+      const back = await box(page, ".srr-back")
+      const filter2 = await box(page, ".srr-filter")
+      const next = await box(page, ".srr-next")
+      expect(back!.left).toBeLessThan(next!.left)
+      expect(next!.left).toBeLessThan(filter2!.left)
+      expect(filter2!.right).toBeGreaterThan(400 - 60)
+      await page.setViewport({ width: 1600, height: 900 })
+   })
 })

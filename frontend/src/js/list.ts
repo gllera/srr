@@ -1974,12 +1974,13 @@ function scrollRowIntoView(row: HTMLElement): void {
 // after every move (notifyScroll), so its full rendered height is reserved
 // unconditionally of the current slide state — offsetHeight ignores the slide
 // transform and reads 0 only when the toolbar is display:none (no list surface).
-// Under split it covers nothing here: the bar starts at the pane's right edge
-// (styles.css), so reserving its height would stop the pane's keyboard stepping
-// a bar-height short of the bottom against chrome that isn't there — the same
-// phantom reserve the pane's own padding-bottom shed.
+// Split view is NOT an exception: the bar is a full-width rail whose left
+// segment sits over this pane (styles.css), so the last bar-height of the pane
+// is chrome, not list. It used to start at the pane's right edge, and skipping
+// the reserve here then was correct; now skipping it parks the cursor row —
+// and everything the row's own affordances answer for, its ★ included —
+// underneath permanent chrome, where it can be neither seen nor pressed.
 function toolbarInset(): number {
-   if (isSplit()) return 0
    const bar = document.querySelector<HTMLElement>(".srr-toolbar")
    return bar ? bar.offsetHeight : 0
 }

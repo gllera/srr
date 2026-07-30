@@ -1164,19 +1164,17 @@ body.srr-playing .srr-pin-progress {
       will-change already make this a stacking context, so this lifts the whole
       toolbar — menus included. */
    z-index: var(--z-toolbar);
-   /* The wire console grid. The DOM interleaves the list + reader controls
-      (back · open-article · readout · prev · next · save · filter)
-      so each surface's visible controls — the other surface's are display:none
-      and take no cell — auto-place left→right: reader = back · prev · next ·
-      save · filter (five controls fill the five equal minmax(0,1fr) tracks, so
-      the accent "next" pill lands dead-center in the thumb zone and the filter
-      opener hugs the right edge), list = open-article · readout · filter (the
-      LIST template below lets the now-viewing readout take the bar's free
-      space (1fr) with the filter opener shrunk to its tap target on the
-      right — a long feed/tag name ("The Go Programming Language Blog")
-      stays legible). Either way the flexible track is a free-space fraction,
-      never its content, so it ellipsizes within its column and never shifts the
-      icons. */
+   /* The wire console grid. Five equal minmax(0,1fr) tracks for the reader bar
+      — back · prev · next · save · filter, NAMED below rather than left to
+      document order — so the accent "next" pill lands dead-center in the thumb
+      zone and the filter opener hugs the right edge; the LIST template below
+      swaps in three tracks (open-article · readout · filter) letting the
+      now-viewing readout take the bar's free space (1fr) with the filter
+      opener shrunk to its tap target on the right, so a long feed/tag name
+      ("The Go Programming Language Blog") stays legible. Either way the
+      flexible track is a free-space fraction, never its content, so it
+      ellipsizes within its column and never shifts the icons. The other
+      surface's controls are display:none and take no cell. */
    display: grid;
    grid-template-columns: repeat(5, minmax(0, 1fr));
    align-items: center;
@@ -1188,11 +1186,52 @@ body.srr-playing .srr-pin-progress {
    transition: transform 0.25s ease;
    will-change: transform;
 }
+/* The two segment wrappers are TRANSPARENT below the split breakpoint: their
+   children become direct grid items of the bar, so the phone templates below
+   place exactly the elements they always did. Under split (bottom of this file)
+   each wrapper becomes its own grid over its own pane. */
+.srr-tb-pane,
+.srr-tb-reader {
+   display: contents;
+}
+
 /* List toolbar: the open-article button hugs the left, the now-viewing readout
    earns the free space (1fr) in the middle, and the filter opener sits at the
-   right — both icons shrink to their 44px tap target (auto). */
+   right — both icons shrink to their 44px tap target (auto). Its three visible
+   controls are already in document order, so auto-placement suffices. */
 body.srr-view-list .srr-toolbar {
    grid-template-columns: auto 1fr auto;
+}
+
+/* Reader bar (phone): five equal tracks, placed EXPLICITLY. The flattened DOM
+   order is toggle · open-article · readout · filter · back · prev · next · save
+   — correct for the list bar, but it would put the shared filter button first
+   here. Naming the columns also retires the interleaving trick the old DOM
+   order encoded: the bar's order is now stated, not inferred. The row is stated
+   with every column because auto-placement's cursor only moves forward — a
+   definite column LOWER than the previous item's (back's 1 after filter's 5)
+   pushes that item onto a second row, silently doubling the bar's height. */
+body:not(.srr-view-list):not(.srr-split) .srr-toolbar {
+   & .srr-back {
+      grid-row: 1;
+      grid-column: 1;
+   }
+   & .srr-prev {
+      grid-row: 1;
+      grid-column: 2;
+   }
+   & .srr-next {
+      grid-row: 1;
+      grid-column: 3;
+   }
+   & .srr-save {
+      grid-row: 1;
+      grid-column: 4;
+   }
+   & .srr-filter {
+      grid-row: 1;
+      grid-column: 5;
+   }
 }
 
 .srr-toolbar-slide {
@@ -1202,6 +1241,7 @@ body.srr-view-list .srr-toolbar {
 /* Chrome-stripping reset + 44px (2.75rem) tap target for the square toolbar
    buttons. The now-viewing readout (.srr-feed) is a full-width text button with
    its own reset (see its rule above), so it's excluded here. */
+.srr-toolbar .srr-pane-toggle,
 .srr-toolbar .srr-back,
 .srr-toolbar .srr-open-reader,
 .srr-toolbar .srr-prev,
@@ -1236,26 +1276,30 @@ body.srr-view-list .srr-toolbar {
 /* Edge slots hug the screen edges (the rest of each control centers in its slot):
    the now-viewing readout (list center slot) fills its slot with its content
    centered, the filter opener (both bars) sits flush right, back (reader
-   slot 1) flush left. */
-.srr-toolbar > .srr-feed {
+   slot 1) flush left. DESCENDANT, not child: the segment wrappers sit between
+   these buttons and the bar, and `display: contents` is a box-generation rule —
+   it never rewrites the tree a `>` matches against. */
+.srr-toolbar .srr-feed {
    justify-self: stretch;
    min-width: 0;
    width: 100%;
    text-align: center;
 }
-.srr-toolbar > .srr-back,
-.srr-toolbar > .srr-open-reader {
+.srr-toolbar .srr-pane-toggle,
+.srr-toolbar .srr-back,
+.srr-toolbar .srr-open-reader {
    justify-self: start;
 }
 /* The filter opener sits at the right edge of BOTH bars — the list's third
-   (auto) track and the reader's fifth of five auto-placed tracks (back · prev ·
-   next · save · filter). */
-.srr-toolbar > .srr-filter {
+   (auto) track and the reader's fifth track (back · prev · next · save ·
+   filter). */
+.srr-toolbar .srr-filter {
    justify-self: end;
 }
 
 /* Icon toolbar buttons — square 44px tap targets with a subtle hover fill.
    flex-shrink:0 keeps every glyph its size next to the flexible readout button. */
+.srr-toolbar .srr-pane-toggle,
 .srr-toolbar .srr-back,
 .srr-toolbar .srr-open-reader,
 .srr-toolbar .srr-prev,
@@ -1821,6 +1865,29 @@ body.srr-view-list:not(.srr-split) .srr-save,
 body:not(.srr-view-list):not(.srr-split) .srr-feed,
 body:not(.srr-view-list) .srr-open-reader {
    display: none;
+}
+
+/* The pane toggle exists only where there is a pane to toggle. */
+body:not(.srr-split) .srr-pane-toggle {
+   display: none;
+}
+/* Sidebar glyph: a bordered frame whose left column is filled — the pane, and
+   the page beside it. Task 5 swaps the label; the mark is stable either way,
+   since what it names is the pane, not the direction of the next press. */
+.srr-pane-toggle-icon {
+   display: inline-block;
+   position: relative;
+   width: 1.05rem;
+   height: 0.85rem;
+   border: 1.5px solid currentColor;
+   border-radius: 2px;
+   &::before {
+      content: "";
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 0.3rem;
+      background: currentColor;
+   }
 }
 
 /* Filter picker overlay — a fixed full-viewport panel over everything but the
@@ -3828,12 +3895,17 @@ body.srr-split {
          window (reader) scroll behind it. */
       overscroll-behavior-y: contain;
       border-right: 1px solid var(--border);
-      /* Side padding replaces the page gutter the pane no longer inherits; the
-         bottom tail is breathing room under the last row, NOT chrome clearance
-         — the toolbar and player now start at the pane's right edge (see the
-         left-edge rules below), so neither one covers the pane and reserving
-         their heights here would just be an unexplained blank strip. */
-      padding: 0 0.75rem 1rem;
+      /* Side padding replaces the page gutter the pane no longer inherits. The
+         bottom tail IS chrome clearance now: the rail spans the window, so its
+         pane segment covers the last rows unless they stop above it. A literal
+         is exact rather than approximate because that bar cannot move —
+         gestures.ts returns early from the scroll auto-hide under .srr-split
+         ("permanent chrome"), so its height is a constant: the 2.75rem tap
+         target plus 0.3rem of padding each side, plus its 1px border, and then
+         1rem of breathing room under the last row. The PLAYER still needs no
+         reserve here — it starts at the pane's inner edge (the left-edge rules
+         below) and covers nothing of the pane. */
+      padding: 0 0.75rem calc(3.35rem + 1px + 1rem);
    }
    /* The measure keeps a gutter at ANY pane width — the same clamp idiom the
       snackbar already uses (`min(680px, calc(100% - 1.5rem))` above), where
@@ -3852,18 +3924,58 @@ body.srr-split {
    & .srr-open-reader {
       display: none;
    }
-   /* Union toolbar: readout (settings anchor, keeps the free space) + the
-      reader controls + the filter opener. */
+   /* The RAIL: one bar spanning the window, cut into a segment per pane, so a
+      control sits over the surface it acts on rather than 700px away over one
+      it does not touch. Track 1 IS the pane — the same property the pane's own
+      width reads, so the two can never disagree by a pixel — and track 2 is
+      everything left of the window, which is exactly the box .srr-container
+      centres in; centring the reader group in it therefore lands the arrows on
+      the reading column's midline at any window width and any pane width.
+      No column-gap and no side padding, both load-bearing: either one shifts
+      track 2 and takes the reader group off that midline by half of it, and
+      the segments' own gaps space their controls anyway. justify-items must go
+      to stretch because the bar's centring is written for BUTTONS, and these
+      two children are grids that have to BE their tracks. */
    & .srr-toolbar {
-      grid-template-columns: minmax(0, 1fr) auto auto auto auto;
+      left: 0;
+      right: 0;
+      max-width: none;
+      grid-template-columns: var(--split-pane-w) minmax(0, 1fr);
+      column-gap: 0;
+      justify-items: stretch;
+      padding-inline: 0;
+   }
+   /* The list's console: toggle at the pane's own gutter, the now-viewing
+      readout taking the slack, the filter funnel at the pane's inner edge. The
+      border carries the pane's right border down through the rail, so the seam
+      between the two panes is one unbroken line. */
+   & .srr-tb-pane {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 0.3rem;
+      padding-inline: 0.75rem;
+      border-right: 1px solid var(--border);
+   }
+   /* The reader's console: content-sized and centred as ONE group, so the
+      accent next pill stays on the column's midline instead of drifting
+      whenever a button joins or leaves the bar. */
+   & .srr-tb-reader {
+      display: grid;
+      grid-auto-flow: column;
+      justify-content: center;
+      align-items: center;
+      gap: 0.3rem;
    }
    /* The READER's fixed chrome, re-centered over the reader area. Each of these
       is `left: 0; right: 0; max-width: <column>; margin: 0 auto` in the spine,
       so moving the left edge to the pane's inner edge is the whole fix: the
       auto margins then center them in exactly the box .srr-container centers
       in. Without it they sit half a pane width to the LEFT of the column and,
-      below ~1440px, cover the pane's bottom rows. */
-   & .srr-toolbar,
+      below ~1440px, cover the pane's bottom rows. The toolbar is deliberately
+      NOT among them: it is the rail above, which spans the window and centres
+      its own reader segment — moving its left edge would drag the pane segment
+      off the pane it names. */
    & .srr-player,
    & .srr-snackbar,
    & .srr-pin-progress {
@@ -3875,8 +3987,7 @@ body.srr-split {
       pane and BOTH page gutters (html's 1.5rem each side, plus the 1.5rem each
       side the clamp above adds) are subtracted here by hand — 6rem in total,
       which lands the bar on exactly .srr-container's box instead of letting it
-      span pane→window-edge. (.srr-toolbar is absent on purpose: a later task
-      makes it full-width.) */
+      span pane→window-edge. */
    & .srr-player,
    & .srr-snackbar,
    & .srr-pin-progress {
@@ -3954,5 +4065,28 @@ body.srr-split.srr-pane-hidden {
       is stated in one place, so it states this here too.) */
    & .srr-pane-grip {
       display: none;
+   }
+   /* The rail still spans the window, but track 1 is now zero — which would
+      crush the pane segment to a 0px box and spill its controls over the
+      article, the toggle that brings the list BACK among them. So the rail
+      restates its template instead of inheriting the collapse: the segment
+      shrinks to its content at the window's left edge, the reader group takes
+      the middle, and track 3 is an empty counterweight. That counterweight is
+      the whole mechanism — it is what re-centres the group on the window, and
+      at a zero reserve the window IS the reading column. */
+   & .srr-toolbar {
+      grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+   }
+   & .srr-tb-pane {
+      grid-column: 1;
+      justify-self: start;
+      /* The readout has no pane to be as wide as any more; cap it, or a long
+         feed name grows the segment until it reaches the centred group. */
+      grid-template-columns: auto minmax(0, 20ch) auto;
+      /* Nothing left to divide from — the border was the pane's seam. */
+      border-right: 0;
+   }
+   & .srr-tb-reader {
+      grid-column: 2;
    }
 }
