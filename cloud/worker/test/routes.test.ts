@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest"
 import { SELF, env } from "cloudflare:test"
-import { ROSTER } from "../src/roster"
+import { TEST_LOGIN_URL as LOGIN, TEST_REVOKED_EMAIL, TEST_T1_EMAIL, TEST_T2_EMAIL } from "./fixture-env"
 import { sessCookie } from "./helpers"
 
-const t1email = Object.entries(ROSTER).find(([, v]) => v.uid === "t1")![0]
-const t2email = Object.entries(ROSTER).find(([, v]) => v.uid === "t2")![0]
+// The roster behind these is bound by vitest.config.ts — see test/fixture-env.ts
+// for why it cannot be declared in this file.
+const t1email = TEST_T1_EMAIL
+const t2email = TEST_T2_EMAIL
 
-const BASE = "https://cloud.32b.io"
+const BASE = "https://cloud.example.com"
 
 // A browser navigation (Sec-Fetch-Mode: navigate) vs a programmatic fetch.
 const nav = (extra: Record<string, string> = {}) => ({
@@ -22,11 +24,11 @@ describe("GET /", () => {
       expect(res.headers.get("location")).toBe(`${BASE}/u/t1/`)
    })
 
-   it("redirects anonymous visitors to the www login with next", async () => {
+   it("redirects anonymous visitors to the login app with next", async () => {
       const res = await SELF.fetch(`${BASE}/`, nav())
       expect(res.status).toBe(302)
       const loc = new URL(res.headers.get("location")!)
-      expect(loc.origin + loc.pathname).toBe("https://www.32b.io/login")
+      expect(loc.origin + loc.pathname).toBe(LOGIN)
       expect(loc.searchParams.get("next")).toBe(`${BASE}/`)
    })
 
@@ -36,7 +38,7 @@ describe("GET /", () => {
    })
 
    it("403s a deactivated member (revocation)", async () => {
-      const res = await SELF.fetch(`${BASE}/`, nav({ cookie: await sessCookie("inactive@test.invalid") }))
+      const res = await SELF.fetch(`${BASE}/`, nav({ cookie: await sessCookie(TEST_REVOKED_EMAIL) }))
       expect(res.status).toBe(403)
    })
 })

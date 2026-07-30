@@ -1,4 +1,18 @@
-# Copy to .dev.vars (gitignored). For wrangler dev / the smoke test any value
-# works; to accept REAL 32b.io sessions it must equal the 32b Pages project's
-# SESSION_SECRET (copy in ~/ws/32b/.dev.vars) — never commit that value.
+# Copy to .dev.vars (gitignored). In production BOTH of these are secrets
+# (`cd cloud/worker && npx wrangler secret put SESSION_SECRET` / `… ROSTER`) —
+# never values in wrangler.toml, and never committed.
+
+# The HMAC key the login app signs its sess cookie with (src/auth.ts verifies,
+# never mints). Any value works for `wrangler dev` and the smoke test; to accept
+# REAL sessions it must equal the login app's own SESSION_SECRET byte for byte.
 SESSION_SECRET=dev-secret-change-me
+
+# AUTHORIZATION: which authenticated email owns which tenant store, as one line
+# of JSON (email → {uid, active}). `active: false` is the revocation lever — the
+# entry stays, the cookie keeps verifying, and every request 403s. An email
+# absent here is authenticated-but-unauthorized, exactly the same answer.
+#
+# uids must match /^[a-z0-9][a-z0-9_-]{0,31}$/ (they name the store prefix
+# u/<uid>/); a row that does not is dropped at parse. Malformed rows are dropped
+# too, and an unparseable value authorizes NOBODY rather than falling back.
+ROSTER={"you@example.com":{"uid":"t1","active":true},"someone-else@example.com":{"uid":"t2","active":true}}

@@ -104,22 +104,38 @@ smoke-fe: build-fe
 cloud/worker/node_modules/.package-lock.json: cloud/worker/package-lock.json
 	cd cloud/worker && npm ci
 
+# wrangler.toml is gitignored (one operator's hostname, zone and login URL), so
+# a fresh clone and CI get a placeholder copy of the committed example. NO
+# prerequisite on purpose: make runs this only when the file does not exist, so
+# editing the example can never clobber a real config.
+cloud/worker/wrangler.toml:
+	cp cloud/worker/wrangler.example.toml $@
+	@echo "note: created $@ from the example — edit it before deploying"
+
 build-cloud: build-fe
 	rm -rf cloud/worker/public
 	mkdir -p cloud/worker/public
 	cp -r dist/srrf/. cloud/worker/public/
 	rm -f cloud/worker/public/_headers
 
-verify-cloud: build-cloud cloud/worker/node_modules/.package-lock.json
+verify-cloud: build-cloud cloud/worker/wrangler.toml cloud/worker/node_modules/.package-lock.json
 	cd cloud/worker && npm run check && npm run test
 
 # Opt-in end-to-end smoke: real srr store → local R2 → wrangler dev → HTTP
 # checks per route class. Needs the srr binary and the staged bundle.
-smoke-cloud: build-cloud build-be cloud/worker/node_modules/.package-lock.json
+smoke-cloud: build-cloud build-be cloud/worker/wrangler.toml cloud/worker/node_modules/.package-lock.json
 	node cloud/e2e/smoke.mjs
 
 # DEPLOY IS MANUAL AND CURRENTLY DEFERRED — see the phase-1 plan's runbook.
+# The guard is not paranoia: verify-cloud materializes a placeholder config when
+# none exists, so without it a first-time deploy would happily publish a Worker
+# routed at example.com.
+# Comment lines are stripped first, deliberately: the example EXPLAINS this guard
+# and so mentions example.com itself, which would otherwise block a config whose
+# values are perfectly real.
 deploy-cloud: verify-cloud
+	@grep -v '^[[:space:]]*#' cloud/worker/wrangler.toml | grep -q "example\.com" \
+	   && { echo "refusing to deploy: cloud/worker/wrangler.toml still holds example.com placeholders"; exit 1; } || true
 	cd cloud/worker && npx wrangler deploy
 
 vet-be test-be:

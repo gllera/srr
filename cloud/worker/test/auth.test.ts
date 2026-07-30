@@ -50,7 +50,7 @@ describe("readSession", () => {
 })
 
 describe("sessionToken", () => {
-   const req = (cookie?: string) => new Request("https://cloud.32b.io/", { headers: cookie ? { cookie } : {} })
+   const req = (cookie?: string) => new Request("https://cloud.example.com/", { headers: cookie ? { cookie } : {} })
 
    it("extracts the sess cookie among others", () => {
       expect(sessionToken(req("a=1; sess=tok.sig; b=2"))).toBe("tok.sig")

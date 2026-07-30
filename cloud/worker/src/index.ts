@@ -1,6 +1,6 @@
 // SRR Cloud phase-1 edge worker: the whole product surface is this fetch
-// handler executing router.ts verdicts. Auth = 32b sess cookie (auth.ts) +
-// roster (roster.ts); the shell is served virtually under each tenant's
+// handler executing router.ts verdicts. Auth = the login app's sess cookie
+// (auth.ts) + roster (roster.ts); the shell is served virtually under each tenant's
 // prefix so the reader's relative PACK_BASE and SW scope land per-tenant.
 import { readSession, sessionToken } from "./auth"
 import { rosterLookup, type RosterEntry } from "./roster"
@@ -10,6 +10,8 @@ export interface Env {
    ASSETS: Fetcher
    STORE: R2Bucket
    SESSION_SECRET: string
+   // email → {uid, active} as JSON; see roster.ts for why it is config, not code.
+   ROSTER: string
    LOGIN_URL: string
 }
 
@@ -214,7 +216,7 @@ export default {
       }
 
       const session = await readSession(env.SESSION_SECRET, sessionToken(request))
-      const entry: RosterEntry | null = session ? rosterLookup(session.e) : null
+      const entry: RosterEntry | null = session ? rosterLookup(env.ROSTER, session.e) : null
       const authorizedFor = (uid: string) => entry !== null && entry.uid === uid
 
       const res = await dispatch(request, env, ctx, route, url, session !== null, entry, authorizedFor)
@@ -244,7 +246,7 @@ async function dispatch(
          return serveShellIndex(request, env)
       case "shell-asset":
          // Deliberately UNAUTHENTICATED: public bytes, and the SW script fetch
-         // carries no cookie (the srr.32b.io outage, fixed 2026-07-29) — gating
+         // carries no cookie (a real hosted-reader outage, 2026-07-29) — gating
          // it silently breaks SW registration.
          return serveShellAsset(request, env, route.name)
       case "sync":

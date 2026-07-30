@@ -1,0 +1,40 @@
+# Copy to wrangler.toml (gitignored) and fill in your own route, zone and login
+# URL. `make verify-cloud` / `make smoke-cloud` materialize it from this file
+# automatically when it is missing, so a fresh clone tests without any setup;
+# `make deploy-cloud` refuses to ship a config that still says example.com.
+#
+# Everything below the placeholders is real configuration, not decoration:
+#
+# run_worker_first is deliberate: EVERY request goes through the Worker, so the
+# assets layer can never serve index.html (or anything) around the auth gate.
+# html_handling "none" keeps ASSETS.fetch exact-path (no directory-index
+# rewrites).
+name = "srr-cloud"
+main = "src/index.ts"
+# Matches the workerd the pinned vitest pool ships (newer dates fall back noisily).
+compatibility_date = "2025-10-11"
+workers_dev = false
+
+# Your hostname and its Cloudflare zone. The route is inert until an
+# operator-initiated `make deploy-cloud`.
+routes = [{ pattern = "cloud.example.com/*", zone_name = "example.com" }]
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+html_handling = "none"
+not_found_handling = "none"
+run_worker_first = true
+
+[[r2_buckets]]
+binding = "STORE"
+bucket_name = "srr-cloud"
+
+[vars]
+# Where an anonymous navigation is sent to sign in. The Worker never mints
+# sessions; it only verifies the cookie that app sets (src/auth.ts).
+LOGIN_URL = "https://login.example.com/login"
+
+# NOT here: SESSION_SECRET and ROSTER. Both are secrets in production
+# (`wrangler secret put …`) and live in .dev.vars locally — the roster because it
+# is personal data, the secret because it is a secret. See .dev.vars.example.

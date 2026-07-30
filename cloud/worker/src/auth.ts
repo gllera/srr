@@ -1,7 +1,9 @@
-// Verify-only port of the 32b.io token scheme (~/ws/32b/functions/_lib/auth.js):
-// HMAC-SHA256, token = b64u(JSON payload) + "." + b64u(sig), sess payloads
-// {t:'sess', e:<email>} with no expiry. This module only VERIFIES — the SaaS
-// never mints sessions; login lives on www.32b.io. Same SESSION_SECRET.
+// Verify-only port of the LOGIN APP's token scheme: HMAC-SHA256, token =
+// b64u(JSON payload) + "." + b64u(sig), sess payloads {t:'sess', e:<email>}
+// with no expiry. This module only VERIFIES — the SaaS never mints sessions;
+// login lives in that app, which shares the SESSION_SECRET (.dev.vars.example).
+// Which app that is, and where it lives, is deployment config and not recorded
+// here; the never-expiring cookie is why roster.ts owns revocation.
 const enc = new TextEncoder()
 
 const unb64u = (s: string) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0))

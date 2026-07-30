@@ -14,7 +14,10 @@ export type Route =
    | { kind: "none" }
 
 // Tenant ids are minted by us (t1, t2, …): lowercase alphanumeric + dash/underscore.
-const UID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/
+// Exported because roster.ts holds the OTHER side of the same equality test — a
+// configured uid this rejects can never match a request, so it drops those rows
+// rather than let one reach the `/` redirect's Location header.
+export const UID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/
 
 // The flat store-root shell bundle's name shapes (Parcel content hashes are
 // hex; width left loose in case Parcel changes it). Store keys can never

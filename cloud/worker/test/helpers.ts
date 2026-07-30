@@ -1,5 +1,5 @@
-// Test-only token FORGER — the sign-side mirror of src/auth.ts's verify,
-// byte-compatible with ~/ws/32b/functions/_lib/auth.js makeToken.
+// Test-only token FORGER — the sign-side mirror of src/auth.ts's verify, and
+// byte-compatible with the login app's own makeToken.
 import { env } from "cloudflare:test"
 
 const enc = new TextEncoder()
