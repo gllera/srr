@@ -298,6 +298,42 @@ function reprobePaneChrome() {
    if (readerLive()) reader.reprobeReaderChrome()
 }
 
+// The lane-change follow-up for the READER surface, the twin of selectTokens'.
+// A pick (or a cycle) made while the reader holds focus goes through
+// nav.switchFilter, which answers a lane you have never opened with its "not
+// started" placeholder. On the phone that placeholder IS the surface and reads
+// correctly. Under split it blanks two thirds of the window beside a list that
+// has just built the new lane and highlighted its first unread — and the
+// identical pick made while the LIST holds focus lands the pane on that article.
+// `view` is only which surface the keyboard drives here, and nothing on screen
+// says which one that is, so one control must not answer two ways.
+//
+// record: FALSE, exactly as selectTokens' landing — a lane change must not
+// consume an unread article. replace: TRUE — switchFilter already wrote the
+// lane's entry, and a second would make the first browser-back a visual no-op.
+// A caught-up or empty lane answers -1 and is LEFT on its placeholder: "All
+// caught up" is the right answer there, and falling back to the newest would
+// open something already read.
+//
+// `hadArticle` is the pane's state BEFORE the switch, and it is what keeps this
+// the mirror of selectTokens rather than its opposite: a pane that was already
+// RESTING is left resting there ("a pick is not a reason to start reading
+// something"), so a pick that merely moves the keyboard focus must not be the
+// one thing that starts it.
+async function landPaneOnLane(hadArticle: boolean): Promise<void> {
+   if (!isSplit() || !hadArticle || reader.hasArticle()) return
+   const anchor = await nav.listAnchor()
+   if (anchor >= 0) await guard(() => nav.goTo(anchor, false, true))
+}
+
+// Every lane change made from the READER surface — the picker's pick, the W/S
+// keymap, the two-finger cycle — is this switch plus that follow-up.
+async function laneChange(fn: () => Promise<IShowFeed>): Promise<void> {
+   const hadArticle = reader.hasArticle()
+   await guard(fn)
+   await landPaneOnLane(hadArticle)
+}
+
 // Re-derive the reader after its filter bounds/mode shifted (a frontier gesture
 // or a Show-read flip). On a real article, silently re-probe the chrome. On a
 // placeholder (pos < 0) reprobeReaderChrome no-ops, so re-run the switch to
@@ -688,7 +724,7 @@ function onCycle(dir: number) {
       void nav.cycleToken(dir).then((tok) => {
          if (gen === listCycleGen) void selectFilter(tok)
       })
-   } else guard(() => nav.cycleFilter(dir))
+   } else void laneChange(() => nav.cycleFilter(dir))
 }
 
 // Each step/cycle key has an arrow + letter alias; define the action once and
@@ -719,7 +755,11 @@ const stepRight = () => {
    if (!readerSteppable()) return
    return el.next.disabled ? reader.bumpReaderEdge("next") : guard(() => nav.right())
 }
-const cycle = (dir: -1 | 1) => () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(dir))
+// The reader keymap's W/S — the same lane change onCycle's reader branch makes,
+// so it takes the same split follow-up (laneChange).
+const cycle = (dir: -1 | 1) => () => {
+   if (nav.getFilterEntries().length > 1) void laneChange(() => nav.cycleFilter(dir))
+}
 const cyclePrev = cycle(-1)
 const cycleNext = cycle(1)
 
@@ -799,6 +839,16 @@ async function init() {
    // through unchanged, the same re-derive refreshAfterMerge uses.
    list.setSavedSink((chron) => {
       if (isSplit() && chron === nav.currentChron()) refreshSaveButton(!el.save.disabled)
+   })
+   // A row swipe's read toggle is a frontier move like every other one, so it
+   // owes the same reconciliation menus.afterFrontierMove gives the rest — the
+   // one it never got. reReadReader re-derives the pane (its own layout gate, so
+   // it is a no-op wherever the reader is not on screen); the badge resync is
+   // unconditional, because a tab title reading "(25)" over 24 unread rows is
+   // wrong in both layouts — narrow just hid it until the next reader arrival.
+   list.setFrontierSink(() => {
+      reReadReader()
+      void syncUnreadBadge()
    })
    onSplitChange(() => {
       applyScroller()
@@ -1023,12 +1073,14 @@ async function init() {
    // history entry; you land back on the headlines under the new lane); from
    // the reader, switchFilter stays IN the reader on the picked lane's resume
    // article (the same semantics as the W/S / two-finger filter cycle — see
-   // onCycle). ✕ / Escape just close it — the surface underneath never moved.
+   // onCycle), plus laneChange's follow-up, so a lane with no resume position
+   // does not leave the always-on-screen pane blank. ✕ / Escape just close it —
+   // the surface underneath never moved.
    // The settings that used to share this surface live in menus.openSettingsMenu.
    picker.setup(el.picker, {
       onSelect: (token) => {
          picker.close()
-         if (view === "reader") guard(() => nav.switchFilter(token))
+         if (view === "reader") void laneChange(() => nav.switchFilter(token))
          else void selectFilter(token)
       },
       onClose: () => picker.close(),
@@ -1061,16 +1113,27 @@ async function init() {
    )
 
    el.prev.addEventListener("click", () => guard(() => nav.left()))
-   // Next STEPS the cursor everywhere except the split view's resting pane,
-   // where the same button is the "start reading" affordance its own copy
-   // advertises ("Tap Next to start reading"). nav.restingState builds that panel
-   // for a cursor of -1, from which a →-step resolves the FIRST match itself —
-   // but the pane only exists beside a list that has already seeded the shared
-   // cursor at its anchor, so the step landed one past it: the panel offered the
-   // backlog and then opened its second article, marking the first read behind
-   // you. enterReader resolves the same answer Escape and a row tap give, which
-   // is also the row the list is highlighting as it says this.
-   el.next.addEventListener("click", () => (reader.isResting() ? void enterReader() : guard(() => nav.right())))
+   // Next STEPS the cursor everywhere except a split-view pane holding NO
+   // article, where the same button is the "start reading" affordance its own
+   // copy advertises ("Tap Next to start reading"). Such a panel is built for a
+   // cursor of -1, from which a →-step resolves the FIRST match itself — but
+   // under split it sits beside a list that has already seeded that shared cursor
+   // at the lane's anchor, so the step lands one PAST it: the panel offers the
+   // backlog, opens its SECOND article, and marks the first read behind you.
+   //
+   // The test is the physical one — "the pane holds no article" — not "it is the
+   // RESTING panel". Both panels are the same panel: nav.switchFilter answers a
+   // never-opened lane with its own "not started" placeholder, painted through
+   // render() rather than renderResting, and routing on which of the two it was
+   // simply moved the skip from one to the other. A lane change made from the
+   // reader surface then consumed the new lane's first unread unseen — the very
+   // defect the resting flag had been added to fix, one code path over.
+   //
+   // enterReader resolves the same answer Escape and a row tap give, which is
+   // also the row the list is highlighting as it says this.
+   el.next.addEventListener("click", () =>
+      isSplit() && !reader.hasArticle() ? void enterReader() : guard(() => nav.right()),
+   )
    // The frontier menu rides the reader's next pill as a secondary gesture —
    // its only anchor; see menus.frontierMenuItems.
    menus.bindFrontierMenu(el.next)

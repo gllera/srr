@@ -173,6 +173,7 @@ const list = vi.hoisted(() => ({
    setScroller: vi.fn(),
    setCursorOwner: vi.fn(),
    setSavedSink: vi.fn(),
+   setFrontierSink: vi.fn(),
    followCursor: vi.fn(),
    show: vi.fn(async () => {}),
    render: vi.fn(async () => {}),
@@ -451,6 +452,8 @@ describe("split view (body.srr-split)", () => {
       // case after it and turn one real failure into a cascade.
       nav.currentChron.mockReturnValue(-1)
       nav.isSearchFilter.mockReturnValue(false)
+      nav.tagUnreadFromCounts.mockReturnValue(0)
+      data.db.feeds = {} as unknown as IDB["feeds"]
    })
 
    it("keeps both panes visible when an article opens, without force-disabling prev/next", async () => {
@@ -667,6 +670,33 @@ describe("split view (body.srr-split)", () => {
       nav.isSaved.mockReturnValue(false)
    })
 
+   // The READ half of the same seam, and the one the ★ fix missed. A row swipe's
+   // mark-read moves the frontier the pane's pending pill counts against, but
+   // list.refresh() re-derives only the ROWS — so the pill kept its pre-swipe
+   // number beside rows that had visibly changed, and the tab badge with it.
+   // Measured in Chrome at 1280: reading #5 with "25 ›", swipe a newer row read,
+   // rows drop to 24 unread and the pill still says 25, for good. Narrow only
+   // ever hid it: re-entering the reader re-derived both.
+   it("a row swipe's mark-read re-derives the pane's pill and the unread badge", async () => {
+      // The badge tallies the store's feeds, so there has to be one to tally.
+      data.db.feeds = { 1: { id: 1, title: "F", total_art: 9 } } as unknown as IDB["feeds"]
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true, right_count: 25 }))
+      nav.currentChron.mockReturnValue(2)
+      hashTo("#2")
+      await flush()
+      expect(document.querySelector(".srr-next-count")!.textContent).toBe("25")
+      const sink = list.setFrontierSink.mock.calls[0][0] as () => void
+
+      // The swipe consumed one of them.
+      nav.probeCurrent.mockResolvedValue(showFeed({ has_left: true, has_right: true, right_count: 24 }))
+      nav.tagUnreadFromCounts.mockReturnValue(24)
+      sink()
+      await flush()
+      expect(document.querySelector(".srr-next-count")!.textContent).toBe("24")
+      expect(document.title).toContain("(24)")
+   })
+
    // …but landing somewhere NEW is a real navigation and must still render. The
    // guard is the MOUNTED chron, not nav.pos: the list moves that cursor too.
    it("still renders when the cursor has moved off the article the pane shows", async () => {
@@ -707,20 +737,49 @@ describe("split view (body.srr-split)", () => {
       expect(nav.goTo).toHaveBeenCalledWith(4)
    })
 
-   // A real placeholder in the READER surface is the opposite case: pos is -1
-   // (nav.switchFilter put it there) and a →-step resolves the first match
-   // itself, so Next must keep stepping.
-   it("keeps Next stepping on a reader-surface placeholder", async () => {
+   // …and a placeholder in the READER surface is NOT the opposite case, though it
+   // was routed as one on the premise that "pos is -1 (nav.switchFilter put it
+   // there), so a →-step resolves the first match itself". Under split the list
+   // has already seeded that cursor for the new lane, so right() stepped one PAST
+   // its first unread and consumed it: measured in Chrome, switching to a
+   // never-opened lane from the reader's filter button and pressing Next once
+   // opened the lane's SECOND article, dropped the pill by two and left the first
+   // marked read behind you. Both panels are the same panel; "the pane holds no
+   // article" is the whole test.
+   it("starts reading AT the highlighted article from a reader-surface placeholder too", async () => {
       await boot()
       nav.fromHash.mockResolvedValue({ ...showFeed({ has_right: true }), placeholder: true, notStarted: true })
       hashTo("#0") // a POSITIONED hash routes to the reader surface
       await flush()
       expect(document.body.classList.contains("srr-view-list")).toBe(false)
       expect(reader().classList.contains("srr-reader-empty")).toBe(true)
+      // The list's rebuild for the new lane seeds the shared cursor at its anchor.
+      nav.currentChron.mockReturnValue(4)
       nav.right.mockClear()
+      nav.goTo.mockClear()
+      nextBtn().click()
+      await flush()
+      expect(nav.right).not.toHaveBeenCalled() // would have opened chron 5
+      expect(nav.goTo).toHaveBeenCalledWith(4)
+   })
+
+   // Off split the premise HOLDS — there is no list on screen to seed the cursor,
+   // so a placeholder's Next resolves the first match itself and must keep
+   // stepping. The split gate is what keeps the two apart.
+   it("keeps Next stepping on a placeholder in the narrow layout", async () => {
+      await boot()
+      document.body.classList.remove("srr-split")
+      nav.fromHash.mockResolvedValue({ ...showFeed({ has_right: true }), placeholder: true, notStarted: true })
+      hashTo("#0")
+      await flush()
+      expect(reader().classList.contains("srr-reader-empty")).toBe(true)
+      nav.currentChron.mockReturnValue(4)
+      nav.right.mockClear()
+      nav.goTo.mockClear()
       nextBtn().click()
       await flush()
       expect(nav.right).toHaveBeenCalled()
+      expect(nav.goTo).not.toHaveBeenCalled()
    })
 
    // The pane keeps its article while a query changes under it (a query is a list
@@ -859,8 +918,10 @@ describe("split view (body.srr-split)", () => {
          await flush()
          nav.currentChron.mockReturnValue(20)
          // …then back to the LIST surface with the article still in the pane:
-         // picker.onSelect routes a pick by `view`, and the reader-surface path
-         // (nav.switchFilter) has always brought the reader along on its own.
+         // picker.onSelect routes a pick by `view`, and this describe drives the
+         // LIST half. (The reader half does NOT bring the pane along on its own —
+         // switchFilter answers a never-opened lane with a placeholder; see
+         // "a lane picked from the READER surface" below.)
          hashTo("#!news")
          await flush()
          // The follow-up asks the READER whether a real article is mounted.
@@ -929,6 +990,107 @@ describe("split view (body.srr-split)", () => {
          await flush()
          expect(nav.goTo).not.toHaveBeenCalled()
          expect(nav.last).not.toHaveBeenCalled()
+      })
+   })
+
+   // The other half of the same control. A pick made while the READER holds focus
+   // goes through nav.switchFilter, which answers a lane you have never opened
+   // with its "not started" placeholder — so the always-on-screen pane BLANKED,
+   // beside a list that had just built the lane and highlighted its first unread,
+   // while the identical pick with the list focused landed the pane on it. Under
+   // split `view` is only which surface the keyboard drives, and nothing on
+   // screen says which one that is: one control, one answer.
+   describe("a lane picked from the READER surface", () => {
+      const readingWhenPicked = async () => {
+         await boot()
+         nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
+         hashTo("#20") // the READER surface keeps focus — no trip back to the list
+         await flush()
+         nav.currentChron.mockReturnValue(20)
+         expect(document.body.classList.contains("srr-view-list")).toBe(false)
+      }
+
+      it("lands the pane on the lane's anchor when the switch leaves it blank", async () => {
+         await readingWhenPicked()
+         // switchFilter's "not started" answer: a placeholder, no article.
+         nav.switchFilter.mockResolvedValue({ ...showFeed({ has_right: true }), placeholder: true, notStarted: true })
+         nav.listAnchor.mockResolvedValue(9)
+         nav.goTo.mockClear()
+         pickerHooks()!.onSelect("42")
+         await flush()
+         expect(reader().classList.contains("srr-reader-empty")).toBe(false)
+         expect(nav.goTo).toHaveBeenCalledWith(9, false, true) // record = false, replace = true
+      })
+
+      // A lane that DOES resume onto an article is switchFilter's own answer and
+      // must not be second-guessed — the follow-up asks the pane, not nav.pos.
+      it("leaves a lane that resumed onto an article alone", async () => {
+         await readingWhenPicked()
+         nav.switchFilter.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
+         nav.listAnchor.mockResolvedValue(9)
+         nav.goTo.mockClear()
+         pickerHooks()!.onSelect("42")
+         await flush()
+         expect(nav.goTo).not.toHaveBeenCalled()
+      })
+
+      // Caught-up / empty lanes answer -1. "All caught up" is the RIGHT panel
+      // there, and nav.last would open something already read.
+      it("leaves a caught-up lane on its placeholder", async () => {
+         await readingWhenPicked()
+         nav.switchFilter.mockResolvedValue({ ...showFeed({ has_right: false }), placeholder: true })
+         nav.listAnchor.mockResolvedValue(-1)
+         nav.goTo.mockClear()
+         nav.last.mockClear()
+         pickerHooks()!.onSelect("42")
+         await flush()
+         expect(nav.goTo).not.toHaveBeenCalled()
+         expect(nav.last).not.toHaveBeenCalled()
+      })
+
+      it("leaves the pane alone in the narrow layout", async () => {
+         await readingWhenPicked()
+         document.body.classList.remove("srr-split")
+         nav.switchFilter.mockResolvedValue({ ...showFeed({ has_right: true }), placeholder: true, notStarted: true })
+         nav.listAnchor.mockResolvedValue(9)
+         nav.goTo.mockClear()
+         pickerHooks()!.onSelect("42")
+         await flush()
+         expect(nav.goTo).not.toHaveBeenCalled()
+      })
+
+      // …and the mirror of selectTokens' own rule rather than its opposite: a
+      // pane that was ALREADY resting is left resting there, so a pick that only
+      // moves the keyboard focus must not be the one thing that starts a lane.
+      it("leaves a pane that was already resting resting", async () => {
+         await boot()
+         // The reader surface holding a PLACEHOLDER: a positioned hash routes
+         // here, so `view` is "reader" while the pane shows no article.
+         nav.fromHash.mockResolvedValue({ ...showFeed({ has_right: true }), placeholder: true, notStarted: true })
+         hashTo("#0")
+         await flush()
+         expect(document.body.classList.contains("srr-view-list")).toBe(false)
+         expect(reader().classList.contains("srr-reader-empty")).toBe(true)
+         nav.switchFilter.mockResolvedValue({ ...showFeed({ has_right: true }), placeholder: true, notStarted: true })
+         nav.listAnchor.mockResolvedValue(9)
+         nav.goTo.mockClear()
+         pickerHooks()!.onSelect("42")
+         await flush()
+         expect(nav.goTo).not.toHaveBeenCalled()
+      })
+
+      // The W/S keymap and the two-finger cycle are the same lane change through
+      // a different door, so they carry the same follow-up.
+      it("carries the follow-up on the W/S filter cycle too", async () => {
+         await readingWhenPicked()
+         nav.getFilterEntries.mockReturnValue(["", "news", "sport"])
+         nav.cycleFilter.mockResolvedValue({ ...showFeed({ has_right: true }), placeholder: true, notStarted: true })
+         nav.listAnchor.mockResolvedValue(9)
+         nav.goTo.mockClear()
+         document.dispatchEvent(new KeyboardEvent("keydown", { key: "s", bubbles: true, cancelable: true }))
+         await flush()
+         expect(nav.cycleFilter).toHaveBeenCalled()
+         expect(nav.goTo).toHaveBeenCalledWith(9, false, true)
       })
    })
 

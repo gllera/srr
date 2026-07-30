@@ -281,7 +281,6 @@ export function render(o: IShowFeed) {
    entryTransition = null
    if (o.placeholder) return renderEmptyReader(o)
    painted = true
-   restingPane = false
    el.article.classList.remove("srr-reader-empty")
    const feed = data.db.feeds[o.article.f]
    // Source tint, source name, desk, title, permalink and dateline in one call —
@@ -391,7 +390,6 @@ export function render(o: IShowFeed) {
 // grab — are skipped. Everything above them is the same panel either way.
 function renderEmptyReader(o: IShowFeed, resting = false) {
    painted = false
-   restingPane = resting
    el.article.classList.add("srr-reader-empty")
    el.article.classList.remove("srr-reader-titleless")
    delete el.article.dataset.src
@@ -470,17 +468,15 @@ export function mountedArticle(): { chron: number; feedId: number } | null {
    return painted && mountedChron >= 0 ? { chron: mountedChron, feedId: mountedFeed } : null
 }
 
-// Is the pane showing the split view's RESTING panel (renderResting), as opposed
-// to a navigational placeholder in the reader surface? The two paint the same
-// panel and differ in what their armed Next MEANS: on a real placeholder pos is
-// -1 (nav.switchFilter put it there) and a →-step resolves the first match
-// itself, while the resting pane sits beside a list that has already seeded the
-// shared cursor — so stepping from it would skip whatever the list highlights.
-// app.ts routes the two apart on this flag; see its el.next handler.
-let restingPane = false
-export function isResting(): boolean {
-   return restingPane
-}
+// There USED to be a `restingPane` flag here, telling the split view's resting
+// panel apart from a navigational placeholder so app.ts could route their armed
+// Next differently: the placeholder's premise was "pos is -1 (nav.switchFilter
+// put it there), so a →-step resolves the first match itself". Under split that
+// premise is false for BOTH panels — they paint the same panel, and the list
+// beside either one has already seeded the shared cursor at the lane's anchor,
+// so nav.right() steps one PAST it. Distinguishing them just moved the skip from
+// one panel to the other. app.ts now asks the physical question instead
+// (`isSplit() && !hasArticle()`); see its el.next handler.
 
 // The split view's RESTING pane. Both surfaces are on screen there, so "nothing
 // open yet" is not an absence to hide — it is two thirds of the window, and a

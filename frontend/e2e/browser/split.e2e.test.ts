@@ -950,4 +950,101 @@ describe("browser: split view (two-pane desktop)", () => {
          await ctx.close()
       }
    })
+   // A lane change made from the READER surface goes through nav.switchFilter,
+   // which answers a never-opened lane with its "not started" placeholder. Under
+   // split that BLANKED two thirds of the window beside a list that had just
+   // built the lane and highlighted its first unread — and pressing the armed
+   // Next then stepped one PAST that highlight, opening the lane's SECOND
+   // article and marking the first read behind you. (The identical pick with the
+   // list focused landed the pane on it; `view` is invisible here.) Both halves
+   // are asserted: what the pane shows, and that the first article is still
+   // unconsumed when it does.
+   it("lands the pane on the new lane's first unread instead of blanking, without consuming it", async () => {
+      const ctx = await browser.createBrowserContext()
+      try {
+         const p = await ctx.newPage()
+         await p.setViewport({ width: 1280, height: 900 })
+         await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
+         await waitList(p)
+         await clickRow(p, "news title 5")
+         await waitReader(p)
+         const seenBefore = await p.evaluate(() => localStorage.getItem("srr-seen") ?? "")
+
+         // Sport has never been opened, so switchFilter has no resume position.
+         await p.evaluate(() => (document.querySelector(".srr-filter") as HTMLElement).click())
+         await p.waitForFunction(() => !document.querySelector<HTMLElement>(".srr-picker")!.hidden, { timeout: 10_000 })
+         await p.evaluate(() => {
+            const row = [...document.querySelectorAll(".srr-picker a")].find((e) => e.textContent?.includes("Sport"))
+            ;(row as HTMLElement | undefined)?.click()
+         })
+         await p.waitForFunction(() => document.querySelector(".srr-title")?.textContent === "sport title 0", {
+            timeout: 20_000,
+         })
+         // Not a placeholder, and the row it names is the one the list highlights.
+         expect(await p.evaluate(() => !!document.querySelector(".srr-reader.srr-reader-empty"))).toBe(false)
+         expect(await p.evaluate(() => document.querySelector(".srr-row-current .srr-row-title")?.textContent)).toBe(
+            "sport title 0",
+         )
+         // A lane change records NOTHING: the frontier is untouched, so the
+         // article now on screen is still the lane's first unread.
+         expect(await p.evaluate(() => localStorage.getItem("srr-seen") ?? "")).toBe(seenBefore)
+
+         // …and stepping on from it reaches the SECOND article, not the third.
+         await p.evaluate(() => (document.querySelector(".srr-next") as HTMLButtonElement).click())
+         await p.waitForFunction(() => document.querySelector(".srr-title")?.textContent === "sport title 1", {
+            timeout: 20_000,
+         })
+      } finally {
+         await ctx.close()
+      }
+   })
+
+   // A row swipe's mark-read moves the frontier the pane's pending pill counts
+   // against, but list.refresh() re-derives only the ROWS. Off split the reader
+   // fixed itself on its next arrival; under split there is no arrival, so the
+   // pill sat on its pre-swipe number beside rows that had visibly changed.
+   it("re-derives the reader's pending pill when a row swipe marks one read", async () => {
+      const ctx = await browser.createBrowserContext()
+      try {
+         const p = await ctx.newPage()
+         await p.setViewport({ width: 1280, height: 900, hasTouch: true })
+         await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
+         await waitList(p)
+         await clickRow(p, "news title 5")
+         await waitReader(p)
+         const pill = () => p.evaluate(() => document.querySelector(".srr-next-count")?.textContent ?? "")
+         const before = Number(await pill())
+         expect(before).toBeGreaterThan(0)
+
+         // The NEXT article after the cursor: ahead of it, so the pill counts it,
+         // and adjacent, so the swipe consumes exactly one — a frontier raise
+         // reads everything BEHIND the swiped row too, and "news title 8" would
+         // have taken 6 and 7 with it. Centre it first: a swipe needs the row
+         // under the finger.
+         const at = await p.evaluate(() => {
+            const row = [...document.querySelectorAll<HTMLElement>(".srr-list a.srr-row")].find(
+               (e) => e.querySelector(".srr-row-title")?.textContent === "news title 6",
+            )!
+            row.scrollIntoView({ block: "center" })
+            const r = row.getBoundingClientRect()
+            return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
+         })
+         // Stepped, because Chrome coalesces touchmove — the same drag the row
+         // swipe suite uses; 110px clears the 64px trigger.
+         const touch = await p.touchscreen.touchStart(at.x, at.y)
+         for (const step of [0.2, 0.5, 0.8, 1]) await touch.move(at.x - 110 * step, at.y)
+         await touch.end()
+
+         await p.waitForFunction(
+            (b) => (document.querySelector(".srr-next-count")?.textContent ?? "") !== b,
+            {
+               timeout: 20_000,
+            },
+            String(before),
+         )
+         expect(Number(await pill())).toBe(before - 1)
+      } finally {
+         await ctx.close()
+      }
+   })
 })

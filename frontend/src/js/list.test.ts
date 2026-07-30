@@ -1903,6 +1903,29 @@ describe("list", () => {
          ).toBe(true)
       })
 
+      // refresh() re-derives the ROWS, and that is all this module can do. A
+      // frontier move also invalidates the reader's pending pill and the tab's
+      // unread badge, which live above it — so it says so, the same injected way
+      // the ★ sink does. Both DIRECTIONS of the read toggle announce (each one
+      // moves the frontier), and the ★ swipe does NOT: it changes no frontier,
+      // and it already has its own sink.
+      it("announces a row swipe's frontier move to the other surface", async () => {
+         const moves: string[] = []
+         list.setFrontierSink(() => moves.push("moved"))
+         try {
+            setIndex(4, (c) => (c < 2 ? 1 : 2))
+            await list.render()
+            swipe($rows().find((r) => r.dataset.chron === "1")!, READ)
+            expect(moves).toEqual(["moved"])
+            swipe($rows().find((r) => r.dataset.chron === "1")!, READ) // back to unread
+            expect(moves).toEqual(["moved", "moved"])
+            swipe($rows().find((r) => r.dataset.chron === "3")!, SAVE)
+            expect(moves).toEqual(["moved", "moved"]) // a ★ moves no frontier
+         } finally {
+            list.setFrontierSink(() => {})
+         }
+      })
+
       it("a left swipe on a read row rewinds that feed alone (the explicit rewind)", async () => {
          setIndex(3)
          nav._setSeen({ "feed:1": 2 }) // everything read

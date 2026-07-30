@@ -118,6 +118,20 @@ export function setSavedSink(fn: (chron: number) => void): void {
    notifySavedChanged = fn
 }
 
+// "A row's READ state just moved" — the seen-frontier twin of the sink above,
+// injected for the same reason. refresh() below re-derives the ROWS, and that is
+// all it can do: the reader's pending pill counts the unread AHEAD of the cursor
+// and the tab title carries the store's unread badge, and neither is this
+// module's to write. Every other frontier gesture goes through
+// menus.afterFrontierMove, which reconciles both; the row swipe is the one that
+// does not, and off split that stayed invisible because the reader re-derives on
+// its next arrival and takes the badge with it. Under split there is no arrival:
+// the pill sits on screen beside the rows it disagrees with, permanently.
+let notifyFrontierMoved: () => void = () => {}
+export function setFrontierSink(fn: () => void): void {
+   notifyFrontierMoved = fn
+}
+
 // Freshness token: a new render() reassigns it so any in-flight load (or pending
 // observer callback) from the prior filter bails before touching the DOM — the
 // same discipline as dropdown's fill tokens and nav's prefetch.
@@ -471,6 +485,10 @@ function endRowSwipe(row: HTMLElement, dir: -1 | 0 | 1): void {
    // a row read in the reader does on the way back (show() → refresh()), and the
    // membership re-derives on the next natural rebuild.
    refresh()
+   // …but "on the way back" only covers what the LIST paints. A read toggle also
+   // moved the frontier the reader's pill and the unread badge are derived from,
+   // and under split the pane never leaves for a return path to fix them.
+   if (act.kind === "read") notifyFrontierMoved()
 }
 
 // The ★ Saved toggle, shared by the star tap and the → swipe so the two cannot
