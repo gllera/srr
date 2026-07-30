@@ -479,4 +479,118 @@ describe("browser: split pane width + visibility", () => {
       const wide = await tabWalk(page, ".srr-pane-grip")
       expect(wide.hits).toBeGreaterThan(0)
    })
+
+   // ── The hide controls ────────────────────────────────────────────────────
+   // Every case below starts from a CLEARED store and a REAL reload rather than
+   // inheriting: the cases above open an article (which under [ALL] raises every
+   // feed's frontier, so the unread-only list a later waitList waits for is
+   // legitimately empty), leave a dragged width in storage, and walk the tab
+   // order. None of that is state this group means to assert against.
+   const fresh = async () => {
+      await page.setViewport({ width: 1600, height: 900 })
+      await page.evaluate(() => localStorage.clear())
+      await page.goto(`${baseUrl}#!`, { waitUntil: "load" })
+      await page.reload({ waitUntil: "load" })
+      await page.waitForFunction(() => document.body.classList.contains("srr-split"), { timeout: 10_000 })
+      await waitList(page)
+   }
+   const label = (p: Page) => p.$eval(".srr-pane-toggle", (b) => b.getAttribute("aria-label"))
+   const expanded = (p: Page) => p.$eval(".srr-pane-toggle", (b) => b.getAttribute("aria-expanded"))
+
+   it("hides and restores from the toolbar button, and says which it will do", async () => {
+      await fresh()
+      expect(await reserved(page)).toBe(380)
+      expect(await label(page)).toBe("Hide list")
+
+      await page.click(".srr-pane-toggle")
+      expect(await reserved(page)).toBe(0)
+      // The button is the one control that brings the list back, so it stays
+      // hittable — and it stops claiming it will hide something. The NAME is the
+      // whole point: the glyph deliberately does not flip, because the pane's
+      // own presence already tells a sighted user which state they are in.
+      expect(await label(page)).toBe("Show list")
+      expect(await expanded(page)).toBe("false")
+
+      await page.click(".srr-pane-toggle")
+      expect(await reserved(page)).toBe(380)
+      expect(await label(page)).toBe("Hide list")
+      expect(await expanded(page)).toBe("true")
+   })
+
+   it("hides from the L key, and the pane AND its button come back that way after a reload", async () => {
+      await fresh()
+      await page.keyboard.press("l")
+      expect(await reserved(page)).toBe(0)
+      // A RELOAD, not a goto: the app rewrites the hash on boot, so a goto back
+      // to `#!` is a same-document navigation that re-runs no boot at all — it
+      // would re-read the state already in memory and call it "restored".
+      await page.reload({ waitUntil: "load" })
+      await waitList(page)
+      expect(await reserved(page)).toBe(0)
+      // Nothing was PRESSED to produce this state — restorePane stamped the
+      // class at boot — so the button has to describe a pane it never watched
+      // close.
+      expect(await label(page)).toBe("Show list")
+      expect(await expanded(page)).toBe("false")
+      await page.keyboard.press("l")
+      expect(await reserved(page)).toBe(380)
+      expect(await label(page)).toBe("Hide list")
+   })
+
+   it("refuses the L key below the breakpoint, where a stored hide would strand the desktop", async () => {
+      await fresh()
+      await page.setViewport({ width: 800, height: 900 })
+      // Wait for the BREAKPOINT, not just the resize: the viewport override and
+      // the matchMedia change that follows it are separate turns, and asserting
+      // in the gap tests a page that is still split.
+      await page.waitForFunction(() => !document.body.classList.contains("srr-split"), { timeout: 10_000 })
+      await page.keyboard.press("l")
+      expect(await page.evaluate(() => document.body.classList.contains("srr-pane-hidden"))).toBe(false)
+      // The STORED flag is the real damage, and it is invisible where it is
+      // written: pane.ts reads it back at any viewport, so a stray `l` on a
+      // phone would open the next desktop session with no list beside the
+      // article and nothing on screen saying why.
+      expect(await page.evaluate(() => localStorage.getItem("srr-pane-hidden"))).toBe(null)
+      await page.setViewport({ width: 1600, height: 900 })
+      await page.waitForFunction(() => document.body.classList.contains("srr-split"), { timeout: 10_000 })
+   })
+
+   it("un-hides for search, because the pinned bar rides the pane", async () => {
+      await fresh()
+      await page.click(".srr-pane-toggle")
+      expect(await reserved(page)).toBe(0)
+      await page.keyboard.press("/")
+      await page.waitForFunction(() => document.body.classList.contains("srr-searching"), { timeout: 10_000 })
+      // Without the un-hide the bar is "up" and 0px wide, off screen with the
+      // pane — holding the focus enterSearch just gave it.
+      expect(await reserved(page)).toBe(380)
+      const bar = await box(page, ".srr-searchbar")
+      const pane = await box(page, ".srr-list")
+      expect(bar!.width).toBe(pane!.width)
+      expect(bar!.left).toBe(0)
+      // …and the button agrees about what it would do next.
+      expect(await label(page)).toBe("Hide list")
+      await page.keyboard.press("Escape")
+   })
+
+   it("takes the hidden pane's rows out of the tab order, not merely off screen", async () => {
+      await fresh()
+      await page.click(".srr-pane-toggle")
+      // The obvious assertion — "the rows generate no boxes" — is FALSE here,
+      // deliberately: the pane stays laid out at its real width (the hide case
+      // above pins that, and it is what keeps the row heights list.ts measured
+      // valid), so every row still has a rect. What takes them out of the
+      // sequential focus order is the inherited `visibility: hidden`, and only
+      // the browser's own Tab can see that.
+      expect(await page.evaluate(() => document.querySelector(".srr-list a.srr-row")!.getClientRects().length)).toBe(1)
+      const gone = await tabWalk(page, ".srr-list a.srr-row")
+      expect(gone.stops, "the walk must actually reach controls to mean anything").toBeGreaterThan(10)
+      expect(gone.hits).toBe(0)
+      // …and the SAME walk finds them once the pane is back, so the zero above
+      // is a fact about the hidden state rather than about rows nothing can
+      // ever focus.
+      await page.click(".srr-pane-toggle")
+      const back = await tabWalk(page, ".srr-list a.srr-row")
+      expect(back.hits).toBeGreaterThan(0)
+   })
 })

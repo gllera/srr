@@ -807,11 +807,12 @@ describe("keyboard shortcuts dialog", () => {
    it("lists BOTH surfaces' bindings, grouped", () => {
       dropdown.showShortcutsDialog()
       const groups = [...$dialog()!.querySelectorAll(".srr-keys-group-title")].map((e) => e.textContent)
-      expect(groups).toEqual(["Anywhere", "List", "Reader"])
+      expect(groups).toEqual(["Anywhere", "List", "Reader", "Desktop"])
       const keys = [...$dialog()!.querySelectorAll("kbd")].map((e) => e.textContent)
       // A sample from each group — the card is the app's whole keymap, so a
-      // binding that exists on only one surface must still show up here.
-      expect(keys).toEqual(expect.arrayContaining(["/", "?", "Esc", "Enter", "Q", "E", "B", "U", "F"]))
+      // binding that exists on only one surface (or only above the split
+      // breakpoint, like L) must still show up here.
+      expect(keys).toEqual(expect.arrayContaining(["/", "?", "Esc", "Enter", "Q", "E", "B", "U", "F", "L"]))
       // Each row pairs its keys with what they do (a <dl>, so AT reads the pair).
       const terms = $dialog()!.querySelectorAll(".srr-keys-rows dt")
       expect(terms.length).toBe($dialog()!.querySelectorAll(".srr-keys-rows dd").length)

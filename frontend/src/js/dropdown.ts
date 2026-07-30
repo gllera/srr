@@ -385,6 +385,13 @@ const SHORTCUT_GROUPS: ReadonlyArray<{ title: string; rows: ReadonlyArray<[strin
          [["F"], "Open the original in a new tab"],
       ],
    },
+   // Its own group rather than a fourth "Anywhere" row: `L` works on both
+   // surfaces but only above the split breakpoint, and a key listed as working
+   // anywhere that does nothing on a phone is worse documentation than none.
+   {
+      title: "Desktop",
+      rows: [[["L"], "Hide or show the list pane"]],
+   },
 ]
 
 let shortcutsDialog: HTMLElement | null = null

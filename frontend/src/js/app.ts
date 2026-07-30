@@ -21,7 +21,7 @@ import * as menus from "./menus"
 import { loadMounts } from "./mounts"
 import * as nav from "./nav"
 import * as pager from "./pager"
-import { initPane } from "./pane"
+import { initPane, togglePane } from "./pane"
 import * as picker from "./picker"
 import { clearAllPins } from "./pin"
 import * as pinUI from "./pin-ui"
@@ -523,6 +523,26 @@ async function renderListSurface() {
    }
 }
 
+// The re-layout every pane geometry change ends with — the grip's settle, the
+// toolbar's toggle button, and the `L` key. It is the TAIL of the breakpoint
+// handler and nothing more: a resize or a hide crosses no breakpoint, so the
+// scroller, the surface visibility and the cursor ownership are all already
+// correct — only the list's measured row heights are stale, because rows re-wrap
+// at a new width.
+//
+// ONE body, because a second copy of a re-layout tail drifts: its callers differ
+// in what they have already established (the `L` key is gated on isSplit before
+// it gets here, initPane's onSettle is not), and that difference is exactly what
+// a hand-copied version quietly loses.
+function relayoutPane(): void {
+   list.invalidate()
+   if (view === "reader") {
+      // followCursor rebuilds the PANE beside the article; off split there is no
+      // pane to rebuild and the reader owns the whole window.
+      if (isSplit()) list.followCursor()
+   } else void renderListSurface()
+}
+
 // A well-formed reader position: the hash's position part (nav.hashPos) is a
 // bare integer. Shared by route() below and the boot foreign-hash guard.
 const INT_POS = /^-?\d+$/
@@ -851,19 +871,10 @@ async function init() {
       reReadReader()
       void syncUnreadBadge()
    })
-   // The pane's width + visibility (pane.ts). Its re-layout is the TAIL of the
-   // breakpoint handler below and nothing more: a resize crosses no breakpoint,
-   // so the scroller, the surface visibility and the cursor ownership are all
-   // already correct — only the list's measured row heights are stale, because
-   // rows re-wrap at a new width.
-   initPane({
-      onSettle: () => {
-         list.invalidate()
-         if (view === "reader") {
-            if (isSplit()) list.followCursor()
-         } else void renderListSurface()
-      },
-   })
+   // The pane's width + visibility (pane.ts), including the rail's toggle
+   // button, which pane.ts wires and keeps labelled. Every committed change ends
+   // in the shared re-layout tail above.
+   initPane({ onSettle: relayoutPane })
    onSplitChange(() => {
       applyScroller()
       list.invalidate()
@@ -1260,6 +1271,22 @@ async function init() {
       if (e.key === "?") {
          e.preventDefault()
          showShortcutsDialog()
+         return
+      }
+      // `L` puts the desktop list pane away (and brings it back). Surface-
+      // agnostic, so it belongs here rather than in KEY_ACTIONS: on the list
+      // surface with no live pane the branch below returns whatever the key was,
+      // and KEY_ACTIONS would never see it.
+      //
+      // Below the breakpoint this is a REFUSAL, not a no-op waiting to be
+      // tidied: there is no pane, and the flag pane.ts would store is read back
+      // at ANY viewport, so an accidental `l` on a phone would open the next
+      // desktop session with no list and nothing on screen saying why.
+      if (e.key === "l") {
+         if (!isSplit()) return
+         e.preventDefault()
+         togglePane()
+         relayoutPane()
          return
       }
       // On the list, the horizontal step keys move the selected (highlighted) row

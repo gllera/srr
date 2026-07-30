@@ -20,7 +20,6 @@ export const el = {
    toolbar: document.querySelector(".srr-toolbar") as HTMLElement,
    tbPane: document.querySelector(".srr-tb-pane") as HTMLElement,
    tbReader: document.querySelector(".srr-tb-reader") as HTMLElement,
-   paneToggle: document.querySelector(".srr-pane-toggle") as HTMLButtonElement,
    prev: document.querySelector(".srr-prev") as HTMLButtonElement,
    next: document.querySelector(".srr-next") as HTMLButtonElement,
    nextCount: document.querySelector(".srr-next-count") as HTMLElement,

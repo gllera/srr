@@ -1872,8 +1872,13 @@ body:not(.srr-split) .srr-pane-toggle {
    display: none;
 }
 /* Sidebar glyph: a bordered frame whose left column is filled — the pane, and
-   the page beside it. Task 5 swaps the label; the mark is stable either way,
-   since what it names is the pane, not the direction of the next press. */
+   the page beside it. Deliberately STABLE across the two states while pane.ts
+   swaps the accessible name (Hide list ⇄ Show list): what the mark names is the
+   pane, not the direction of the next press, and the pane's own presence is
+   already an unmissable indicator of which state you are in — so a glyph that
+   flipped would restate the layout and cost the button its value as a fixed
+   landmark. The NAME is where the state genuinely needs restating, because a
+   screen-reader user has no glance-at-the-layout equivalent. */
 .srr-pane-toggle-icon {
    display: inline-block;
    position: relative;
@@ -4130,9 +4135,9 @@ body.srr-split.srr-pane-hidden {
       display: none;
    }
    /* The grip has no edge to sit on; a 3px sliver at the window edge is not a
-      discoverable way back. The toolbar toggle and the L key are. (The class
-      itself arrives with the resize grip a later task adds — the hidden state
-      is stated in one place, so it states this here too.) */
+      discoverable way back. The toolbar toggle and the `L` key are — and both
+      of them live OUTSIDE the pane, which is the property that matters: every
+      way back has to survive the thing it brings back being gone. */
    & .srr-pane-grip {
       display: none;
    }

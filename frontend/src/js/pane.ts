@@ -5,10 +5,12 @@
 // this owns how wide the pane is and whether it is on screen. Imports only
 // keys.ts, so it stays unit-testable without a running pack server.
 //
-// STAGED: the CSS half has landed and the GRIP below now drives it (app.ts
-// calls initPane once at boot); the toolbar toggle and the L key arrive with
-// the hide-controls task, so togglePane still has only the grip's Enter for a
-// caller.
+// Four things change the pane's VISIBILITY, and only three of them are a press:
+// the rail's .srr-pane-toggle button (wired here), the grip's Enter/Space,
+// app.ts's `L` — and a DRAG past the collapse threshold, which puts the pane
+// away without anybody aiming at a hide control at all. That fourth one is why
+// the button's label is synced from applyHidden below rather than from the
+// committed setter.
 // Two custom properties, one written here and one derived in CSS:
 //   --split-pane-open-w  the width the pane is SET to. Written on <html> here,
 //                        never zero. tokens.css carries the default, because
@@ -43,6 +45,15 @@ export const PANE_COLLAPSE_W = 240
 export const PANE_MAX_W = 560
 
 const HIDDEN_CLASS = "srr-pane-hidden"
+
+// The rail's toggle button, cached at initPane. CACHED rather than looked up
+// per call because the sync below hangs off applyHidden, which a drag runs once
+// per animation frame — a querySelector there is a DOM query per frame for a
+// node that never moves. Null is a legal state, not an error: most of this
+// module's unit tests drive it with no markup at all, and the design harness
+// mounts panes without a toolbar, so the sync no-ops instead of the callers
+// having to remember a guard.
+let toggleBtn: HTMLButtonElement | null = null
 
 function lsSet(key: string, value: string | null): void {
    try {
@@ -109,6 +120,28 @@ export function isPaneHidden(): boolean {
 function applyHidden(on: boolean, persist: boolean): void {
    document.body.classList.toggle(HIDDEN_CLASS, on)
    if (persist) lsSet(PANE_HIDDEN_KEY, on ? "1" : null)
+   syncToggle()
+}
+
+// The button discloses a REGION, so aria-expanded (not aria-pressed) is its
+// state, and its accessible name has to say what the press will DO — "Hide list"
+// while the list is there, "Show list" while it is not. That name is the half
+// nothing else on screen carries: a sighted user reads the pane's presence off
+// the layout, which is exactly what a screen-reader user cannot do.
+//
+// It hangs off applyHidden, not off the committed setPaneHidden, because the
+// committed setter is not the only way the pane goes away: a drag past the
+// collapse threshold hides it through applyHidden DIRECTLY (it must — a mid-drag
+// frame cannot touch storage), and restorePane comes through the same door. One
+// level up would leave the button announcing "Hide list" over a pane the drag
+// just took off screen.
+function syncToggle(): void {
+   if (!toggleBtn) return
+   const hidden = isPaneHidden()
+   const label = hidden ? "Show list" : "Hide list"
+   toggleBtn.setAttribute("aria-expanded", hidden ? "false" : "true")
+   toggleBtn.setAttribute("aria-label", label)
+   toggleBtn.title = `${label} (L)`
 }
 
 // The committed toggle — the button, the keyboard shortcut. Always persists:
@@ -194,6 +227,16 @@ function settle(grip: HTMLElement, px: number): void {
 
 export function initPane(d: PaneDeps): void {
    deps = d
+   // BEFORE restorePane, which reaches applyHidden → syncToggle: a ref cached
+   // after it would miss the one state the button most needs to describe, the
+   // hidden pane a reload just restored. Wired before the grip lookup for the
+   // same reason it is queried separately — the button lives in the toolbar and
+   // must not depend on a document that happens to also have a grip.
+   toggleBtn = document.querySelector(".srr-pane-toggle") as HTMLButtonElement | null
+   toggleBtn?.addEventListener("click", () => {
+      togglePane()
+      deps.onSettle()
+   })
    restorePane()
    const grip = document.querySelector(".srr-pane-grip") as HTMLElement | null
    if (!grip) return

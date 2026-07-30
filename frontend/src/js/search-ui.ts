@@ -23,6 +23,7 @@
 import { el } from "./els"
 import * as list from "./list"
 import * as nav from "./nav"
+import { togglePane } from "./pane"
 import { isSplit } from "./split"
 
 export interface SearchDeps {
@@ -111,6 +112,17 @@ export function toggleSearch(): void {
 // where the pinned bar lives — search has always been a list filter mode.
 export async function enterSearch(): Promise<void> {
    if (!nav.searchAvailable()) return
+   // The pinned bar rides the PANE, at the pane's width — so over a hidden pane
+   // it is a 0px box (styles.css takes it off screen with the pane outright).
+   // Un-hiding is therefore a correctness rule, not a courtesy, and enterSearch
+   // is where it belongs: search is a LIST operation and this is the one funnel
+   // both the `/` key and the settings menu's row come through.
+   //
+   // Guarded on the breakpoint because OFF split the rule buys nothing and costs
+   // something: the bar is not pane chrome there, while the hidden flag is
+   // per-device rather than per-breakpoint — so an unguarded un-hide would let a
+   // search at phone width silently discard a preference the user set at desk.
+   if (isSplit()) togglePane(false)
    // A q: filter can already be active while the READER is showing (you opened
    // an article from the results and are walking the hits): `/` there means "take
    // me back to those results", not "start the query over".

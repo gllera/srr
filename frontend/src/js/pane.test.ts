@@ -257,6 +257,79 @@ describe("pane", () => {
       expect(localStorage.getItem(PANE_WIDTH_KEY)).toBe(null)
    })
 
+   // The button ships three assertions in index.html — an accessible name, an
+   // aria-expanded and an aria-keyshortcuts — and every one of them is a claim
+   // nothing kept true until something synced it. The NAME is the half that
+   // cannot be read off the class: it has to say what the press will do ("Hide
+   // list" over a pane that is there), which is the opposite of the state.
+   it("keeps the toggle button's label, title and aria-expanded in step", async () => {
+      document.body.innerHTML = `
+         <div class="srr-pane-grip"></div>
+         <button class="srr-pane-toggle" aria-expanded="true"></button>`
+      document.body.classList.add("srr-split")
+      const settled: number[] = []
+      const pane = await import("./pane")
+      pane.initPane({ onSettle: () => settled.push(1) })
+      const btn = document.querySelector(".srr-pane-toggle") as HTMLButtonElement
+
+      expect(btn.getAttribute("aria-expanded")).toBe("true")
+      expect(btn.getAttribute("aria-label")).toBe("Hide list")
+      expect(btn.title).toBe("Hide list (L)")
+
+      btn.click()
+      expect(pane.isPaneHidden()).toBe(true)
+      expect(btn.getAttribute("aria-expanded")).toBe("false")
+      expect(btn.getAttribute("aria-label")).toBe("Show list")
+      expect(btn.title).toBe("Show list (L)")
+      // A press is a committed gesture: it persists, and it asks for the one
+      // re-layout the grip's own Enter asks for.
+      expect(localStorage.getItem(PANE_HIDDEN_KEY)).toBe("1")
+      expect(settled.length).toBe(1)
+
+      btn.click()
+      expect(pane.isPaneHidden()).toBe(false)
+      expect(btn.getAttribute("aria-expanded")).toBe("true")
+      expect(btn.getAttribute("aria-label")).toBe("Hide list")
+      expect(settled.length).toBe(2)
+   })
+
+   // initPane restores BEFORE anything else, and restore reaches the same sync —
+   // so the cached ref has to be in place before that call. Cache it after and a
+   // reload into a hidden pane paints a button that still says "Hide list".
+   it("syncs the toggle when the state is restored from storage", async () => {
+      localStorage.setItem(PANE_HIDDEN_KEY, "1")
+      document.body.innerHTML = `<button class="srr-pane-toggle" aria-expanded="true"></button>`
+      document.body.classList.add("srr-split")
+      const pane = await import("./pane")
+      pane.initPane({ onSettle: () => {} })
+      const btn = document.querySelector(".srr-pane-toggle")!
+      expect(btn.getAttribute("aria-expanded")).toBe("false")
+      expect(btn.getAttribute("aria-label")).toBe("Show list")
+   })
+
+   // The path no press covers. applyDragWidth's collapse branch calls the class
+   // toggle DIRECTLY — it has to, because a mid-drag frame must not touch
+   // storage — so a sync wired into the committed setter alone leaves the button
+   // announcing "Hide list" over a pane the drag has just taken off screen.
+   it("syncs the toggle from a drag that collapses the pane", async () => {
+      document.body.innerHTML = `
+         <div class="srr-pane-grip"></div>
+         <button class="srr-pane-toggle" aria-expanded="true"></button>`
+      document.body.classList.add("srr-split")
+      const pane = await import("./pane")
+      pane.initPane({ onSettle: () => {} })
+      const btn = document.querySelector(".srr-pane-toggle")!
+
+      pane.applyDragWidth(pane.PANE_COLLAPSE_W - 1, 1600)
+      expect(pane.isPaneHidden()).toBe(true)
+      expect(btn.getAttribute("aria-expanded")).toBe("false")
+      expect(btn.getAttribute("aria-label")).toBe("Show list")
+      // …and dragging back out re-opens it: the same path, the other direction.
+      pane.applyDragWidth(400, 1600)
+      expect(btn.getAttribute("aria-expanded")).toBe("true")
+      expect(btn.getAttribute("aria-label")).toBe("Hide list")
+   })
+
    // A reset needs a gesture a drag cannot reach, and double-click is the one
    // every splitter in every OS uses. It is also the only path back to the
    // default, so nothing else would notice it drifting.

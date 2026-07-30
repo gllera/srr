@@ -202,7 +202,10 @@
             <span class="srr-tb-pane">
                <!-- Split-view only: collapse / restore the list pane. aria-expanded
                     (not aria-pressed) because it discloses a region, and
-                    aria-controls names it; pane.ts owns the label swap (Task 5). -->
+                    aria-controls names it. The attributes here are the OPEN
+                    state's; pane.ts owns the click and keeps all three in step
+                    from that point on, including the states no press produces
+                    (a drag collapse, a restore from storage). -->
                <button class="srr-pane-toggle" aria-expanded="true" aria-controls="srr-list" aria-keyshortcuts="l" aria-label="Hide list" title="Hide list (L)">
                   <span class="srr-pane-toggle-icon" aria-hidden="true"></span>
                </button>
