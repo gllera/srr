@@ -1394,7 +1394,20 @@ export async function show(anchorNow = false, onInteractive?: () => void): Promi
 // exactly this scroll when the row exists).
 export function followCursor(): void {
    const chron = nav.currentChron()
-   if (chron < 0) return
+   // A landing with NO cursor is still a landing. nav.switchFilter answers an
+   // unstarted lane with the armed "not started" placeholder at pos = -1, so
+   // picking a lane (or cycling to one with W/S) from the READER surface got
+   // here with nothing to follow and returned — leaving the pane on the PREVIOUS
+   // lane's rows while the toolbar readout and the hash both named the new one:
+   // 31 [ALL] rows under a "Sport" heading that has 15. Below the breakpoint that
+   // staleness is invisible and self-correcting (the list is display:none and
+   // rebuilds on return); under split the pane is on screen, and "it re-derives
+   // on its next open" is a promise about a surface that never closes. There is
+   // no row to anchor, so rebuild unanchored rather than early-returning.
+   if (chron < 0) {
+      if (builtKey !== nav.filterKey()) void show(true).catch(onError)
+      return
+   }
    // The same freshness gate show() applies, and for the same reason: a window
    // built for another filter — or invalidated (builtKey === null) — must
    // REBUILD, never merely be scrolled. Without this an invalidate() that is

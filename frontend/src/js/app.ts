@@ -168,7 +168,7 @@ async function enterReader() {
    // place in a long article that had been on screen the whole time. The test is
    // the MOUNTED chron, not nav.pos: the list moves that cursor too, and landing
    // somewhere new is a real navigation that must still render.
-   if (isSplit() && chron >= 0 && reader.mountedArticle() === chron) {
+   if (isSplit() && chron >= 0 && reader.mountedArticle()?.chron === chron) {
       showReader()
       return
    }
@@ -770,6 +770,21 @@ async function init() {
       applyScroller()
       list.invalidate()
       gestures?.resetScroll()
+      // Crossing INTO split: the PANE owns the cursor, because the pane is what
+      // you have been looking at and it keeps its article across the crossing
+      // (showList's split branch). Below the breakpoint the list is the only
+      // surface, so its rebuild legitimately claims the shared cursor — a search
+      // rebuild seats it on the newest hit — and that claim then arrived here
+      // naming an article the pane has never shown: read something at 800px with
+      // a query up, widen the window, and the arrows stepped from an invisible
+      // row while the reader showed something else entirely. Re-seat it on the
+      // mounted article FIRST, so everything below — both surface switchers, the
+      // chrome re-derive, followCursor, the list rebuild — reads one cursor.
+      // A no-op when they already agree, and when the pane holds no article.
+      if (isSplit()) {
+         const mounted = reader.mountedArticle()
+         if (mounted && nav.currentChron() !== mounted.chron) nav.select(mounted.chron, mounted.feedId)
+      }
       // Re-assert the LAYOUT for the new breakpoint — not a re-route. route()
       // would re-resolve the hash, and on a `#pos` that means guard() → a full
       // reader re-render: the article's DOM destroyed and its scroll thrown back

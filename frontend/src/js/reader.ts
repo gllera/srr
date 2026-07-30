@@ -188,6 +188,10 @@ const stateKey = (mid: string, chron: number): string => `${mid}:${chron}`
 // positions it is taking. chron -1 = nothing to harvest (boot, or an empty state).
 let mountedChron = -1
 let mountedMid = ""
+// The mounted article's FEED, tracked beside its chron for mountedArticle()'s
+// pair — nav.select needs both, and data.getFeedId(chron) would be a second
+// source of truth for something render() already has in hand.
+let mountedFeed = -1
 // State a restore has QUEUED but not yet applied (currentTime is only settable
 // once duration is known). Without this a second render of the same article
 // before the metadata lands — a re-route, a post-refresh re-probe — would
@@ -316,6 +320,7 @@ export function render(o: IShowFeed) {
    el.content.replaceChildren(buildContent(o.article, data.activeStore().base, { inert: false }))
    mountedChron = nav.currentChron()
    mountedMid = data.activeStore().mid
+   mountedFeed = o.article.f
    if (mountedChron >= 0) {
       restoreMediaState(mountedMid, mountedChron)
       // Tell the player what is on screen: a `play` in this article needs an
@@ -452,14 +457,17 @@ export function hasArticle(): boolean {
    return painted && !el.article.hidden && !el.article.classList.contains("srr-reader-empty")
 }
 
-// The chron this surface has MOUNTED, or -1 when it holds no article. Not
-// nav.pos: that is the shared cursor the list moves too, so under split the two
-// come apart routinely. The question this answers is narrower and physical —
-// "are these exact bytes already on screen?" — which is what lets split's
-// Escape treat re-entering the reader as a focus change rather than a
-// navigation, instead of re-rendering an article that never left.
-export function mountedArticle(): number {
-   return painted ? mountedChron : -1
+// What this surface has MOUNTED, or null when it holds no article. Not nav.pos:
+// that is the shared cursor the list moves too, so under split the two come
+// apart routinely. The question this answers is narrower and physical — "which
+// exact article is on screen?" — which is what lets split's Escape treat
+// re-entering the reader as a focus change rather than a navigation, and what
+// lets a breakpoint crossing hand the cursor back to the pane. The FEED rides
+// along because nav.select takes the pair: re-seating the cursor with a stale
+// feed id would leave the toolbar's readout and the save button describing an
+// article nothing is showing.
+export function mountedArticle(): { chron: number; feedId: number } | null {
+   return painted && mountedChron >= 0 ? { chron: mountedChron, feedId: mountedFeed } : null
 }
 
 // Is the pane showing the split view's RESTING panel (renderResting), as opposed

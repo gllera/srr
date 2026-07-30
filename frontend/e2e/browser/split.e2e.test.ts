@@ -712,6 +712,95 @@ describe("browser: split view (two-pane desktop)", () => {
       }
    })
 
+   // A lane change made from the READER surface lands on the armed "not started"
+   // placeholder (pos = -1) for an unstarted lane, which left followCursor with
+   // nothing to follow — so the pane kept the PREVIOUS lane's rows beside a
+   // toolbar readout naming the new one. Row COUNT is the discriminator: [ALL]
+   // has 31 here, Sport 15.
+   it("re-filters the list pane when the lane changes from the reader surface", async () => {
+      const ctx = await browser.createBrowserContext()
+      try {
+         const p = await ctx.newPage()
+         await p.setViewport({ width: 1280, height: 900 })
+         await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
+         await waitList(p)
+         await clickRow(p, "news title 5")
+         await waitReader(p)
+         const all = await p.evaluate(() => document.querySelectorAll(".srr-list a.srr-row").length)
+         expect(all).toBeGreaterThan(15)
+
+         // Pick a lane from the READER (view stays "reader": switchFilter keeps
+         // you on the picked lane's resume position).
+         await p.evaluate(() => (document.querySelector(".srr-filter") as HTMLElement).click())
+         await p.waitForFunction(() => !document.querySelector<HTMLElement>(".srr-picker")!.hidden, { timeout: 10_000 })
+         await p.evaluate(() => {
+            const row = [...document.querySelectorAll(".srr-picker a")].find((e) => e.textContent?.includes("Sport"))
+            ;(row as HTMLElement | undefined)?.click()
+         })
+         await p.waitForFunction(() => location.hash.includes("!"), { timeout: 10_000 })
+         await new Promise((r) => setTimeout(r, 900))
+
+         // The pane must already show the new lane — not on the next return to it.
+         const after = await p.evaluate(() => ({
+            view: document.body.classList.contains("srr-view-list") ? "list" : "reader",
+            rows: document.querySelectorAll(".srr-list a.srr-row").length,
+            titles: [...document.querySelectorAll(".srr-list .srr-row-title")].map((e) => e.textContent ?? ""),
+         }))
+         expect(after.view).toBe("reader")
+         expect(after.rows).toBeLessThan(all)
+         expect(after.titles.every((t) => t.startsWith("sport"))).toBe(true)
+      } finally {
+         await ctx.close()
+      }
+   })
+
+   // Below the breakpoint the list is the ONLY surface, so its rebuild
+   // legitimately claims the shared cursor — a search rebuild seats it on the
+   // newest hit. That claim then arrived back in split naming an article the pane
+   // has never shown: the arrows stepped from an invisible row while the reader
+   // showed something else. Crossing INTO split hands the cursor to the pane.
+   it("hands the cursor back to the pane when re-entering split", async () => {
+      const ctx = await browser.createBrowserContext()
+      try {
+         const p = await ctx.newPage()
+         await p.setViewport({ width: 1280, height: 900 })
+         await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
+         await waitList(p)
+         await clickRow(p, "news title 5")
+         await waitReader(p)
+         await p.keyboard.press("Escape") // list surface, article still beside it
+         await p.waitForFunction(() => document.body.classList.contains("srr-view-list"), { timeout: 10_000 })
+         // A query whose hits are all in the OTHER feed, so a list-side cursor
+         // claim is unmistakably not the article in the pane.
+         await p.keyboard.press("/")
+         await p.waitForFunction(() => location.hash.includes("q%3A") || location.hash.includes("q:"), {
+            timeout: 10_000,
+         })
+         await p.type(".srr-search-input", "sport")
+         await p.waitForFunction(() => document.querySelectorAll(".srr-list a.srr-row").length > 0, { timeout: 10_000 })
+         const before = await p.evaluate(() => ({
+            title: document.querySelector(".srr-title")?.textContent,
+            next: document.querySelector(".srr-next-count")?.textContent,
+         }))
+
+         await p.setViewport({ width: 800, height: 900 })
+         await new Promise((r) => setTimeout(r, 600))
+         await p.setViewport({ width: 1280, height: 900 })
+         await new Promise((r) => setTimeout(r, 900))
+
+         // The pane still shows its article AND its chrome still describes that
+         // article's place in the hit set — not the row the narrow list seated.
+         expect(
+            await p.evaluate(() => ({
+               title: document.querySelector(".srr-title")?.textContent,
+               next: document.querySelector(".srr-next-count")?.textContent,
+            })),
+         ).toEqual(before)
+      } finally {
+         await ctx.close()
+      }
+   })
+
    it("stays single-surface below the breakpoint (regression)", async () => {
       const ctx = await browser.createBrowserContext()
       try {

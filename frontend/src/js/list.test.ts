@@ -1031,6 +1031,27 @@ describe("list", () => {
          expect(() => list.followCursor()).not.toThrow()
       })
 
+      // …inert, but only while the window still fits the filter. A landing with
+      // NO cursor is still a landing: nav.switchFilter answers an unstarted lane
+      // with the armed "not started" placeholder at pos = -1, so a lane picked
+      // (or cycled to) from the READER surface arrived here with nothing to
+      // follow and returned — leaving the pane on the PREVIOUS lane's rows while
+      // the toolbar readout and the hash both named the new one. Below the
+      // breakpoint that staleness is invisible and self-correcting (display:none,
+      // rebuilt on return); the split pane never closes.
+      it("rebuilds for a new filter even with no cursor to follow", async () => {
+         setIndex(4)
+         await list.render()
+         const before = $rows()[0]
+         expect(before).toBeDefined()
+         nav._setPos(-1) // the placeholder landing: no cursor
+         list.invalidate() // …and the window no longer fits the filter
+         list.followCursor()
+         await Promise.resolve()
+         await Promise.resolve()
+         expect($rows()[0]).not.toBe(before)
+      })
+
       // The FAST path has to be observably fast: the two cases above pass just
       // as happily if followCursor always rebuilt, which is what made them
       // mutation-blind. A rebuild replaces the row elements, so identity is the
