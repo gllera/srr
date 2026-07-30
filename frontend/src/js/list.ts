@@ -1980,6 +1980,11 @@ function scrollRowIntoView(row: HTMLElement): void {
 // the reserve here then was correct; now skipping it parks the cursor row —
 // and everything the row's own affordances answer for, its ★ included —
 // underneath permanent chrome, where it can be neither seen nor pressed.
+// offsetHeight is also why this needs no safe-area arithmetic: the bar's own
+// bottom padding carries env(safe-area-inset-bottom), so the measurement
+// already includes it. The two places that state the SAME height as a literal
+// — the pane's padding-bottom and the grip's `bottom`, both in styles.css's
+// split block — do have to spell the inset out, and all three must agree.
 function toolbarInset(): number {
    const bar = document.querySelector<HTMLElement>(".srr-toolbar")
    return bar ? bar.offsetHeight : 0

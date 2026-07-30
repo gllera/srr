@@ -3913,22 +3913,38 @@ body.srr-split {
          gestures.ts returns early from the scroll auto-hide under .srr-split
          ("permanent chrome"), so its height is a constant: the 2.75rem tap
          target plus 0.3rem of padding each side, plus its 1px border, and then
-         1rem of breathing room under the last row. The PLAYER still needs no
-         reserve here — it starts at the pane's inner edge (the left-edge rules
-         below) and covers nothing of the pane. */
-      padding: 0 0.75rem calc(3.35rem + 1px + 1rem);
+         1rem of breathing room under the last row. The safe-area inset is part
+         of that height rather than decoration on top of it — the bar pads it
+         (`calc(0.3rem + env(safe-area-inset-bottom))`, and `padding-inline: 0`
+         below leaves that alone), which is why every other fixed-bottom lane in
+         this file already spells `3.35rem + 1px + env(…)` (the note above
+         .srr-player). A device with a home indicator that ALSO crosses this
+         breakpoint is not hypothetical — an iPad in landscape, ~21px — and a
+         reserve without the term is short by exactly that much, measured. The
+         PLAYER still needs no reserve here: it starts at the pane's inner edge
+         (the left-edge rules below) and covers nothing of the pane.
+         ⚠ This height is stated in THREE places that must agree: here, the
+         grip's `bottom` just below, and list.ts's toolbarInset(). That last one
+         reads the bar's real offsetHeight, so it carries the inset for free —
+         which is exactly why the two literals are the pair that drifts. */
+      padding: 0 0.75rem calc(3.35rem + 1px + 1rem + env(safe-area-inset-bottom));
    }
    /* The column rule. 7px of hit area around a 1px seam — the pane's own
       border-right is what you see at rest; this sits on top of it and only
       declares itself on hover or while dragging. Stops above the rail so the
-      two never overlap, which is why it needs no z-index contest with it.
+      two never overlap, which is why it needs no z-index contest with it —
+      and it sits on a HIGHER layer (--z-grip 7 over --z-toolbar 6), so a
+      `bottom` that under-states the rail's height doesn't merely overlap it,
+      it eats the rail's top edge for the pointer. That is why the safe-area
+      inset is in here too: same height, same three-site rule as the pane's
+      reserve above.
       `display: block` is the half that puts it in the tab order: the base rule
       above keeps it out of the document entirely below this breakpoint. */
    & .srr-pane-grip {
       display: block;
       position: fixed;
       top: 0;
-      bottom: calc(3.35rem + 1px);
+      bottom: calc(3.35rem + 1px + env(safe-area-inset-bottom));
       left: calc(var(--split-pane-w) - 3px);
       width: 7px;
       z-index: var(--z-grip);
@@ -3975,9 +3991,19 @@ body.srr-split {
       everything left of the window, which is exactly the box .srr-container
       centres in; centring the reader group in it therefore lands the arrows on
       the reading column's midline at any window width and any pane width.
-      No column-gap and no side padding, both load-bearing: either one shifts
-      track 2 and takes the reader group off that midline by half of it, and
-      the segments' own gaps space their controls anyway. justify-items must go
+      No column-gap and no side padding, both load-bearing — for DIFFERENT
+      reasons, so neither may be argued from the other. A gap `g` really does
+      take the group off that midline by half of it: track 2 then starts at
+      pane+g while the window's right edge does not move, so its midpoint is
+      (pane + g + W)/2. Symmetric side padding `p` does NOT — track 2 runs
+      [p + pane, W − p], midpoint p + pane + (W − 2p − pane)/2 = (pane + W)/2,
+      independent of p, the same cancellation html's own page padding gets.
+      What zeroing the padding buys is the SEGMENT identity: at the bar's
+      shipped 0.6rem sides the pane segment would run [9.6, 389.6] against a
+      pane at [0, 380], so the rail's left cell would no longer BE the pane it
+      names — the one thing every rule below is written on, and what
+      pane.e2e.test.ts pins as `seg.left === 0`.
+      The segments' own gaps space their controls anyway. justify-items must go
       to stretch because the bar's centring is written for BUTTONS, and these
       two children are grids that have to BE their tracks. */
    & .srr-toolbar {

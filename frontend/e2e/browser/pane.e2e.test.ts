@@ -31,12 +31,14 @@ const reserved = (p: Page) =>
 // Viewport-relative box of a selector — null when NOTHING MATCHES, which is not
 // the same as generating no box: a display:none element matches and hands back
 // an all-zero rect, so "is it laid out" is a getClientRects().length question.
+// Both axes, because the bar is a grid and half its contract (which ROW an item
+// lands on) is invisible to x alone.
 const box = (p: Page, sel: string) =>
    p.evaluate((s) => {
       const n = document.querySelector(s)
       if (!n) return null
       const r = n.getBoundingClientRect()
-      return { left: r.left, right: r.right, width: r.width }
+      return { left: r.left, right: r.right, width: r.width, top: r.top, height: r.height }
    }, sel)
 
 // The LAYOUT viewport width — the box every centred thing on the page is
@@ -303,10 +305,26 @@ describe("browser: split pane width + visibility", () => {
       expect(filter!.right).toBeLessThanOrEqual(380)
    })
 
-   it("centers the reader group on the full window while the pane is hidden", async () => {
+   it("centers the reader group on the full window while the pane is hidden, the pane segment clear of it", async () => {
       await page.evaluate(() => document.body.classList.add("srr-pane-hidden"))
       const grp = await box(page, ".srr-tb-reader")
       expect((grp!.left + grp!.right) / 2).toBeCloseTo(800, 0)
+      // That midpoint is NOT what the hidden state's restated template buys,
+      // and on its own it asserted nothing: .srr-tb-reader carries its own
+      // justify-content:center, so its contents land on 800 in whatever track
+      // it is given — including the whole-window track it falls into when the
+      // restatement is deleted and track 1 collapses to the zero reserve. What
+      // the restatement actually prevents is the pane segment being crushed
+      // into that zero track, and both halves of the damage are measurable:
+      // the segment overflows it (121.6px, measured, its box then starting
+      // inside the reader segment's) and its own controls collide inside it —
+      // the readout squeezed to 14.4px with the filter funnel painting over it,
+      // the one control that brings the list back.
+      const seg = await box(page, ".srr-tb-pane")
+      expect(seg!.right, "pane segment vs reader segment").toBeLessThanOrEqual(grp!.left)
+      const readout = await box(page, ".srr-feed")
+      const filter = await box(page, ".srr-filter")
+      expect(readout!.right, "readout vs the filter funnel beside it").toBeLessThanOrEqual(filter!.left)
       await page.evaluate(() => document.body.classList.remove("srr-pane-hidden"))
    })
 
@@ -315,7 +333,7 @@ describe("browser: split pane width + visibility", () => {
       expect(parseFloat(pad)).toBeGreaterThan(60)
    })
 
-   it("leaves the phone bar's control order untouched below the breakpoint", async () => {
+   it("leaves the phone bar's five controls in one row, in order, below the breakpoint", async () => {
       await page.setViewport({ width: 420, height: 900 })
       await page.goto(`${baseUrl}#!`, { waitUntil: "load" })
       await waitList(page)
@@ -323,17 +341,30 @@ describe("browser: split pane width + visibility", () => {
       const open = await box(page, ".srr-open-reader")
       const filter = await box(page, ".srr-filter")
       expect(open!.left).toBeLessThan(filter!.left)
-      // Reader surface: back at the left edge, filter still at the right.
+      // Reader surface: back · prev · next · save · filter, left to right. All
+      // FIVE, because the phone template names all five columns and a control
+      // left out of the check is a control whose named cell nothing reads.
       await page.evaluate(() => (document.querySelector(".srr-list a.srr-row") as HTMLElement)?.click())
       await page.waitForFunction(() => !(document.querySelector(".srr-reader") as HTMLElement).hidden, {
          timeout: 20_000,
       })
-      const back = await box(page, ".srr-back")
-      const filter2 = await box(page, ".srr-filter")
-      const next = await box(page, ".srr-next")
-      expect(back!.left).toBeLessThan(next!.left)
-      expect(next!.left).toBeLessThan(filter2!.left)
-      expect(filter2!.right).toBeGreaterThan(400 - 60)
+      const sels = [".srr-back", ".srr-prev", ".srr-next", ".srr-save", ".srr-filter"]
+      const bar = await box(page, ".srr-toolbar")
+      const ctl = await Promise.all(sels.map((s) => box(page, s)))
+      for (let i = 1; i < ctl.length; i++)
+         expect(ctl[i]!.left, `${sels[i]} right of ${sels[i - 1]}`).toBeGreaterThan(ctl[i - 1]!.left)
+      expect(ctl[4]!.right).toBeGreaterThan(400 - 60)
+      // …and on ONE row. The x-axis alone cannot see the failure this case
+      // exists for: strip the template's `grid-row: 1` declarations and
+      // auto-placement — whose cursor only moves forward — pushes back/prev/
+      // next/save onto a second row beneath a first holding only the filter,
+      // measured at ~103px against 54.6. Every left-to-right relation above
+      // still holds there, because each row is still ordered within itself.
+      // The shared top is the direct statement; the bar's own height is what
+      // catches the variant where all five agree on a row that is not the
+      // first, which a top-only check reads as fine.
+      for (const c of ctl) expect(c!.top, "every control on the bar's one row").toBe(ctl[0]!.top)
+      expect(bar!.height, "a one-row bar").toBeLessThan(70)
       await page.setViewport({ width: 1600, height: 900 })
    })
 

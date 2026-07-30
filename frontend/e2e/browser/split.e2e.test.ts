@@ -47,6 +47,26 @@ const visible = (p: Page, sel: string) =>
       return !!n && !n.hidden && n.getClientRects().length > 0
    }, sel)
 
+// What the topmost paint at a selector's own centre actually is — the question a
+// real coordinate click asks. Returns "ok", else the covering element's ancestor
+// chain, so a case guarded by this reports "the toolbar is over the row" instead
+// of timing out ten seconds later on the click's missing effect. The chain, not
+// the element: what lands under a cursor is usually an unclassed <path> inside
+// an icon, which names nothing on its own.
+const hitTest = (p: Page, sel: string) =>
+   p.evaluate((s) => {
+      const n = document.querySelector(s)
+      if (!n) return "no such element"
+      const r = n.getBoundingClientRect()
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+      if (!hit) return "nothing (off screen)"
+      if (n.contains(hit)) return "ok"
+      const chain: string[] = []
+      for (let e: Element | null = hit; e && chain.length < 4; e = e.parentElement)
+         chain.push(e.tagName.toLowerCase() + [...e.classList].map((c) => `.${c}`).join(""))
+      return chain.join(" < ")
+   }, sel)
+
 const clickRow = (p: Page, title: string) =>
    p.evaluate((t) => {
       const row = [...document.querySelectorAll(".srr-list a.srr-row")].find(
@@ -262,8 +282,19 @@ describe("browser: split view (two-pane desktop)", () => {
                // .srr-tb-reader, not .srr-toolbar: the bar is a full-width rail
                // now, and what has to land on the column is its READER SEGMENT
                // — the segment over the pane holds the list's own controls and
-               // is asserted against the pane in pane.e2e.test.ts. The identity
-               // under test is unchanged; only which box carries it moved.
+               // is asserted against the pane in pane.e2e.test.ts. Only the
+               // CENTRING half of that identity survived the move intact. The
+               // clearance below can no longer fail FOR THIS BOX: the rail's
+               // track 2 begins at exactly var(--split-pane-w), which is the
+               // pane's own width, so left === pane.right at every width in the
+               // sweep — and a template error that moved that edge would move
+               // the midline with it anyway, since the box's other edge is the
+               // window's. Clearance stays load-bearing for the other three,
+               // whose `left: var(--split-pane-w)` is a real declaration a
+               // deletion can take away: in the spine they are
+               // `left: 0; right: 0; margin: 0 auto`, i.e. centred on the whole
+               // window and painting over the pane below ~1440px, which is the
+               // bug this width sweep was written for.
                for (const sel of [".srr-tb-reader", ".srr-player", ".srr-snackbar", ".srr-pin-progress"])
                   bars[sel] = box(sel)
                return { col, pane, bars, pill: box(".srr-new-pill") }
@@ -281,7 +312,8 @@ describe("browser: split view (two-pane desktop)", () => {
                const barMid = (bar.left + bar.right) / 2
                const colMid = (m.col.left + m.col.right) / 2
                expect(Math.abs(barMid - colMid), `${sel} centre at ${width}px`).toBeLessThanOrEqual(1)
-               // …and never over the pane.
+               // …and never over the pane — live for the three fixed bars, an
+               // equality the rail's grid guarantees for .srr-tb-reader (above).
                expect(bar.left, `${sel} vs pane at ${width}px`).toBeGreaterThanOrEqual(m.pane.right)
             }
             // The arrivals pill is the LIST's affordance, so it goes the other
@@ -767,7 +799,17 @@ describe("browser: split view (two-pane desktop)", () => {
          await p.waitForFunction(() => !!document.querySelector(".srr-row-current.srr-row-saved"), { timeout: 10_000 })
          expect(await state()).toEqual({ rowStar: true, rowAria: "true", button: true })
 
-         // …and back from the row's own star.
+         // …and back from the row's own star. This press is a REAL coordinate
+         // click, never a synthetic .click(), because it is also the only thing
+         // in the suite that pins list.ts's toolbarInset() under split — the
+         // rail's height reserved at the bottom of the pane. "news title 5" is
+         // 26th of 31 rows, so followCursor scrolls it in from below and parks
+         // it flush against that reserve; drop the reserve (the retired
+         // `if (isSplit()) return 0`) and the row lands UNDER the rail, where
+         // this press hits the toolbar instead. Verified by planting exactly
+         // that: it fails here and nowhere else in the browser layer. State the
+         // geometry first so that failure reads as itself.
+         expect(await hitTest(p, ".srr-row-current .srr-row-star"), "the cursor row's ★ must be pressable").toBe("ok")
          await p.click(".srr-row-current .srr-row-star")
          await p.waitForFunction(() => !document.querySelector(".srr-save")?.classList.contains("srr-saved"), {
             timeout: 10_000,
