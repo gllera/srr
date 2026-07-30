@@ -3751,8 +3751,17 @@ html:has(body.srr-view-list) {
    mixes viewport-relative rects with the pane's scrollTop and assumes the two
    share an origin. */
 body.srr-split {
-   & .srr-container {
-      margin-left: var(--split-pane-w);
+   /* Reserve the pane's width at the PAGE level (body padding), so the reader
+      column's own `margin: 0 auto` centers it in the REMAINING width — a
+      margin-left on .srr-container would pin it against the pane instead (the
+      auto right margin absorbs all the slack). Fixed-position chrome (pane,
+      toolbar, player, search bar, snackbar) is viewport-anchored and unmoved. */
+   padding-left: var(--split-pane-w);
+   /* The pager's preview page must restate the same geometry, or a split-view
+      drag would preview the column ~a-gutter to the left of where the commit
+      lands it (its inner .srr-reader centers within the page's own padding). */
+   & .srr-pager-page {
+      padding-left: calc(var(--split-pane-w) + 1.5rem);
    }
    & .srr-list {
       position: fixed;
