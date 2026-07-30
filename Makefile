@@ -11,12 +11,14 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo deve
 # verify includes the fast jsdom e2e contract layer; the heavier headless-browser
 # layer (test-browser) is opt-in via test-e2e.
 #
-# verify-cloud is IN, not opt-in: cloud/worker/src/router.ts is the product's
-# authorization boundary, and a gate nothing runs is not a gate — CI executes
-# `make verify` and nothing else, so leaving it out meant those tests never ran
-# on a push. It is cheap to carry (~2s of vitest; its npm ci is stamp-guarded,
-# and build-cloud only re-stages the bundle verify-fe already built).
-verify: verify-fe verify-be test-contract verify-cloud
+#
+# verify-cloud is deliberately NOT here, and that is not the same as ungated:
+# ci.yml runs it as its own step beside this one. release.yml gates every
+# release artifact on `make verify`, so folding the worker in would have made a
+# wrangler/workerd/vitest-pool-workers breakage block shipping the srr BINARY —
+# coupling the backend's release to a Cloudflare toolchain it does not use.
+# Keep this target the frontend+backend contract release.yml means by it.
+verify: verify-fe verify-be test-contract
 # smoke-fe runs the built bundle through a fast, Chrome-free boot check — it
 # fails if Parcel dropped a build-time define, the regression that shipped a
 # bundle which threw on boot while every other gate stayed green.

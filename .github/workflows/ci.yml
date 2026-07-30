@@ -43,6 +43,12 @@ jobs:
     - uses: actions/checkout@v6
     - uses: ./.github/actions/setup-toolchain
     - run: make verify
+    # Its own step, not a verify prerequisite: cloud/worker/src/router.ts is the
+    # product's authorization boundary and its tests have to run on every push,
+    # but `make verify` is also release.yml's artifact gate — a broken Cloudflare
+    # toolchain must not block shipping the backend binary. Same job, so it costs
+    # a step (~2s of vitest plus a stamped npm ci), not a runner.
+    - run: make verify-cloud
 
   browser:
     runs-on: ubuntu-latest
