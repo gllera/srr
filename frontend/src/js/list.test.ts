@@ -1030,6 +1030,36 @@ describe("list", () => {
          // beforeEach leaves pos at -1: no current article, nothing to follow.
          expect(() => list.followCursor()).not.toThrow()
       })
+
+      // The FAST path has to be observably fast: the two cases above pass just
+      // as happily if followCursor always rebuilt, which is what made them
+      // mutation-blind. A rebuild replaces the row elements, so identity is the
+      // discriminator.
+      it("re-uses the built rows rather than rebuilding them", async () => {
+         setIndex(4)
+         await list.render()
+         const before = $rows()[0]
+         nav._setPos(Number(before.dataset.chron))
+         list.followCursor()
+         expect($rows()[0]).toBe(before)
+      })
+
+      // …and the freshness gate is load-bearing: an invalidate() (a breakpoint
+      // crossing, a frontier move) means the window on screen was built for a
+      // filter that no longer applies, so the cursor must REBUILD it — taking
+      // the fast path there left the pane on a stale row set whose observer had
+      // just been torn down, with infinite scroll dead for good.
+      it("rebuilds instead of scrolling when the window was invalidated", async () => {
+         setIndex(4)
+         await list.render()
+         const before = $rows()[0]
+         nav._setPos(Number(before.dataset.chron))
+         list.invalidate()
+         list.followCursor()
+         await Promise.resolve()
+         await Promise.resolve()
+         expect($rows()[0]).not.toBe(before)
+      })
    })
 
    it("anchors at the current position: newer ('next') rows above, older below", async () => {

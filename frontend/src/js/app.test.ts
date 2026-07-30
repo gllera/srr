@@ -587,7 +587,7 @@ describe("split view (body.srr-split)", () => {
          nav.goTo.mockClear()
          pickerHooks()!.onSelect("42")
          await flush()
-         expect(nav.goTo).toHaveBeenCalledWith(40, false) // record = false
+         expect(nav.goTo).toHaveBeenCalledWith(40, false, true) // record = false, replace = true
       })
 
       it("does nothing when the open article is still a member of the new lane", async () => {
@@ -609,7 +609,7 @@ describe("split view (body.srr-split)", () => {
          pickerHooks()!.onSelect("42")
          await flush()
          expect(nav.goTo).not.toHaveBeenCalled()
-         expect(nav.last).toHaveBeenCalledWith(false, false)
+         expect(nav.last).toHaveBeenCalledWith(true, false) // replace = true, record = false
       })
 
       it("leaves the pane alone in the narrow layout", async () => {
@@ -623,6 +623,25 @@ describe("split view (body.srr-split)", () => {
          expect(nav.goTo).not.toHaveBeenCalled()
          expect(nav.last).not.toHaveBeenCalled()
       })
+   })
+
+   // The loading veil dims the ARTICLE, which is the reader's own cue. Under
+   // split the list renders constantly beside a reader that is not loading at
+   // all, and the shared class dimmed that live article to 25% (and killed its
+   // pointer events) on every one of those renders.
+   it("does not dim the live pane while the LIST is loading", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
+      hashTo("#2")
+      await flush()
+      nav.currentChron.mockReturnValue(2)
+      let dimmedDuringListRender: boolean | null = null
+      list.show.mockImplementationOnce(async () => {
+         dimmedDuringListRender = document.body.classList.contains("srr-loading-reader")
+      })
+      hashTo("#!news")
+      await flush()
+      expect(dimmedDuringListRender).toBe(false)
    })
 
    // A Show-read flip or a frontier gesture made from the LIST surface shifts the

@@ -205,7 +205,11 @@ function hideSnackbar() {
 async function guard(fn: () => Promise<IShowFeed>) {
    const token = acquire()
    if (token === null) return
-   document.body.classList.add("srr-loading")
+   // Two veil classes, one progress bar: `srr-loading` is the shared top-edge
+   // bar, `srr-loading-reader` additionally dims the ARTICLE — which only this
+   // path may do. renderListSurface takes the first alone, because under split
+   // its list render happens beside a reader that is not loading at all.
+   document.body.classList.add("srr-loading", "srr-loading-reader")
    try {
       const o = await fn()
       // If this op was reclaimed as stale mid-flight (see acquire), a newer holder
@@ -219,7 +223,7 @@ async function guard(fn: () => Promise<IShowFeed>) {
    } catch (e) {
       if (token === busyToken) showError(e, () => guard(fn))
    } finally {
-      if (token === busyToken) document.body.classList.remove("srr-loading")
+      if (token === busyToken) document.body.classList.remove("srr-loading", "srr-loading-reader")
       release(token)
    }
 }
@@ -517,7 +521,10 @@ async function selectTokens(tokens: string[]) {
    // no-match placeholder the moment the bar opens empty.
    if (readerLive() && !nav.isSearchFilter()) {
       const anchor = await nav.listAnchor()
-      if (anchor !== beforeChron) await guard(() => (anchor < 0 ? nav.last(false, false) : nav.goTo(anchor, false)))
+      // replace, not push: goToList already pushed this filter change, and a
+      // second entry would make the first browser-back a visual no-op.
+      if (anchor !== beforeChron)
+         await guard(() => (anchor < 0 ? nav.last(true, false) : nav.goTo(anchor, false, true)))
    }
 }
 
@@ -708,7 +715,30 @@ async function init() {
       applyScroller()
       list.invalidate()
       gestures?.resetScroll()
-      void route(location.hash.substring(1))
+      // Re-assert the LAYOUT for the new breakpoint — not a re-route. route()
+      // would re-resolve the hash, and on a `#pos` that means guard() → a full
+      // reader re-render: the article's DOM destroyed and its scroll thrown back
+      // to the top just because the window crossed 1000px (and, if the mutex
+      // happened to be held, the whole crossing dropped instead, leaving the
+      // pane's visibility and the swapped scroller disagreeing). Both surface
+      // switchers are idempotent and already know both layouts, so calling the
+      // one for the CURRENT surface reconciles visibility, the toolbar's
+      // reader-only state and the resting pane without touching what is loaded.
+      // Chrome re-evaluates width queries against the PAGE BOX while printing,
+      // so Ctrl-P fires a crossing and its undo — which is exactly why this has
+      // to stay cheap and non-destructive rather than re-routing twice.
+      // Visibility FIRST and unconditionally — both switchers are idempotent and
+      // take no mutex, so a crossing can no longer be dropped wholesale (the
+      // pane hidden while the scroller had already been swapped to it).
+      if (view === "reader") showReader()
+      else showList()
+      // Then rebuild only what the new layout actually needs: the reader keeps
+      // its article and the pane comes along beside it (followCursor's own
+      // fallback builds it); the list surface re-renders through its normal
+      // guarded path.
+      if (view === "reader") {
+         if (isSplit()) list.followCursor()
+      } else void renderListSurface()
    })
    // Tell the SW its mounted roots BEFORE data.init() (the PWA0 fix, §5.1): the
    // roots come from the mount TABLE (valid pre-init), so a peer store's boot

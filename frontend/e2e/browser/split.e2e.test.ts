@@ -498,6 +498,97 @@ describe("browser: split view (two-pane desktop)", () => {
          const before = await p.evaluate(() => location.hash)
          await p.evaluate(() => document.querySelector<HTMLButtonElement>(".srr-next")?.click())
          await p.waitForFunction((h) => location.hash !== h, { timeout: 20_000 }, before)
+
+         // The bar reserves its OWN height in the pane: a short query adds the
+         // note line ("ne" is short enough to trigger it AND matches the news
+         // fixture), which wraps in a 380px pane, and a fixed reserve then left
+         // the bar sitting on the first rows.
+         await p.evaluate(() => {
+            const i = document.querySelector<HTMLInputElement>(".srr-search-input")!
+            i.value = "ne"
+            i.dispatchEvent(new Event("input", { bubbles: true }))
+         })
+         await p.waitForFunction(() => !document.querySelector<HTMLElement>(".srr-search-note")?.hidden, {
+            timeout: 20_000,
+         })
+         const clearance = await p.evaluate(() => {
+            const bar = document.querySelector(".srr-searchbar")!.getBoundingClientRect()
+            const row = document.querySelector(".srr-list a.srr-row")?.getBoundingClientRect()
+            return { barBottom: Math.round(bar.bottom), rowTop: row ? Math.round(row.top) : null }
+         })
+         expect(clearance.rowTop, "a row must be rendered to measure against").not.toBeNull()
+         expect(clearance.rowTop!).toBeGreaterThanOrEqual(clearance.barBottom)
+
+         // The bar rides the pane and stays up on the reader surface, so `/` has
+         // to CLOSE it from there too — the list-only toggle made it a one-way
+         // door under split: a pinned bar the key could no longer dismiss.
+         await p.keyboard.press("/")
+         await p.waitForFunction(() => !document.body.classList.contains("srr-searching"), { timeout: 20_000 })
+      } finally {
+         await ctx.close()
+      }
+   })
+
+   // A `#pos` deep link (a shared link, a restored session) is the one entry
+   // that never goes through the list surface: route()'s numeric branch makes no
+   // list call at all, and the pane is built by guard()'s followCursor instead.
+   // Nothing covered that seam, so a pane that failed to build behind an open
+   // article would have gone unnoticed.
+   it("builds the list pane beside a #pos deep link", async () => {
+      const ctx = await browser.createBrowserContext()
+      try {
+         const p = await ctx.newPage()
+         await p.setViewport({ width: 1280, height: 900 })
+         await p.goto(`${baseUrl}#7`, { waitUntil: "load" })
+         await waitReader(p)
+         expect(await visible(p, ".srr-list")).toBe(true)
+         // …with rows, and the deep-linked article marked as the cursor row.
+         await p.waitForFunction(
+            () => document.querySelector(".srr-list .srr-row-current")?.getAttribute("data-chron") === "7",
+            { timeout: 20_000 },
+         )
+      } finally {
+         await ctx.close()
+      }
+   })
+
+   // A breakpoint crossing must re-assert the LAYOUT without re-routing: the
+   // reader keeps its article, its DOM and its scroll position (Chrome
+   // re-evaluates width queries against the page box while printing, so Ctrl-P
+   // fires a crossing and its undo).
+   it("keeps the open article and its scroll across a breakpoint crossing", async () => {
+      const ctx = await browser.createBrowserContext()
+      try {
+         const p = await ctx.newPage()
+         await p.setViewport({ width: 1280, height: 900 })
+         await p.goto(`${baseUrl}#7`, { waitUntil: "load" })
+         await waitReader(p)
+         await p.evaluate(() => {
+            ;(document.querySelector(".srr-content") as HTMLElement).style.minHeight = "3000px"
+            window.scrollTo(0, 600)
+         })
+         const before = await p.evaluate(() => ({
+            y: window.scrollY,
+            hash: location.hash,
+            title: document.querySelector(".srr-title")?.textContent,
+         }))
+         expect(before.y).toBeGreaterThan(0)
+         await p.setViewport({ width: 800, height: 900 })
+         await new Promise((r) => setTimeout(r, 400))
+         await p.setViewport({ width: 1280, height: 900 })
+         await new Promise((r) => setTimeout(r, 600))
+         const after = await p.evaluate(() => ({
+            y: window.scrollY,
+            hash: location.hash,
+            title: document.querySelector(".srr-title")?.textContent,
+            split: document.body.classList.contains("srr-split"),
+            listShown: !document.querySelector<HTMLElement>(".srr-list")!.hidden,
+         }))
+         expect(after.title).toBe(before.title)
+         expect(after.hash).toBe(before.hash)
+         expect(after.split).toBe(true)
+         expect(after.listShown).toBe(true) // the pane is back, not left hidden
+         expect(after.y).toBeGreaterThan(0) // …and the article did not jump to the top
       } finally {
          await ctx.close()
       }

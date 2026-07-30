@@ -1101,14 +1101,17 @@ export async function switchFilter(token: string): Promise<IShowFeed> {
 }
 
 // Jump to chronIdx, snapping forward to next match if filter is active.
-export async function goTo(idx: number, record = true): Promise<IShowFeed> {
-   if (idx < 0 || idx >= data.db.total_art) return last(false, record)
+// `replace` is for a landing that FOLLOWS a navigation the caller already
+// pushed — the split view's lane-change follow-up, which would otherwise cost a
+// second history entry and make browser-back a visual no-op on the first press.
+export async function goTo(idx: number, record = true, replace = false): Promise<IShowFeed> {
+   if (idx < 0 || idx >= data.db.total_art) return last(replace, record)
    // ★ Saved has no value order to snap through: land on the exact saved article
    // (a list-row tap / deep-link always names a member), else fall back to the
    // front of the queue for a stale ~saved deep-link.
-   if (filter.saved) return isSaved(idx) ? resolve(idx, false, record) : first(false)
+   if (filter.saved) return isSaved(idx) ? resolve(idx, replace, record) : first(false)
    const found = await feedRight(idx)
-   return found === -1 ? last(false, record) : resolve(found, false, record)
+   return found === -1 ? last(replace, record) : resolve(found, replace, record)
 }
 
 // Move the navigation cursor to an exact, already-known-matching chronIdx — the

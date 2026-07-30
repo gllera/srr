@@ -6,6 +6,7 @@ type MQLListener = (e: { matches: boolean }) => void
 
 describe("split", () => {
    let matches: boolean
+   let printing: boolean
    let fire: MQLListener | null
 
    beforeEach(() => {
@@ -13,7 +14,12 @@ describe("split", () => {
       document.body.className = ""
       matches = false
       fire = null
+      printing = false
       vi.stubGlobal("matchMedia", (query: string) => {
+         // Two queries now: the breakpoint the module owns, and the print probe
+         // the crossing handler consults (Chrome re-evaluates width queries
+         // against the page box while printing).
+         if (query === "print") return { matches: printing, addEventListener: () => {} }
          expect(query).toBe("(min-width: 1000px)")
          return {
             matches,
@@ -50,6 +56,26 @@ describe("split", () => {
       fire!({ matches: true })
       expect(split.isSplit()).toBe(true)
       expect(seen).toEqual([false, true])
+   })
+
+   // Ctrl-P makes Chrome evaluate the width query against the PAGE BOX, firing a
+   // crossing and its undo for a window that never changed size. The class still
+   // follows the media — the single-surface layout is the better one to print —
+   // but the app's JS layout state (the list's scroller, its built window) must
+   // not churn twice per print.
+   it("keeps the class in step but does not notify listeners while printing", async () => {
+      matches = true
+      const split = await import("./split")
+      split.initSplit()
+      const seen: boolean[] = []
+      split.onSplitChange((on) => seen.push(on))
+      printing = true
+      fire!({ matches: false })
+      expect(document.body.classList.contains("srr-split")).toBe(false)
+      expect(seen).toEqual([])
+      fire!({ matches: true })
+      expect(document.body.classList.contains("srr-split")).toBe(true)
+      expect(seen).toEqual([])
    })
 
    it("is a silent no-op without matchMedia (old jsdom)", async () => {

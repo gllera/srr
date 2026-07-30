@@ -826,6 +826,7 @@ export function injectQueueChips(): void {
       // (replaceWith swaps the node, not its siblings) — re-derive its state.
       const existing = m.nextElementSibling
       if (existing instanceof HTMLButtonElement && existing.classList.contains("srr-queue-chip")) {
+         pairAnchor(m, existing, i)
          setChipState(existing, queuePos(mid, chron, i))
          syncChipOffstage(m, existing)
          continue
@@ -838,8 +839,24 @@ export function injectQueueChips(): void {
       bindChipMenu(chip, index)
       setChipState(chip, queuePos(mid, chron, i))
       m.insertAdjacentElement("afterend", chip)
+      pairAnchor(m, chip, i)
       syncChipOffstage(m, chip)
    }
+}
+
+// Bind a VIDEO's corner chip to THAT video, per pair. The stylesheet used one
+// shared `anchor-name` for every video and relied on "nearest preceding element
+// wins" — which is not the rule: CSS anchor positioning resolves a name to the
+// LAST element carrying it in tree order, so in an article with two or more
+// videos every chip stacked on the corner of the last one (measured: three
+// chips, one position). Names have to be unique per pair, and only JS can mint
+// them — the index the chips are already keyed by is exactly that. Audio chips
+// are in normal flow (no anchoring) and are left alone.
+function pairAnchor(m: HTMLMediaElement, chip: HTMLElement, index: number): void {
+   if (m.tagName !== "VIDEO") return
+   const name = `--srr-qmedia-${index}`
+   m.style.setProperty("anchor-name", name)
+   chip.style.setProperty("position-anchor", name)
 }
 
 // Re-derive every rendered chip after a queue mutation (a panel removal, a

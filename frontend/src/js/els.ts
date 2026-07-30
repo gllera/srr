@@ -26,6 +26,7 @@ export const el = {
    source: document.querySelector(".srr-source") as HTMLElement,
    date: document.querySelector(".srr-date") as HTMLElement,
    desk: document.querySelector(".srr-desk") as HTMLElement,
+   searchbar: document.querySelector(".srr-searchbar") as HTMLElement,
    searchInput: document.querySelector(".srr-search-input") as HTMLInputElement,
    searchClear: document.querySelector(".srr-search-clear") as HTMLButtonElement,
    searchNote: document.querySelector(".srr-search-note") as HTMLElement,

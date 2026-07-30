@@ -1047,19 +1047,17 @@ body.srr-playing .srr-pin-progress {
    .srr-chip-offstage from capture-phase play/pause listeners): queueing is a
    decision about a video you haven't started, so the control exists exactly
    when the decision does. Anchor positioning keeps the injector's sibling DOM —
-   no wrapper — and the shared anchor-name resolves each chip to its nearest
-   preceding video. */
+   no wrapper. The NAME is minted per pair by player.ts (pairAnchor): a shared
+   one resolves to the LAST element carrying it in tree order, not the nearest
+   preceding one, so two videos in an article stacked both chips on the second's
+   corner. */
 .srr-content video + .srr-queue-chip {
    display: flex;
    margin: 0.4rem 0 1rem auto;
 }
 @supports (anchor-name: --a) {
-   .srr-content video:has(+ .srr-queue-chip) {
-      anchor-name: --srr-qmedia;
-   }
    .srr-content video + .srr-queue-chip {
       position: absolute;
-      position-anchor: --srr-qmedia;
       top: calc(anchor(top) + 0.5rem);
       right: calc(anchor(right) + 0.5rem);
       width: 2.75rem;
@@ -2757,8 +2755,11 @@ html:has(body.srr-view-list) {
    border-top: 1px dashed var(--faint);
 }
 
-/* Loading */
-.srr-loading .srr-content {
+/* Loading. Dimming the article is the READER's cue, so it keys off the reader's
+   own veil class: under split the list pane renders constantly beside a reader
+   that is not loading at all, and the shared .srr-loading dimmed that live
+   article to 25% (and killed its pointer events) on every list render. */
+.srr-loading-reader .srr-content {
    opacity: 0.25;
    pointer-events: none;
 }
@@ -3852,7 +3853,11 @@ body.srr-split {
       border-bottom: 1px solid var(--faint);
       padding: 0.4rem 0.25rem;
    }
+   /* The bar's own height, published by search-ui (syncPaneReserve) — the note
+      line wraps to two or three lines in a 380px pane, and a fixed reserve then
+      leaves the bar sitting on the first rows. The literal is the fallback for
+      the paint before the first measurement. */
    &.srr-searching .srr-list {
-      padding-top: 3.2rem;
+      padding-top: var(--split-searchbar-h, 3.2rem);
    }
 }

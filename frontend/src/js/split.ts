@@ -18,6 +18,13 @@ export function initSplit(): void {
    apply(mql.matches)
    const onChange = (e: { matches: boolean }) => {
       apply(e.matches)
+      // Chrome evaluates width queries against the PAGE BOX while printing, so
+      // Ctrl-P fires a full crossing and its undo — twice the app's whole
+      // re-layout for a window that never changed size. The CLASS still follows
+      // the media (the single-surface layout is the better one to print), but
+      // the JS layout state — the list's scroller, its built window — is left
+      // exactly as the screen had it, in both directions of the pair.
+      if (typeof matchMedia === "function" && matchMedia("print").matches) return
       for (const fn of listeners) fn(e.matches)
    }
    // Safari < 14 has no addEventListener on MediaQueryList.

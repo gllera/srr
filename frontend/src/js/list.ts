@@ -1388,7 +1388,13 @@ export function followCursor(): void {
    // guard()'s render path.
    const row = builtKey === nav.filterKey() ? findRow(chron) : null
    if (!row) {
-      void show(true).catch(() => {})
+      // Report a failed rebuild instead of swallowing it. Under split this
+      // fallback IS the pane's only build path for a reader-side step, so a
+      // dropped pack left a permanently blank pane with no message and no
+      // retry — the one place a silent catch costs a whole surface. onError is
+      // the same seam a scroll-paging failure uses (app.ts: the popup, whose
+      // retry re-renders the list).
+      void show(true).catch(onError)
       return
    }
    refresh()

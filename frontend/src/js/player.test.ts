@@ -657,6 +657,25 @@ describe("playlist", () => {
       expect(chips()[1].getAttribute("aria-pressed")).toBe("true")
    })
 
+   // CSS anchor positioning resolves a name to the LAST element carrying it in
+   // tree order, NOT the nearest preceding one — a shared name put every corner
+   // chip on the last video's corner (measured in Chrome: three chips, one
+   // position). The names have to be minted per pair, and only JS can do that.
+   it("gives each video/chip pair its own anchor name", () => {
+      content().innerHTML = `<video src="a.webm"></video><video src="b.webm"></video>`
+      player.injectQueueChips()
+      const vids = [...content().querySelectorAll("video")]
+      const cs = chips()
+      expect(vids[0].style.getPropertyValue("anchor-name")).toBe("--srr-qmedia-0")
+      expect(vids[1].style.getPropertyValue("anchor-name")).toBe("--srr-qmedia-1")
+      expect(cs[0].style.getPropertyValue("position-anchor")).toBe("--srr-qmedia-0")
+      expect(cs[1].style.getPropertyValue("position-anchor")).toBe("--srr-qmedia-1")
+      // Audio chips are in normal flow — nothing to anchor.
+      content().innerHTML = `<audio src="a.mp3"></audio>`
+      player.injectQueueChips()
+      expect(content().querySelector("audio")!.style.getPropertyValue("anchor-name")).toBe("")
+   })
+
    it("a video's corner chip goes offstage while the video plays and returns on pause", () => {
       content().innerHTML = `<video src="v.webm" controls></video>`
       player.injectQueueChips()

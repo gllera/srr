@@ -93,7 +93,11 @@ function searchTokens(q: string, scope: string): string[] {
 }
 
 export function toggleSearch(): void {
-   if (d.view() === "list" && nav.isSearchFilter()) void exitSearch()
+   // Split view: the bar rides the PANE and stays up whichever surface has focus
+   // (syncSearchBar), so `/` from the reader has to be able to close it too —
+   // the strict list-only test made it a one-way door there, leaving a pinned
+   // bar and a live query the key could no longer dismiss.
+   if ((d.view() === "list" || isSplit()) && nav.isSearchFilter()) void exitSearch()
    else void enterSearch()
 }
 
@@ -152,6 +156,7 @@ export function syncSearchBar(): void {
    document.body.classList.toggle("srr-searching", on && (d.view() === "list" || isSplit()))
    if (!on) {
       el.searchNote.hidden = true
+      syncPaneReserve()
       return
    }
    const q = nav.searchQuery()
@@ -170,4 +175,17 @@ export function syncSearchBar(): void {
    else if (nav.searchTruncated()) note = "Showing the most recent matches — refine to reach older ones."
    el.searchNote.textContent = note
    el.searchNote.hidden = !note
+   syncPaneReserve()
+}
+
+// Under split the bar is FIXED over the pane's top, so the pane reserves its
+// height (styles.css). That height is not a constant: the note line above
+// appears for a short or truncated query and wraps to two or three lines in a
+// 380px pane, and a hard-coded reserve then leaves the bar sitting on the first
+// rows. Publish the measured height instead; the stylesheet keeps the one-line
+// value as its fallback for the paint before this runs.
+function syncPaneReserve(): void {
+   if (!isSplit()) return
+   const h = document.body.classList.contains("srr-searching") ? el.searchbar.offsetHeight : 0
+   document.documentElement.style.setProperty("--split-searchbar-h", h ? `${h}px` : "")
 }
