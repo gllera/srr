@@ -123,6 +123,14 @@
             <div class="srr-content"></div>
          </article>
          <div class="srr-list" id="srr-list" aria-label="Article list" hidden></div>
+         <!-- The column rule: the split pane's resize handle, and the round's one
+              new visual. A hairline between the list and the article that
+              thickens into the accent under the cursor. pane.ts stamps its ARIA
+              (role=separator + aria-value*) and owns the drag; it is empty here
+              so a narrow viewport renders nothing at all. It stops at the
+              toolbar's top edge, so the rail below reads as continuous and the
+              two never contend for a layer. -->
+         <div class="srr-pane-grip"></div>
          <!-- Filter picker overlay (ephemeral; not hash-routed). Opened by the
               toolbar's filter button (.srr-filter, both surfaces); a fixed
               full-viewport panel with its own scroll, so the list keeps its scroll

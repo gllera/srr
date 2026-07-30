@@ -2059,6 +2059,17 @@ body:not(.srr-split) .srr-pane-toggle {
    padding-bottom: 1rem;
    overflow-anchor: none;
 }
+/* The split pane's resize grip exists in the markup at every width, so its
+   RESTING state is "not here at all" — display:none, not a zero-height box.
+   The difference is the tab order: pane.ts stamps tabindex="0" unconditionally
+   (it has no business watching the breakpoint split.ts owns), and any rule that
+   merely made the grip invisible would leave a phone with a focusable control
+   nobody can see or use. display:none is what takes it out of the tab order,
+   which is why the split block below turns it back on with `display: block`
+   rather than by re-stating a box. */
+.srr-pane-grip {
+   display: none;
+}
 /* Day-strata divider — the list's TIME axis. A quiet sticky label (the wire
    voice: tracked mono, muted) + a hairline that rides the top of the viewport as
    you scroll a day's run, so depth in the archive stays readable. The boldness
@@ -3906,6 +3917,39 @@ body.srr-split {
          reserve here — it starts at the pane's inner edge (the left-edge rules
          below) and covers nothing of the pane. */
       padding: 0 0.75rem calc(3.35rem + 1px + 1rem);
+   }
+   /* The column rule. 7px of hit area around a 1px seam — the pane's own
+      border-right is what you see at rest; this sits on top of it and only
+      declares itself on hover or while dragging. Stops above the rail so the
+      two never overlap, which is why it needs no z-index contest with it.
+      `display: block` is the half that puts it in the tab order: the base rule
+      above keeps it out of the document entirely below this breakpoint. */
+   & .srr-pane-grip {
+      display: block;
+      position: fixed;
+      top: 0;
+      bottom: calc(3.35rem + 1px);
+      left: calc(var(--split-pane-w) - 3px);
+      width: 7px;
+      z-index: var(--z-grip);
+      cursor: col-resize;
+      /* The pointer stream must not be interrupted by scroll/zoom gestures. */
+      touch-action: none;
+      &::after {
+         content: "";
+         position: absolute;
+         inset: 0 3px;
+         background: transparent;
+         transition: background 0.15s;
+      }
+      &:hover::after,
+      &.srr-grip-active::after {
+         background: var(--accent);
+      }
+      &:focus-visible {
+         outline: 2px solid var(--accent);
+         outline-offset: 1px;
+      }
    }
    /* The measure keeps a gutter at ANY pane width — the same clamp idiom the
       snackbar already uses (`min(680px, calc(100% - 1.5rem))` above), where

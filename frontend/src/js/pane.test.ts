@@ -191,4 +191,89 @@ describe("pane", () => {
       expect(() => pane.restorePane()).not.toThrow()
       expect(openW()).toBe(`${pane.PANE_DEFAULT_W}px`)
    })
+
+   it("initPane restores, and steps the width from the keyboard", async () => {
+      document.body.innerHTML = `<div class="srr-pane-grip"></div>`
+      document.body.classList.add("srr-split")
+      const settled: number[] = []
+      const pane = await import("./pane")
+      pane.initPane({ onSettle: () => settled.push(1) })
+      expect(openW()).toBe("380px")
+
+      const grip = document.querySelector(".srr-pane-grip")!
+      const press = (key: string, shiftKey = false) =>
+         grip.dispatchEvent(new KeyboardEvent("keydown", { key, shiftKey, bubbles: true, cancelable: true }))
+
+      press("ArrowRight")
+      expect(openW()).toBe("396px")
+      press("ArrowLeft", true)
+      expect(openW()).toBe("332px")
+      press("Home")
+      expect(openW()).toBe(`${pane.PANE_MIN_W}px`)
+      press("End")
+      expect(openW()).toBe("560px")
+      press("Enter")
+      expect(pane.isPaneHidden()).toBe(true)
+      // Every committed step asks for one re-layout.
+      expect(settled.length).toBe(5)
+   })
+
+   it("publishes the grip's range and position for assistive tech", async () => {
+      document.body.innerHTML = `<div class="srr-pane-grip"></div>`
+      document.body.classList.add("srr-split")
+      const pane = await import("./pane")
+      pane.initPane({ onSettle: () => {} })
+      const grip = document.querySelector(".srr-pane-grip")!
+      expect(grip.getAttribute("aria-valuemin")).toBe(String(pane.PANE_MIN_W))
+      expect(grip.getAttribute("aria-valuemax")).toBe("560")
+      expect(grip.getAttribute("aria-valuenow")).toBe(String(pane.PANE_DEFAULT_W))
+      grip.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }))
+      expect(grip.getAttribute("aria-valuenow")).toBe("396")
+   })
+
+   // The grip reads what is ON SCREEN, never what is in storage. With storage
+   // blocked (private mode, quota) lsSet silently no-ops while the LAYOUT still
+   // applies, so a storage-sourced aria-valuenow announces 380 at a pane the eye
+   // sees at 412 — and a storage-sourced step never accumulates either. The
+   // SECOND press is what separates the two readings: from storage every press
+   // restates 396, from the applied property they add up.
+   it("steps and announces the width it applied, not the width it failed to store", async () => {
+      document.body.innerHTML = `<div class="srr-pane-grip"></div>`
+      document.body.classList.add("srr-split")
+      const pane = await import("./pane")
+      vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+         throw new Error("quota")
+      })
+      pane.initPane({ onSettle: () => {} })
+      const grip = document.querySelector(".srr-pane-grip")!
+      const press = () =>
+         grip.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }))
+      press()
+      expect(openW()).toBe("396px")
+      expect(grip.getAttribute("aria-valuenow")).toBe("396")
+      press()
+      expect(openW()).toBe("412px")
+      expect(grip.getAttribute("aria-valuenow")).toBe("412")
+      expect(localStorage.getItem(PANE_WIDTH_KEY)).toBe(null)
+   })
+
+   // A reset needs a gesture a drag cannot reach, and double-click is the one
+   // every splitter in every OS uses. It is also the only path back to the
+   // default, so nothing else would notice it drifting.
+   it("double-click resets to the default width, persists it, and settles once", async () => {
+      document.body.innerHTML = `<div class="srr-pane-grip"></div>`
+      document.body.classList.add("srr-split")
+      const settled: number[] = []
+      const pane = await import("./pane")
+      pane.initPane({ onSettle: () => settled.push(1) })
+      const grip = document.querySelector(".srr-pane-grip")!
+      grip.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true, cancelable: true }))
+      expect(openW()).toBe("560px")
+      settled.length = 0
+
+      grip.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }))
+      expect(openW()).toBe(`${pane.PANE_DEFAULT_W}px`)
+      expect(localStorage.getItem(PANE_WIDTH_KEY)).toBe(String(pane.PANE_DEFAULT_W))
+      expect(settled.length).toBe(1)
+   })
 })

@@ -5,10 +5,10 @@
 // this owns how wide the pane is and whether it is on screen. Imports only
 // keys.ts, so it stays unit-testable without a running pack server.
 //
-// STAGED: the CSS half has landed, but nothing CALLS this module yet — the grip
-// and the toolbar toggle arrive with the controls task. Until they do it writes
-// a property the stylesheet does read and toggles a class the stylesheet does
-// style, from nowhere.
+// STAGED: the CSS half has landed and the GRIP below now drives it (app.ts
+// calls initPane once at boot); the toolbar toggle and the L key arrive with
+// the hide-controls task, so togglePane still has only the grip's Enter for a
+// caller.
 // Two custom properties, one written here and one derived in CSS:
 //   --split-pane-open-w  the width the pane is SET to. Written on <html> here,
 //                        never zero. tokens.css carries the default, because
@@ -145,4 +145,126 @@ export function applyDragWidth(px: number, viewportW: number, opts: { persist?: 
 export function restorePane(): void {
    setPaneW(storedPaneW())
    applyHidden(lsGet(PANE_HIDDEN_KEY) === "1", false)
+}
+
+// ── The grip: the column rule between the wire and the page ──────────────────
+// A real ARIA window splitter (role=separator + aria-value*), driven by pointer
+// capture and by the keyboard. It writes --split-pane-open-w at most once per
+// frame during a drag, and persists + asks for a re-layout only on release:
+// rows genuinely re-wrap at a new width, so the list's virtualized window has
+// to re-measure — but once, not sixty times a second.
+
+const KEY_STEP = 16
+const KEY_STEP_BIG = 64
+
+interface PaneDeps {
+   onSettle(): void
+}
+
+let deps: PaneDeps = { onSettle: () => {} }
+let raf = 0
+let pendingW = 0
+
+// The width that is ON SCREEN, which is not always the width in storage: lsSet
+// swallows a private-mode/quota failure by design, and the layout applies
+// anyway. Sourcing the grip's own state from storage would then announce 380
+// forever at a pane the eye sees at 500, and step every arrow press from that
+// same stale 380 so the width could never accumulate. storedPaneW is the
+// fallback for the one moment the property is genuinely absent — before
+// restorePane's first write, or under a stylesheet that has never seen it.
+function appliedPaneW(): number {
+   const raw = parseFloat(document.documentElement.style.getPropertyValue("--split-pane-open-w"))
+   return Number.isFinite(raw) && raw > 0 ? raw : storedPaneW()
+}
+
+function publish(grip: HTMLElement): void {
+   const max = clampPaneW(Number.MAX_SAFE_INTEGER, window.innerWidth)
+   grip.setAttribute("aria-valuemin", String(PANE_MIN_W))
+   grip.setAttribute("aria-valuemax", String(max))
+   grip.setAttribute("aria-valuenow", String(Math.round(appliedPaneW())))
+}
+
+// Commit a width the user landed on: apply it, persist it, publish it, and ask
+// the app for one re-layout.
+function settle(grip: HTMLElement, px: number): void {
+   applyDragWidth(px, window.innerWidth, { persist: true })
+   publish(grip)
+   deps.onSettle()
+}
+
+export function initPane(d: PaneDeps): void {
+   deps = d
+   restorePane()
+   const grip = document.querySelector(".srr-pane-grip") as HTMLElement | null
+   if (!grip) return
+   grip.setAttribute("role", "separator")
+   grip.setAttribute("aria-orientation", "vertical")
+   grip.setAttribute("aria-label", "Resize the article list")
+   // Focusable unconditionally, and that is safe ONLY because the stylesheet
+   // display:none's the grip outside body.srr-split: a display:none element is
+   // not a tab stop, so below the breakpoint there is no invisible control to
+   // land on. Keep the two facts together — a CSS rule that made it merely
+   // invisible (visibility, opacity, a zero box) would put a phantom stop in
+   // every phone's tab order.
+   grip.setAttribute("tabindex", "0")
+   publish(grip)
+
+   grip.addEventListener("pointerdown", (e: PointerEvent) => {
+      if (e.button !== 0) return
+      e.preventDefault()
+      grip.setPointerCapture(e.pointerId)
+      grip.classList.add("srr-grip-active")
+   })
+
+   grip.addEventListener("pointermove", (e: PointerEvent) => {
+      if (!grip.hasPointerCapture(e.pointerId)) return
+      // One write per frame. clientX IS the width: the pane's left edge is 0.
+      pendingW = e.clientX
+      if (raf) return
+      raf = requestAnimationFrame(() => {
+         raf = 0
+         // No persist and no re-layout mid-drag — the pane's own width follows
+         // live, and the list re-measures once the drag stops moving.
+         applyDragWidth(pendingW, window.innerWidth)
+      })
+   })
+
+   const endDrag = (e: PointerEvent) => {
+      if (!grip.hasPointerCapture(e.pointerId)) return
+      grip.releasePointerCapture(e.pointerId)
+      grip.classList.remove("srr-grip-active")
+      if (raf) {
+         cancelAnimationFrame(raf)
+         raf = 0
+      }
+      settle(grip, e.clientX)
+   }
+   grip.addEventListener("pointerup", endDrag)
+   grip.addEventListener("pointercancel", endDrag)
+
+   // Back to the default. A reset needs a gesture that cannot be reached by
+   // dragging, and double-click is the one every splitter in every OS uses.
+   grip.addEventListener("dblclick", (e) => {
+      e.preventDefault()
+      settle(grip, PANE_DEFAULT_W)
+   })
+
+   grip.addEventListener("keydown", (e: KeyboardEvent) => {
+      const cur = appliedPaneW()
+      const step = e.shiftKey ? KEY_STEP_BIG : KEY_STEP
+      let next: number | null = null
+      if (e.key === "ArrowLeft") next = cur - step
+      else if (e.key === "ArrowRight") next = cur + step
+      else if (e.key === "Home") next = PANE_MIN_W
+      else if (e.key === "End") next = clampPaneW(Number.MAX_SAFE_INTEGER, window.innerWidth)
+      else if (e.key === "Enter" || e.key === " ") {
+         e.preventDefault()
+         togglePane()
+         deps.onSettle()
+         return
+      }
+      if (next === null) return
+      e.preventDefault()
+      settle(grip, next)
+   })
 }

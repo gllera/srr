@@ -21,6 +21,7 @@ import * as menus from "./menus"
 import { loadMounts } from "./mounts"
 import * as nav from "./nav"
 import * as pager from "./pager"
+import { initPane } from "./pane"
 import * as picker from "./picker"
 import { clearAllPins } from "./pin"
 import * as pinUI from "./pin-ui"
@@ -849,6 +850,19 @@ async function init() {
    list.setFrontierSink(() => {
       reReadReader()
       void syncUnreadBadge()
+   })
+   // The pane's width + visibility (pane.ts). Its re-layout is the TAIL of the
+   // breakpoint handler below and nothing more: a resize crosses no breakpoint,
+   // so the scroller, the surface visibility and the cursor ownership are all
+   // already correct — only the list's measured row heights are stale, because
+   // rows re-wrap at a new width.
+   initPane({
+      onSettle: () => {
+         list.invalidate()
+         if (view === "reader") {
+            if (isSplit()) list.followCursor()
+         } else void renderListSurface()
+      },
    })
    onSplitChange(() => {
       applyScroller()
