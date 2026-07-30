@@ -130,11 +130,12 @@ func TestSanitizeKeepsFootnoteRoundTrip(t *testing.T) {
 func TestSanitizeKeepsTTSSyncAttrs(t *testing.T) {
 	m := New()
 	item := &RawItem{Content: `<audio controls preload="none" data-tts-t="0,4.2,11.8" src="#/tts/abc.wav"></audio>` +
-		`<p data-tts="1">a</p><h2 data-tts="2">b</h2><li data-tts="3">c</li>`}
+		`<p data-tts="1">a</p><h2 data-tts="2">b</h2><li data-tts="3">c</li>` +
+		`<div DATA-TTS="7">u</div>`}
 	if err := m.Process(context.Background(), "#sanitize", item); err != nil {
 		t.Fatalf("sanitize: %v", err)
 	}
-	for _, want := range []string{`data-tts-t="0,4.2,11.8"`, `<p data-tts="1">`, `<h2 data-tts="2">`, `data-tts="3"`} {
+	for _, want := range []string{`data-tts-t="0,4.2,11.8"`, `<p data-tts="1">`, `<h2 data-tts="2">`, `data-tts="3"`, `data-tts="7"`} {
 		if !strings.Contains(item.Content, want) {
 			t.Errorf("missing %q in %q", want, item.Content)
 		}
@@ -143,8 +144,17 @@ func TestSanitizeKeepsTTSSyncAttrs(t *testing.T) {
 
 func TestSanitizeRejectsMalformedTTSSyncAttrs(t *testing.T) {
 	m := New()
+	// The `&#10;`-embedded-newline cases below pin two subtle properties: entity
+	// decoding happens BEFORE policy matching (so a literal newline reaches the
+	// regex, not the four raw characters "&#10;"), and Go's regexp `$` — unlike
+	// PCRE's — does not match just before a trailing/embedded newline, so it
+	// can't be used to smuggle extra content after one.
 	item := &RawItem{Content: `<audio controls data-tts-t="1,evil()" src="https://e.com/a.mp3"></audio>` +
-		`<p data-tts="x">a</p><p data-tts="12345">b</p><span data-tts="1">inline</span>`}
+		`<p data-tts="x">a</p><p data-tts="12345">b</p><span data-tts="1">inline</span>` +
+		`<audio data-tts-t="1,2&#10;x" src="https://e.com/b.mp3"></audio>` +
+		`<p data-tts="12&#10;">a</p>` +
+		`<audio data-tts="1" src="https://e.com/c.mp3"></audio>` +
+		`<p data-tts-t="1,2">x</p>`}
 	if err := m.Process(context.Background(), "#sanitize", item); err != nil {
 		t.Fatalf("sanitize: %v", err)
 	}
