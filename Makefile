@@ -1,4 +1,4 @@
-.PHONY: verify verify-fe verify-be check-admin-placeholder check-coverage-test fuzz-be lint-fe format-check-fe format-fe test-fe build-fe build-admin smoke-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-race-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design design-shots build-cloud verify-cloud smoke-cloud deploy-cloud
+.PHONY: verify verify-fe verify-be check-admin-placeholder check-coverage-test fuzz-be lint-fe format-check-fe format-fe test-fe build-fe build-admin smoke-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-race-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design design-shots build-cloud verify-cloud smoke-cloud deploy-cloud build-reader check-reader-config deploy-reader
 
 SHELL := /bin/bash -e
 
@@ -112,7 +112,18 @@ cloud/worker/wrangler.toml:
 	cp cloud/worker/wrangler.example.toml $@
 	@echo "note: created $@ from the example — edit it before deploying"
 
-build-cloud: build-fe
+# The env is set EXPLICITLY rather than inherited, and build-fe is invoked as a
+# sub-make rather than named as a prerequisite. Both are about the sibling
+# target below: build-reader stages the same bundle built the OPPOSITE way
+# (absolute cdn-url), and a shared prerequisite would run build-fe ONCE for
+# `make build-cloud build-reader` and stage identical bytes into both.
+#
+# SRR_CONFIG_INLINE='{}' (the idiom `generate` uses) is the other half: with
+# SRR_CDN_URL merely unset, resolve-cdn-url falls through to `cdn-url:` in the
+# HOST's ~/.config/srr/srr.yaml — so on an operator's box this staged an
+# absolute-CDN bundle while claiming to be the relative one.
+build-cloud:
+	SRR_CDN_URL= SRR_CONFIG_INLINE='{}' $(MAKE) build-fe
 	rm -rf cloud/worker/public
 	mkdir -p cloud/worker/public
 	cp -r dist/srrf/. cloud/worker/public/
@@ -137,6 +148,39 @@ deploy-cloud: verify-cloud
 	@grep -v '^[[:space:]]*#' cloud/worker/wrangler.toml | grep -q "example\.com" \
 	   && { echo "refusing to deploy: cloud/worker/wrangler.toml still holds example.com placeholders"; exit 1; } || true
 	cd cloud/worker && npx wrangler deploy
+
+# --- the hosted reader Worker (cloud/worker, src/reader.ts) -----------------
+# The gate and the shell on ONE origin: this Worker serves the reader bundle as
+# its own assets, so there is no second address answering the same bytes around
+# the login. Config in cloud/worker/wrangler.reader.toml (tracked — it names no
+# hostname); the four runtime values are `wrangler secret put`.
+#
+# The bundle is built WITH an absolute cdn-url: the packs live on the CDN origin
+# and this reader fetches them cross-origin, which is the whole difference from
+# build-cloud's relative build above.
+build-reader:
+	@test -n "$(SRR_CDN_URL)" || { echo "build-reader needs SRR_CDN_URL — the pack origin this reader fetches from."; \
+	  echo "Without it the bundle resolves PACK_BASE relative to its own origin, where there are no packs."; exit 1; }
+	SRR_CDN_URL="$(SRR_CDN_URL)" $(MAKE) build-fe
+	rm -rf cloud/worker/public-reader
+	mkdir -p cloud/worker/public-reader
+	cp -r dist/srrf/. cloud/worker/public-reader/
+	rm -f cloud/worker/public-reader/_headers
+
+# Checked BEFORE verify-cloud so a missing value costs a second rather than two
+# frontend builds. Prerequisites run left to right (this repo never builds -j).
+check-reader-config:
+	@test -n "$(SRR_WORKER_ROUTE)" || { echo "refusing to deploy: SRR_WORKER_ROUTE is unset."; \
+	  echo "It is the route pattern this Worker answers (e.g. 'reader.example.com/*'); the zone is inferred from it."; \
+	  echo "It lives in CI secrets, not in this repo — see cloud/worker/wrangler.reader.toml."; exit 1; }
+	@test -n "$(SRR_CDN_URL)" || { echo "refusing to deploy: SRR_CDN_URL is unset (see build-reader)"; exit 1; }
+
+# DEPLOY: unlike deploy-cloud, this one is CI's — release.yml runs it on a tag,
+# because the reader must not lag its own release. verify-cloud is the package
+# gate (it type-checks and tests src/reader.ts along with everything else).
+deploy-reader: check-reader-config verify-cloud
+	$(MAKE) build-reader
+	cd cloud/worker && npx wrangler deploy -c wrangler.reader.toml --route "$(SRR_WORKER_ROUTE)"
 
 vet-be test-be:
 	cd backend && go $(@:-be=) ./...

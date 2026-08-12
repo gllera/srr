@@ -36,7 +36,13 @@
 # .dev.vars carries the session secret and the tenant roster (personal data).
 # Both have committed templates: wrangler.example.toml and .dev.vars.example,
 # and `make` materializes wrangler.toml from its example when absent.
+#
+# public-reader/ is the same generated bundle for the hosted reader Worker
+# (`make build-reader`, absolute cdn-url). Its wrangler.reader.toml IS tracked,
+# unlike the one above: it deliberately names no route, so it carries nothing
+# about where this is deployed — CI supplies the hostname at deploy time.
 /cloud/worker/public/
+/cloud/worker/public-reader/
 /cloud/worker/node_modules/
 /cloud/worker/.wrangler/
 /cloud/worker/.dev.vars
