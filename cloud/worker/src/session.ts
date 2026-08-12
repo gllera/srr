@@ -1,12 +1,12 @@
 // This worker's OWN session — the cookie it mints once the IdP has vouched for
 // an identity, and the gate every request reads.
 //
-// It is deliberately NOT the estate's session. auth.32b.io's cookie is
-// `__Host-sess`, host-only to auth.32b.io by construction, so no product can
-// read it and none is meant to: a consumer holding a cookie the IdP signed
-// cannot tell a session from a plant, which is the hole the `__Host-` prefix
-// closed by making the cookie unreachable. Speaking OIDC and minting our own is
-// the whole answer; there is no second, cheaper one.
+// It is deliberately NOT the IdP's session. That cookie carries the `__Host-`
+// prefix, which forbids a Domain attribute and so pins it host-only to the IdP:
+// no product can read it, and none is meant to. A consumer holding a cookie the
+// IdP signed cannot tell a real session from a planted one, and making the
+// cookie unreachable is exactly how that hole was closed. Speaking OIDC and
+// minting our own is the whole answer; there is no second, cheaper one.
 //
 // KNOW THE LIMIT: verifying locally does not honour a sign-out at the IdP. Only
 // this token's own `exp` ends it. That is the deliberate cost of a confidential
