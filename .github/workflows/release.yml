@@ -9,17 +9,16 @@ on:
 permissions:
   contents: write
 
-# Serialize the Cloudflare deploys (Pages, and the reader Worker) so overlapping
-# tag pushes don't race to publish; let an in-flight deploy finish rather than
-# cancelling it.
+# Serialize the reader deploy so overlapping tag pushes don't race to publish;
+# let an in-flight deploy finish rather than cancelling it.
 concurrency:
-  group: pages
+  group: reader-deploy
   cancel-in-progress: false
 
 jobs:
   # Gate every release artifact on a green `make verify` (lint + format + tests +
   # build + the boot smoke + the e2e contract layer). Without this, a tag push
-  # publishes binaries and deploys the frontend to Pages without the build ever
+  # publishes binaries and deploys the reader without the build ever
   # passing its own gates — exactly how a frontend that fails its tests (or a
   # bundle that doesn't boot) could reach production.
   verify:
@@ -70,8 +69,10 @@ jobs:
     # store root. Built with NO cdn-url (deliberately no SRR_CONFIG_INLINE here),
     # so resolve-cdn-url.js falls back to "." — the shell fetches packs relative
     # to its own index.html and is origin-portable: it renders from whatever
-    # store root it's installed into. (The `cf-pages` job below keeps the absolute
-    # cdn-url; there the hosted reader and the packs live on different origins.)
+    # store root it's installed into. (`deploy-reader` below builds the OPPOSITE
+    # way, with an absolute cdn-url: there the reader and the packs live on
+    # different origins. Same bundle, two builds — do not share one between
+    # these jobs, which is the trap `make build-reader` is written against.)
     - run: make build-fe
     - run: tar czf srrf.tar.gz -C dist/srrf .
     - uses: softprops/action-gh-release@v3
@@ -80,51 +81,16 @@ jobs:
           dist/srr-*
           srrf.tar.gz
 
-  cf-pages:
-    needs: [verify, browser]
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    environment: ci
-    env:
-      # Build WITH the absolute cdn-url so PACK_BASE is the pack store origin:
-      # this Cloudflare Pages deployment is the reader ONLY and fetches packs
-      # cross-origin. SRR_CDN_URL is the highest-precedence cdn-url source in
-      # resolve-cdn-url.js (env → config `cdn-url:` → "."). (The srrf.tar.gz
-      # Release asset is built with NO cdn-url for same-origin self-hosting —
-      # don't deploy that one here, it would 404 on db.gz against the Pages
-      # origin.)
-      SRR_CDN_URL: ${{ secrets.SRR_CDN_URL }}
-      # The build's version label (config footer / transformer-define.js's
-      # SRR_VERSION): the tag on tag builds, the branch name on manual dispatch.
-      VERSION: ${{ github.ref_name }}
-    steps:
-    - uses: actions/checkout@v6
-    - uses: ./.github/actions/setup-toolchain
-      with:
-        go: "false"
-    - run: make build-fe
-    # Direct Upload the built SPA (dist/srrf) to Cloudflare Pages. --branch=main
-    # marks it a production deploy — it must equal the project's configured
-    # production branch, and tag pushes carry no branch context so it's passed
-    # explicitly. Needs repo/ci-environment secrets CLOUDFLARE_API_TOKEN (token
-    # scoped to Account → Cloudflare Pages → Edit) and CLOUDFLARE_ACCOUNT_ID.
-    - uses: cloudflare/wrangler-action@v4
-      with:
-        apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        command: pages deploy dist/srrf --project-name=srr-frontend --branch=main
-
   # The hosted reader as a Worker that both GATES the reader (OIDC against the
-  # estate's IdP) and SERVES it — cloud/worker/src/reader.ts. It replaces
-  # cf-pages above rather than joining it: a static origin behind a gate has a
-  # documented way around the gate, which is the second address the same bytes
-  # answer at.
+  # estate's IdP) and SERVES it — cloud/worker/src/reader.ts.
   #
-  # ⚠ BOTH JOBS RUN DURING THE CUTOVER, deliberately. Until the reader's
-  # hostname is moved off the Pages project, that project IS the live reader and
-  # deleting this job would freeze it at whatever version was last tagged. The
-  # order is: this job deploys the Worker → the operator moves the hostname →
-  # cf-pages and its project are deleted. Delete this comment with it.
+  # It REPLACED a `cf-pages` job that Direct-Uploaded dist/srrf to a Cloudflare
+  # Pages project, which was the whole reader deploy until 2026-08-12. Both ran
+  # for exactly one release cycle, on purpose: until the reader's hostname moved
+  # off that project, the project WAS the live reader and dropping its job would
+  # have frozen it at the last tag. The hostname moved, the project is deleted,
+  # and the job went with it — a deploy job pointing at a project that no longer
+  # exists fails every future release for a reason nobody would look for here.
   #
   # Needs, in the `ci` environment: SRR_WORKER_ROUTE (the route pattern, e.g.
   # `reader.example.com/*` — the one piece of deployment identity this public

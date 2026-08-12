@@ -106,7 +106,7 @@ app  -->  {gestures, dropdown, pin, refresh, sync, fmt}
 
 Two supported shapes, both built by `release.yml` on version tags (`v*.*.*`) or manual trigger:
 
-- **Hosted reader** (cross-origin packs): the `cf-pages` job builds with the `SRR_CDN_URL` secret from the `ci` environment and deploys `dist/srrf/` to Cloudflare Pages.
+- **Hosted reader** (cross-origin packs): the `deploy-reader` job builds with the `SRR_CDN_URL` secret from the `ci` environment and deploys `dist/srrf/` as the assets of a Cloudflare Worker (`cloud/worker/src/reader.ts`) that gates the shell behind OIDC and serves it. One origin for the gate and the bytes, so there is no second address answering around the login.
 - **Self-hosted from the store root** (same origin): the `release` job attaches the SPA as `srrf.tar.gz` built with **no** cdn-url, so packs resolve relative to `index.html`; install it into a store root next to `db.gz` with `srr frontend update`.
 
 ## Stack
