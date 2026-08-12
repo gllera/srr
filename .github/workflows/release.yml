@@ -9,8 +9,8 @@ on:
 permissions:
   contents: write
 
-# Serialize Cloudflare Pages deploys so overlapping tag pushes don't race to
-# publish the production deployment; let an in-flight deploy finish rather than
+# Serialize the Cloudflare deploys (Pages, and the reader Worker) so overlapping
+# tag pushes don't race to publish; let an in-flight deploy finish rather than
 # cancelling it.
 concurrency:
   group: pages
@@ -113,3 +113,55 @@ jobs:
         apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         command: pages deploy dist/srrf --project-name=srr-frontend --branch=main
+
+  # The hosted reader as a Worker that both GATES the reader (OIDC against the
+  # estate's IdP) and SERVES it — cloud/worker/src/reader.ts. It replaces
+  # cf-pages above rather than joining it: a static origin behind a gate has a
+  # documented way around the gate, which is the second address the same bytes
+  # answer at.
+  #
+  # ⚠ BOTH JOBS RUN DURING THE CUTOVER, deliberately. Until the reader's
+  # hostname is moved off the Pages project, that project IS the live reader and
+  # deleting this job would freeze it at whatever version was last tagged. The
+  # order is: this job deploys the Worker → the operator moves the hostname →
+  # cf-pages and its project are deleted. Delete this comment with it.
+  #
+  # Needs, in the `ci` environment: SRR_WORKER_ROUTE (the route pattern, e.g.
+  # `reader.example.com/*` — the one piece of deployment identity this public
+  # repo does not carry), plus CLOUDFLARE_API_TOKEN widened from Pages:Edit to
+  # ALSO carry Account → Workers Scripts:Edit and Zone → Workers Routes:Edit +
+  # Zone:Read (the zone is inferred from the route's hostname). The Worker's own
+  # four runtime values are `wrangler secret put`, set once by the operator and
+  # untouched by a deploy — CI never sees them.
+  deploy-reader:
+    needs: [verify, browser]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: ci
+    env:
+      SRR_CDN_URL: ${{ secrets.SRR_CDN_URL }}
+      SRR_WORKER_ROUTE: ${{ secrets.SRR_WORKER_ROUTE }}
+      VERSION: ${{ github.ref_name }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+    - uses: actions/checkout@v6
+    - uses: ./.github/actions/setup-toolchain
+      with:
+        go: "false"
+    # The `secrets` context is not available in a job-level `if`, so the skip is
+    # a step that PRINTS why. It is loud on purpose: a deploy that quietly does
+    # nothing is how a release silently stops shipping. Once SRR_WORKER_ROUTE
+    # exists this job starts deploying on the next tag with no edit here.
+    - name: Check the reader Worker is configured
+      id: configured
+      run: |
+        if [ -z "$SRR_WORKER_ROUTE" ]; then
+          echo "SRR_WORKER_ROUTE is unset — the reader Worker is not deployed by CI yet."
+          echo "Set it in the ci environment once the Worker owns the reader's hostname."
+          echo "ready=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+        fi
+    - if: steps.configured.outputs.ready == 'true'
+      run: make deploy-reader
