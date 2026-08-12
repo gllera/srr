@@ -16,3 +16,25 @@ SESSION_SECRET=dev-secret-change-me
 # u/<uid>/); a row that does not is dropped at parse. Malformed rows are dropped
 # too, and an unparseable value authorizes NOBODY rather than falling back.
 ROSTER={"you@example.com":{"uid":"t1","active":true},"someone-else@example.com":{"uid":"t2","active":true}}
+
+# --- the reader worker (wrangler.reader.toml, src/reader.ts) -----------------
+# All four are `wrangler secret put …` in production. They live here for
+# `npx wrangler dev -c wrangler.reader.toml`, which reads this same file.
+#
+# The issuer to PIN. Every endpoint is read from the discovery document beneath
+# it, so this is the only IdP address in the configuration — note it carries a
+# TENANT PATH, while the logout page src/oidc.ts links is at the issuer's ORIGIN.
+OIDC_ISSUER=https://auth.example.com/t/your-tenant
+
+# This application's registered client_id, and the secret it authenticates the
+# token exchange with (client_secret_basic). Register the client at the IdP with
+# redirect_uri EXACTLY `https://<this worker's host>/auth/callback` — the
+# comparison there is un-normalized on purpose, so a trailing slash is a
+# different URI and sign-in stops at the IdP with "misconfigured application".
+OIDC_CLIENT_ID=srr
+OIDC_CLIENT_SECRET=dev-client-secret-change-me
+
+# The key this worker signs its OWN session cookie with (session.ts) — unrelated
+# to the IdP, and never shared with anything. Rotating it signs everybody out,
+# which is the intended emergency lever. Any value works locally.
+SESSION_HMAC_SECRET=dev-session-hmac-change-me

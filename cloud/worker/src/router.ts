@@ -23,7 +23,11 @@ export const UID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/
 // hex; width left loose in case Parcel changes it). Store keys can never
 // match: the pack grammar is digit stems under series dirs, assets are
 // hash-pathed two levels deep, and none of SRR's root objects look like this.
-const SHELL_ASSET_RE =
+//
+// Exported because the reader worker (classifyReader below) answers the same
+// question about the same bundle. Two copies of this regexp would be two
+// answers to "is this name public bytes, or a store object?".
+export const SHELL_ASSET_RE =
    /^(?:frontend\.[0-9a-f]{6,20}\.(?:js|css)|sw\.[0-9a-f]{6,20}\.js|icon\.[0-9a-f]{6,20}\.svg|icon-\d+\.[0-9a-f]{6,20}\.png|apple-touch-icon\.[0-9a-f]{6,20}\.png|manifest\.webmanifest)$/
 
 export function classify(pathname: string): Route {
@@ -40,4 +44,33 @@ export function classify(pathname: string): Route {
    if (rest === "config.gz" || rest.startsWith("seen/") || rest.startsWith("inbox/")) return { kind: "denied", uid }
    if (rest.includes("..") || rest.includes("//") || rest.endsWith("/")) return { kind: "none" }
    return { kind: "store", uid, key: rest }
+}
+
+// -----------------------------------------------------------------------------
+// The reader worker's classifier (src/reader.ts) — a much smaller surface than
+// the one above: no tenants and no store, because that deployment's packs live
+// on the CDN origin and it serves the shell and nothing else.
+//
+// So the whole gate is three facts: the shell INDEX needs a session, the
+// shell's ASSETS do not, and the three sign-in routes must not — `callback`
+// above all, since it is where a session comes from and requiring one there is
+// a redirect loop.
+export type ReaderRoute =
+   | { kind: "login" }
+   | { kind: "callback" }
+   | { kind: "logout" }
+   | { kind: "shell-index" }
+   | { kind: "shell-asset"; name: string }
+   | { kind: "none" }
+
+export function classifyReader(pathname: string): ReaderRoute {
+   // Enumerated, never an `/auth/` PREFIX: a prefix is a hole waiting for a
+   // route to appear behind it.
+   if (pathname === "/auth/login") return { kind: "login" }
+   if (pathname === "/auth/callback") return { kind: "callback" }
+   if (pathname === "/auth/logout") return { kind: "logout" }
+   if (pathname === "/" || pathname === "/index.html") return { kind: "shell-index" }
+   const rest = pathname.slice(1)
+   if (!rest.includes("/") && SHELL_ASSET_RE.test(rest)) return { kind: "shell-asset", name: rest }
+   return { kind: "none" }
 }

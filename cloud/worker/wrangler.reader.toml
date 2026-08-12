@@ -1,0 +1,37 @@
+# The hosted reader worker (src/reader.ts) — the gate and the shell on ONE
+# origin. Sibling of wrangler.toml, which configures the SRR Cloud worker
+# (src/index.ts) from the same package.
+#
+# This file IS tracked, unlike wrangler.toml, and the reason is the missing
+# `routes` key below: there is no hostname in here to keep out of a public repo.
+#
+# `make deploy-reader` supplies the route at deploy time from $SRR_WORKER_ROUTE
+# (`wrangler deploy --route "$SRR_WORKER_ROUTE"`, zone inferred from the
+# hostname), so the operator's deployment identity lives in one CI secret rather
+# than in source — the same rule commit "the operator's deployment config leaves
+# the public repo" applied to the cloud worker's config, reached a different way
+# because THIS worker deploys from CI on every release and so cannot depend on a
+# file a fresh clone does not have.
+#
+# The four values it needs at runtime — OIDC_ISSUER, OIDC_CLIENT_ID,
+# OIDC_CLIENT_SECRET, SESSION_HMAC_SECRET — are all `wrangler secret put`, set
+# once by the operator and untouched by a deploy. Two of them are not secret in
+# the OIDC sense (a client_id is published in every authorization request); they
+# are secrets here because they name the deployment, which is the thing this repo
+# does not carry. src/reader.ts 500s rather than half-works when one is unset.
+name = "srr-reader"
+main = "src/reader.ts"
+# Matches the workerd the pinned vitest pool ships (newer dates fall back noisily).
+compatibility_date = "2025-10-11"
+workers_dev = false
+
+# run_worker_first is deliberate: EVERY request goes through the Worker, so the
+# assets layer can never serve index.html around the auth gate. html_handling
+# "none" keeps ASSETS.fetch exact-path — src/reader.ts asks for /index.html by
+# name, so a directory-index rewrite would be a second, unreviewed router.
+[assets]
+directory = "./public-reader"
+binding = "ASSETS"
+html_handling = "none"
+not_found_handling = "none"
+run_worker_first = true
