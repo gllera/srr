@@ -61,7 +61,7 @@ func newMCPServer() *mcp.Server {
 // loopback, else 403. Both real client paths satisfy it:
 //   - a loopback client hitting http://localhost:8088/mcp sends Host
 //     "localhost:8088" — loopback, allowed;
-//   - an off-box Claude Code hitting https://admin-srr.llera.eu/mcp arrives via
+//   - an off-box Claude Code hitting https://admin-srr.example.com/mcp arrives via
 //     cloudflared, which connects to 127.0.0.1:8088 with the Host REWRITTEN to
 //     "localhost:8088" (originRequest.httpHostHeader) — also loopback, allowed.
 //

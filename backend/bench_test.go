@@ -241,7 +241,7 @@ func gzipLevel(level int, gz []byte) ([]byte, error) {
 // from a batch sorted by publication time, which clusters each feed's items
 // into runs the generator does not produce. So treat the idx row as a lower
 // bound on zopfli's win, and confirm against a real pack (`gzipBest` on bytes
-// pulled from cdn.llera.eu) before deciding GRO5 on it. The data and meta rows
+// pulled from a production store) before deciding GRO5 on it. The data and meta rows
 // carry real article bytes and need no such asterisk.
 func BenchmarkGzipBest(b *testing.B) {
 	series := []struct {

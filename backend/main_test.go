@@ -199,14 +199,14 @@ func TestResolveStoreAlias(t *testing.T) {
 	root := map[string]any{
 		"stores": map[string]any{
 			"local": "packs",
-			"prod":  "s3://srr/",
+			"prod":  "s3://mybucket/",
 			"bad":   7,
 			"empty": "",
 		},
 	}
 	cases := []struct{ in, want string }{
 		{"local", "packs"},
-		{"prod", "s3://srr/"},
+		{"prod", "s3://mybucket/"},
 		{"packs", "packs"}, // no alias -> literal
 		{"s3://other/", "s3://other/"},
 		{"bad", "bad"},     // non-string target -> literal

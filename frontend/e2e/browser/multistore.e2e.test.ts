@@ -13,7 +13,7 @@ import { clearDir, launchBrowser, waitList } from "./helpers"
 
 // The multi-store SW test PWA0 explicitly needs (docs/MULTI-STORE-SPEC.md §5.2,
 // §12): a store served from a SECOND ORIGIN, with CORS. This is the case
-// production runs — the deployed reader's home base (cdn.llera.eu) is
+// production runs — the deployed reader's home base (the pack CDN) is
 // cross-origin to its shell origin — and the one no test covered, which is why
 // the SW-inert-in-production regression (PWA0) was invisible. With the fix, the
 // SW routes + caches cross-origin packs of a mounted root; here we assert a

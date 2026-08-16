@@ -1,14 +1,19 @@
 /packs/
 /.vscode/
 /.claude/
-# The specs and findings are local-only working documents: they were removed
-# from git history on 2026-07-26 (public repo — see CLAUDE.md's store-visibility
-# reasoning for why internal planning does not get published). They still exist
-# on disk and remain mandatory pre-reading (CLAUDE.md, backend/CLAUDE.md,
-# delta_test.go all cite docs/); they are simply not tracked. Nothing under
-# /docs/ is re-included — a partial exception is what made the previous
-# commented-out /docs/* + !DELTA-TAIL-SPEC.md dance necessary.
-/docs/
+# The six top-level spec/decision documents are PUBLISHED (2026-08-16): they are
+# the format contract CLAUDE.md, backend/CLAUDE.md and delta_test.go cite as
+# mandatory pre-reading, so a public clone must carry them. Everything else under
+# /docs/ — findings, superpowers plans/specs — stays local-only working material
+# (see CLAUDE.md's store-visibility reasoning for why internal planning does not
+# get published).
+/docs/*
+!/docs/MANIFEST-SPEC.md
+!/docs/MULTI-STORE-SPEC.md
+!/docs/DELTA-TAIL-SPEC.md
+!/docs/INBOX-SPEC.md
+!/docs/STORE-VISIBILITY.md
+!/docs/STATIC-ENGINE-DECISION.md
 /FINDINGS-PLAN.md
 /.wrangler/
 

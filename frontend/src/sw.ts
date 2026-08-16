@@ -110,7 +110,7 @@ const SCOPE = new URL(sw.registration.scope).pathname
 // --- multi-store roots (docs/MULTI-STORE-SPEC.md §5) ----------------------
 //
 // The reader mounts N store roots at once; the deployed reader's own home base
-// (cdn.llera.eu) is CROSS-ORIGIN to its shell origin (srr.32b.io), so the old
+// (the pack CDN) is CROSS-ORIGIN to its shell origin (the reader host), so the old
 // `url.origin !== sw.location.origin` early-out never cached a single pack in
 // production (finding PWA0). The fix: route by the set of mounted roots, not by
 // origin equality. The page posts {type:"mounts", roots} on boot and on every
@@ -903,7 +903,7 @@ sw.addEventListener("fetch", (event) => {
 
    // Store objects: route by the mounted root the URL belongs to (§5.1). This
    // REPLACES the old `url.origin !== sw.location.origin` early-out — the fix for
-   // PWA0: the deployed reader's home base (cdn.llera.eu) is cross-origin to its
+   // PWA0: the deployed reader's home base (the pack CDN) is cross-origin to its
    // shell origin, so origin-equality never cached a single production pack.
    const hit = matchRoot(url)
    if (!hit) return // under no mounted root — the image proxy, a sibling deploy — untouched

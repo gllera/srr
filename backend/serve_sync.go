@@ -53,7 +53,7 @@ import (
 // supported shape is one hostname routing the reader and /sync/ to their
 // respective origins — e.g. a Cloudflare tunnel with a path rule for /sync/*
 // pointing at serve's httpHostHeader-rewritten localhost:8088, the same trick
-// admin-srr.llera.eu already uses — so the browser sees one origin. Non-browser
+// an Access-fronted admin host already uses — so the browser sees one origin. Non-browser
 // clients send no Origin and only meet the Host check. See README → Profile sync.
 
 // syncBlobDir is where the profile blobs are kept, resolved once by

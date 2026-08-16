@@ -12,7 +12,7 @@ srr fetch  --->  pack files (idx/ + data/ + db.gz)  --->  static SPA reader
 1. **Backend CLI** fetches RSS/Atom/RDF feeds and writes articles into gzip-compressed pack series optimized for incremental sync and HTTP caching.
 2. **Frontend SPA** loads the packs directly from any static host -- no API server, no database at runtime.
 
-Every pack name is write-once — finalized packs are numeric, the latest pack is generation-named (`L<seq>.gz`) — so the whole store is cached indefinitely; only the small `db.gz` manifest revalidates.
+Every pack name is write-once and never reused — a tiny mutable root (`db.gz`) points at an immutable per-generation manifest that lists every live object — so the whole store is cached indefinitely; only the ~60-byte root revalidates.
 
 ## Quick Start
 
@@ -85,10 +85,10 @@ Over stdio, where the client spawns the process itself:
 claude mcp add srr -- srr mcp
 ```
 
-Remotely, when `srr serve` sits behind a Cloudflare tunnel + Access (the deployment `admin-srr.llera.eu` uses). **Operator step, not part of srr**: create an Access *Service Auth* policy for the hostname and issue a service token, then pass its two headers:
+Remotely, when `srr serve` sits behind a Cloudflare tunnel + Access. **Operator step, not part of srr**: create an Access *Service Auth* policy for the hostname and issue a service token, then pass its two headers:
 
 ```bash
-claude mcp add --transport http srr https://admin-srr.llera.eu/mcp \
+claude mcp add --transport http srr https://admin-srr.example.com/mcp \
   --header "CF-Access-Client-Id: <id>" \
   --header "CF-Access-Client-Secret: <secret>"
 ```
@@ -158,3 +158,7 @@ See [backend/README.md](backend/README.md) and [frontend/README.md](frontend/REA
 | `release.yml` (`release` job) | `v*.*.*` tag | Cross-compiles backend binaries and bundles the SPA as `srrf.tar.gz`, creates GitHub release (`srr frontend update` installs the SPA from this asset) |
 | `release.yml` (`deploy-reader` job) | `v*.*.*` tag or manual | Builds the reader with the `SRR_CDN_URL` secret and deploys it as a Cloudflare Worker that both gates it (OIDC) and serves it — `cloud/worker/src/reader.ts`. Skips itself, loudly, unless `SRR_WORKER_ROUTE` is set |
 | `cron.yml` | Manual dispatch | Downloads latest `srr` binary and runs `srr fetch` against the configured store |
+
+## License
+
+[MIT](LICENSE)

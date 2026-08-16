@@ -199,7 +199,7 @@ func secHeaders(next http.Handler) http.Handler {
 //
 // This structurally fixes the trap the old MapFS scheme worked around (zero
 // ModTime ⇒ no validators ⇒ a static app.js name went stale after every release,
-// the reason for the admin-srr.llera.eu cache-bypass rule): Parcel hashes the
+// the reason for the admin host's edge cache-bypass rule): Parcel hashes the
 // asset names, so only the small mutable HTML shell needs a validator now.
 func webUICacheHeaders(fsys fs.FS, next http.Handler) http.Handler {
 	etags := map[string]string{}

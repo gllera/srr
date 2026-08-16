@@ -190,7 +190,7 @@ export async function syncSavedAssets(chron: number, saved: boolean): Promise<vo
 }
 
 // Tell the service worker which store roots are mounted (docs/MULTI-STORE-SPEC.md
-// §5.1) — the FIX for PWA0: the deployed reader's home base (cdn.llera.eu) is
+// §5.1) — the FIX for PWA0: the deployed reader's home base (the pack CDN) is
 // cross-origin to its shell origin, so the SW's old origin-equality gate never
 // cached a production pack. Posting the mounted roots lets it route + cache them.
 // Called on boot, on every mount-table change, and whenever a new SW takes

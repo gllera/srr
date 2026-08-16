@@ -115,6 +115,6 @@ func healAsset(ctx context.Context, be store.Backend, key, file, contentType str
 	// asset write that reuses a name. A CDN edge fronting the store caches
 	// asset keys under a year-long immutable TTL, so the heal stays invisible
 	// there (HEAD and GET cached separately) until that exact URL is purged.
-	slog.Warn("healed key overwrote published bytes: purge this URL on the CDN edge (cdn.llera.eu) or the old bytes keep serving", "key", key)
+	slog.Warn("healed key overwrote published bytes: purge this URL on the CDN edge or the old bytes keep serving", "key", key)
 	return nil
 }
