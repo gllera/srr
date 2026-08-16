@@ -1,26 +1,46 @@
 // SRR Cloud phase-1 edge worker: the whole product surface is this fetch
-// handler executing router.ts verdicts. Auth = the login app's sess cookie
-// (auth.ts) + roster (roster.ts); the shell is served virtually under each tenant's
-// prefix so the reader's relative PACK_BASE and SW scope land per-tenant.
-import { readSession, sessionToken } from "./auth"
+// handler executing router.ts verdicts. The shell is served virtually under
+// each tenant's prefix so the reader's relative PACK_BASE and SW scope land
+// per-tenant.
+//
+// Auth is the same two halves it has always been, with the first half replaced.
+// AUTHENTICATION is OIDC against the estate's IdP (oidc.ts) plus this worker's
+// own session cookie (session.ts) — the reader worker's machinery, shared
+// rather than re-derived. AUTHORIZATION is still roster.ts deciding which
+// tenant an authenticated email owns.
+//
+// What it replaced: a verify-only port of a login app's shared HMAC cookie.
+// That scheme ended estate-wide when the IdP's session took the `__Host-`
+// prefix — a cookie no consumer can read is a cookie no consumer can verify —
+// and this was the last reader of it left anywhere.
+import { beginLogin, handleCallback, logout } from "./oidc"
+import { getSession } from "./session"
 import { rosterLookup, type RosterEntry } from "./roster"
 import { classify, type Route } from "./router"
 
 export interface Env {
    ASSETS: Fetcher
    STORE: R2Bucket
-   SESSION_SECRET: string
+   // The issuer to pin; every endpoint is read from the document beneath it.
+   OIDC_ISSUER: string
+   OIDC_CLIENT_ID: string
+   OIDC_CLIENT_SECRET: string
+   SESSION_HMAC_SECRET: string
    // email → {uid, active} as JSON; see roster.ts for why it is config, not code.
    ROSTER: string
-   LOGIN_URL: string
 }
 
 // Mirror of frontend/_headers (the Pages deploy's CSP); index.html also
 // carries it as a <meta> fallback, but the header is the real layer here.
 const CSP = "script-src 'self'; object-src 'none'; base-uri 'none'"
 
+// no-store because the 401 branch of deny() is one of these: an auth verdict
+// that a shared cache could hand to the next visitor is not a verdict.
 const json = (status: number, error: string) =>
-   new Response(JSON.stringify({ error }), { status, headers: { "content-type": "application/json" } })
+   new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "content-type": "application/json", "cache-control": "no-store" },
+   })
 
 const notFound = () => new Response("not found", { status: 404 })
 
@@ -50,14 +70,31 @@ function userContent(res: Response): Response {
 const isNavigation = (request: Request) =>
    request.headers.get("sec-fetch-mode") === "navigate" || (request.headers.get("accept") || "").includes("text/html")
 
+// Every one of these is operator config supplied out of band (`wrangler secret
+// put`), so an unset one is a DEPLOYMENT mistake and not a request the user got
+// wrong. Say so with a 500: falling through would send a visitor to a login that
+// cannot complete, and they would meet a redirect loop instead of a cause.
+function missingConfig(env: Env): string[] {
+   const need = ["OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "SESSION_HMAC_SECRET"] as const
+   return need.filter((k) => !env[k])
+}
+
 // Anonymous → login redirect (navigations) or 401 (fetches); authenticated
 // but unauthorized → 403. The one deny path every gated route shares.
-function deny(request: Request, env: Env, authenticated: boolean): Response {
+//
+// The login is THIS origin's own now, so `next` is a same-origin PATH rather
+// than the absolute URL a cross-origin login app had to be handed — and oidc.ts
+// validates it again on the way back out (safeNext) instead of trusting the
+// cookie it round-tripped through.
+function deny(request: Request, url: URL, authenticated: boolean): Response {
    if (authenticated) return json(403, "forbidden")
    if (isNavigation(request)) {
-      const login = new URL(env.LOGIN_URL)
-      login.searchParams.set("next", request.url)
-      return Response.redirect(login.toString(), 302)
+      const login = new URL("/auth/login", url.origin)
+      login.searchParams.set("next", url.pathname + url.search)
+      return new Response(null, {
+         status: 302,
+         headers: { location: login.toString(), "cache-control": "no-store" },
+      })
    }
    return json(401, "auth required")
 }
@@ -209,17 +246,43 @@ export default {
       const url = new URL(request.url)
       const route = classify(url.pathname)
 
-      // Method gate: GET/HEAD everywhere, PUT only on sync.
+      // Method gate: GET/HEAD everywhere, PUT only on sync, POST only on logout.
+      // Matched by METHOD as well as path, so nothing else can be written to.
       const method = request.method === "HEAD" ? "GET" : request.method
-      if (method !== "GET" && !(method === "PUT" && route.kind === "sync")) {
+      const writable = (method === "PUT" && route.kind === "sync") || (method === "POST" && route.kind === "logout")
+      if (method !== "GET" && !writable) {
          return new Response("method not allowed", { status: 405 })
       }
 
-      const session = await readSession(env.SESSION_SECRET, sessionToken(request))
-      const entry: RosterEntry | null = session ? rosterLookup(env.ROSTER, session.e) : null
+      const missing = missingConfig(env)
+      if (missing.length > 0) {
+         console.log(`cloud worker is misconfigured — unset: ${missing.join(", ")}`)
+         return new Response("misconfigured", { status: 500, headers: { "cache-control": "no-store" } })
+      }
+
+      const session = await getSession(request, env)
+      // A session with no email claim is authorized for NOTHING: this roster
+      // keys on the address, so there is no row such an identity could match.
+      // handleCallback refuses a token without one, so this is a guard on the
+      // type rather than a reachable state — and it fails closed either way.
+      const entry: RosterEntry | null = session?.email ? rosterLookup(env.ROSTER, session.email) : null
       const authorizedFor = (uid: string) => entry !== null && entry.uid === uid
 
-      const res = await dispatch(request, env, ctx, route, url, session !== null, entry, authorizedFor)
+      // The sign-in legs reach the IdP, so they can fail for reasons that are
+      // nobody's fault and nothing's bug: discovery unreachable, JWKS 503, a
+      // network blip. Unhandled, that is an exception out of the fetch handler —
+      // the runtime's bare 500, no log line, and a visitor who cannot tell it
+      // from a broken deployment. 503 says "try again" and means it.
+      let res: Response
+      try {
+         res = await dispatch(request, env, ctx, route, url, session !== null, entry, authorizedFor)
+      } catch (e) {
+         console.log(`cloud worker: ${url.pathname} failed: ${e instanceof Error ? e.message : String(e)}`)
+         res = new Response("temporarily unavailable", {
+            status: 503,
+            headers: { "cache-control": "no-store", "retry-after": "30" },
+         })
+      }
       // HEAD: same logic, body stripped (R2/asset bodies are cheap at this scale).
       return request.method === "HEAD" ? new Response(null, { status: res.status, headers: res.headers }) : res
    },
@@ -236,13 +299,19 @@ async function dispatch(
    authorizedFor: (uid: string) => boolean,
 ): Promise<Response> {
    switch (route.kind) {
+      case "login":
+         return beginLogin(request, env)
+      case "callback":
+         return handleCallback(request, env)
+      case "logout":
+         return logout(request, env)
       case "root":
          if (entry) return Response.redirect(new URL(`/u/${entry.uid}/`, url).toString(), 302)
-         return deny(request, env, authenticated)
+         return deny(request, url, authenticated)
       case "redirect-slash":
          return Response.redirect(new URL(`${url.pathname}/`, url).toString(), 301)
       case "shell-index":
-         if (!authorizedFor(route.uid)) return deny(request, env, authenticated)
+         if (!authorizedFor(route.uid)) return deny(request, url, authenticated)
          return serveShellIndex(request, env)
       case "shell-asset":
          // Deliberately UNAUTHENTICATED: public bytes, and the SW script fetch
@@ -250,13 +319,13 @@ async function dispatch(
          // it silently breaks SW registration.
          return serveShellAsset(request, env, route.name)
       case "sync":
-         if (!authorizedFor(route.uid)) return deny(request, env, authenticated)
+         if (!authorizedFor(route.uid)) return deny(request, url, authenticated)
          return userContent(await serveSync(request, env, route.uid))
       case "denied":
          // Backend-only object classes 404 even for the owner (store-visibility split).
          return notFound()
       case "store":
-         if (!authorizedFor(route.uid)) return deny(request, env, authenticated)
+         if (!authorizedFor(route.uid)) return deny(request, url, authenticated)
          return userContent(await serveStore(request, env, ctx, route.uid, route.key))
       case "none":
          return notFound()

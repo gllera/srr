@@ -1,4 +1,4 @@
-// The TEST environment's roster and login URL — deliberately synthetic, and
+// The TEST environment's roster and OIDC config — deliberately synthetic, and
 // deliberately in one place.
 //
 // One place because it has two readers that cannot see each other's state:
@@ -7,10 +7,19 @@
 // worker runs with the pool's environment), so declaring the roster inside a
 // `beforeAll` silently authorizes nobody.
 //
-// Synthetic because the real roster and login URL are deployment config now
+// Synthetic because the real roster and IdP are deployment config
 // (.dev.vars / wrangler.toml, both gitignored): a suite asserting against those
 // would pass or fail depending on whose machine ran it.
-export const TEST_LOGIN_URL = "https://login.example.com/login"
+//
+// The issuer is never DIALLED by the suites that use this file — they exercise
+// the gate, which answers out of the session cookie alone. It is bound so the
+// worker's missing-config check passes; oidc.test.ts stubs a real one.
+export const TEST_OIDC = {
+   OIDC_ISSUER: "https://idp.example.com/t/tenant",
+   OIDC_CLIENT_ID: "srr-cloud",
+   OIDC_CLIENT_SECRET: "test-client-secret",
+   SESSION_HMAC_SECRET: "test-hmac-secret",
+}
 
 export const TEST_T1_EMAIL = "owner@example.com"
 export const TEST_T2_EMAIL = "second@example.com"

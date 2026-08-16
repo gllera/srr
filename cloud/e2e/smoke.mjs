@@ -20,22 +20,39 @@ const WORKER = join(REPO, "cloud/worker")
 const SRR = process.env.SRR_BIN ? resolve(process.env.SRR_BIN) : join(REPO, "dist/srr")
 const PORT = 8788
 
-// Two things must match the config `wrangler dev` itself reads: the secret the
-// forged cookie signs with, and identities the ROSTER authorizes. Both live in
+// Two things must match the config `wrangler dev` itself reads: the key the
+// minted session signs with, and identities the ROSTER authorizes. Both live in
 // .dev.vars (gitignored). Absent ⇒ write a throwaway pair; present ⇒ use the
 // operator's own, so the smoke exercises the real configuration.
 const SMOKE_ROSTER =
    '{"smoke-t1@example.invalid":{"uid":"t1","active":true},"smoke-t2@example.invalid":{"uid":"t2","active":true}}'
 const devVars = join(WORKER, ".dev.vars")
-if (!existsSync(devVars)) writeFileSync(devVars, `SESSION_SECRET=smoke-secret\nROSTER=${SMOKE_ROSTER}\n`)
+if (!existsSync(devVars)) writeFileSync(devVars, "")
 let vars = readFileSync(devVars, "utf8")
-const SECRET = vars.match(/^SESSION_SECRET=(.*)$/m)?.[1]
-if (!SECRET) throw new Error(".dev.vars has no SESSION_SECRET line")
-// A .dev.vars written before the roster became config has no ROSTER line.
-if (!/^ROSTER=/m.test(vars)) {
-   appendFileSync(devVars, `ROSTER=${SMOKE_ROSTER}\n`)
-   vars = readFileSync(devVars, "utf8")
+
+// Fill in per KEY rather than per file, because the interesting case is neither
+// "fresh clone" nor "fully configured": it is a .dev.vars written against an
+// older shape. The roster line arrived that way once, and the whole OIDC set
+// arrived that way when this worker stopped verifying a login app's cookie and
+// started signing users in itself. An absent key is added; a present one is left
+// exactly as the operator wrote it, so the smoke keeps exercising real config.
+//
+// The OIDC three are never DIALLED by the checks below — the gate answers out of
+// the session cookie alone — but the worker's missing-config guard 500s every
+// request while one is unset, so they have to be present to get past it.
+for (const [k, v] of [
+   ["SESSION_HMAC_SECRET", "smoke-secret"],
+   ["ROSTER", SMOKE_ROSTER],
+   ["OIDC_ISSUER", "https://idp.example.invalid/t/smoke"],
+   ["OIDC_CLIENT_ID", "smoke"],
+   ["OIDC_CLIENT_SECRET", "smoke-client-secret"],
+]) {
+   if (!new RegExp(`^${k}=`, "m").test(vars)) {
+      appendFileSync(devVars, `${k}=${v}\n`)
+      vars = readFileSync(devVars, "utf8")
+   }
 }
+const SECRET = vars.match(/^SESSION_HMAC_SECRET=(.*)$/m)[1]
 const roster = JSON.parse(vars.match(/^ROSTER=(.*)$/m)[1])
 const active = Object.entries(roster).filter(([, v]) => v?.active)
 const owner = active[0]
@@ -46,9 +63,9 @@ if (!owner || !peer) throw new Error("ROSTER needs two active entries with diffe
 const UID = owner[1].uid
 const OWNER_EMAIL = owner[0]
 const PEER_EMAIL = peer[0]
-// The login destination is config too (wrangler.toml [vars]).
-const LOGIN = readFileSync(join(WORKER, "wrangler.toml"), "utf8").match(/^LOGIN_URL\s*=\s*"([^"]+)"/m)?.[1]
-if (!LOGIN) throw new Error("wrangler.toml has no LOGIN_URL var")
+// The login is this Worker's own route now, so there is no destination to read
+// out of the configuration — it is the same origin every probe below uses.
+const LOGIN_PATH = "/auth/login"
 
 const RSS = (n) => `<?xml version="1.0"?><rss version="2.0"><channel><title>Smoke</title>
 ${Array.from(
@@ -58,9 +75,22 @@ ${Array.from(
 ).join("\n")}
 </channel></rss>`
 
+// Mint the worker's own session (src/session.ts) from outside it: HS256 JWT,
+// `srrsess+jwt`, issuer `srr-reader`. Kept byte-compatible by the suite in
+// test/session.test.ts — this file cannot import the module (it runs in node,
+// against a wrangler dev server) so the shape is spelled out once here.
+//
+// `__Host-` is a BROWSER rule about setting a cookie, not about the name: this
+// sends a literal header, so a plain-HTTP dev server accepts it unchanged.
+const SESSION_COOKIE = "__Host-srrsess"
 const b64u = (buf) => Buffer.from(buf).toString("base64url")
 async function sessCookie(email) {
-   const body = b64u(JSON.stringify({ t: "sess", e: email }))
+   const now = Math.floor(Date.now() / 1000)
+   const header = b64u(JSON.stringify({ alg: "HS256", typ: "srrsess+jwt" }))
+   const payload = b64u(
+      JSON.stringify({ t: "sess", iss: "srr-reader", sub: `sub-${email}`, email, iat: now, exp: now + 3600 }),
+   )
+   const input = `${header}.${payload}`
    const key = await crypto.subtle.importKey(
       "raw",
       new TextEncoder().encode(SECRET),
@@ -68,8 +98,8 @@ async function sessCookie(email) {
       false,
       ["sign"],
    )
-   const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)))
-   return `sess=${body}.${b64u(sig)}`
+   const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(input)))
+   return `${SESSION_COOKIE}=${input}.${b64u(sig)}`
 }
 
 const walk = (dir) =>
@@ -171,9 +201,20 @@ try {
    let r = await fetch(`${base}/`, { headers: nav, redirect: "manual" })
    check(
       "anon / → login redirect",
-      r.status === 302 && r.headers.get("location").startsWith(LOGIN),
+      r.status === 302 && new URL(r.headers.get("location"), base).pathname === LOGIN_PATH,
       `${r.status} ${r.headers.get("location")}`,
    )
+
+   // The three sign-in routes answer WITHOUT a session. A gated callback is a
+   // redirect loop, so what this pins is that neither a 302 to the login nor a
+   // 401 came back: login fails on its own terms (503, no IdP reachable from
+   // here) and the callback on its own (400, no flow cookie).
+   r = await fetch(`${base}/auth/login`, { headers: nav, redirect: "manual" })
+   check("anon /auth/login is not gated", r.status === 503, String(r.status))
+   r = await fetch(`${base}/auth/callback`, { headers: nav, redirect: "manual" })
+   check("anon /auth/callback is not gated", r.status === 400, String(r.status))
+   r = await fetch(`${base}/auth/logout`, { headers: nav, redirect: "manual" })
+   check("anon /auth/logout redirects out", r.status === 302, String(r.status))
 
    r = await fetch(`${u}/`, { headers: nav, redirect: "manual" })
    check("anon tenant root → login redirect", r.status === 302, String(r.status))

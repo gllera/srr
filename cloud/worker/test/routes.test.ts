@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { SELF, env } from "cloudflare:test"
-import { TEST_LOGIN_URL as LOGIN, TEST_REVOKED_EMAIL, TEST_T1_EMAIL, TEST_T2_EMAIL } from "./fixture-env"
+import { TEST_REVOKED_EMAIL, TEST_T1_EMAIL, TEST_T2_EMAIL } from "./fixture-env"
 import { sessCookie } from "./helpers"
 
 // The roster behind these is bound by vitest.config.ts — see test/fixture-env.ts
@@ -24,12 +24,15 @@ describe("GET /", () => {
       expect(res.headers.get("location")).toBe(`${BASE}/u/t1/`)
    })
 
-   it("redirects anonymous visitors to the login app with next", async () => {
+   it("redirects anonymous visitors to this origin's own login, with next as a path", async () => {
       const res = await SELF.fetch(`${BASE}/`, nav())
       expect(res.status).toBe(302)
       const loc = new URL(res.headers.get("location")!)
-      expect(loc.origin + loc.pathname).toBe(LOGIN)
-      expect(loc.searchParams.get("next")).toBe(`${BASE}/`)
+      expect(loc.origin + loc.pathname).toBe(`${BASE}/auth/login`)
+      // A PATH, not the absolute URL the old cross-origin login app needed —
+      // and oidc.ts's safeNext rejects anything that is not one on the way back.
+      expect(loc.searchParams.get("next")).toBe("/")
+      expect(res.headers.get("cache-control")).toBe("no-store")
    })
 
    it("403s an authenticated non-member", async () => {
@@ -67,7 +70,7 @@ describe("shell", () => {
    it("login-redirects an anonymous navigation to the tenant root", async () => {
       const res = await SELF.fetch(`${BASE}/u/t1/`, nav())
       expect(res.status).toBe(302)
-      expect(new URL(res.headers.get("location")!).searchParams.get("next")).toBe(`${BASE}/u/t1/`)
+      expect(new URL(res.headers.get("location")!).searchParams.get("next")).toBe("/u/t1/")
    })
 
    it("403s the index for the WRONG tenant's owner", async () => {
@@ -95,6 +98,35 @@ describe("shell", () => {
    it("404s unknown top-level paths and bad uids", async () => {
       expect((await SELF.fetch(`${BASE}/favicon.ico`, api())).status).toBe(404)
       expect((await SELF.fetch(`${BASE}/u/T1/db.gz`, api())).status).toBe(404)
+   })
+})
+
+describe("sign-in routes", () => {
+   it("lets all three through without a session — a gated callback is a loop", async () => {
+      // No IdP is reachable from here, so login fails on its OWN terms (503,
+      // the unreachable-IdP path) and the callback on its own (400, no flow
+      // cookie). What this pins is that the GATE answered neither: no 302 to
+      // the login, and no 401.
+      expect((await SELF.fetch(`${BASE}/auth/login`, nav())).status).toBe(503)
+      expect((await SELF.fetch(`${BASE}/auth/callback`, nav())).status).toBe(400)
+      // Logout reaches nothing and always works.
+      expect((await SELF.fetch(`${BASE}/auth/logout`, nav())).status).toBe(302)
+   })
+
+   it("allows POST on logout alone", async () => {
+      expect((await SELF.fetch(`${BASE}/auth/logout`, { method: "POST", redirect: "manual" })).status).toBe(302)
+      for (const path of ["/auth/login", "/auth/callback"]) {
+         const res = await SELF.fetch(`${BASE}${path}`, { method: "POST", redirect: "manual" })
+         expect(res.status, `POST ${path}`).toBe(405)
+      }
+   })
+
+   it("keeps /auth/ a list of three paths, not a prefix", async () => {
+      // A prefix would leave whatever is filed under /auth/ next ungated by
+      // default; these must fall through to the ordinary 404.
+      for (const path of ["/auth/", "/auth/whatever", "/auth/login/extra"]) {
+         expect((await SELF.fetch(`${BASE}${path}`, api())).status, path).toBe(404)
+      }
    })
 })
 

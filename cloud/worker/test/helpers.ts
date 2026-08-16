@@ -1,22 +1,12 @@
-// Test-only token FORGER — the sign-side mirror of src/auth.ts's verify, and
-// byte-compatible with the login app's own makeToken.
+// Test-only session MINTER. Not a forger any more: it calls the very function
+// the worker's own callback calls (session.ts mintSession), so a suite cannot
+// pass against a token shape the worker has stopped issuing — which is exactly
+// what a hand-rolled signer next to the verifier is for.
 import { env } from "cloudflare:test"
+import { SESSION_COOKIE, mintSession } from "../src/session"
 
-const enc = new TextEncoder()
-
-const b64u = (bytes: Uint8Array) =>
-   btoa(String.fromCharCode(...bytes))
-      .replace(/\+/g, "-")
-      .replace(/\//g, "_")
-      .replace(/=+$/, "")
-
-export async function makeToken(payload: unknown, secret: string = env.SESSION_SECRET): Promise<string> {
-   const body = b64u(enc.encode(JSON.stringify(payload)))
-   const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, [
-      "sign",
-   ])
-   const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(body)))
-   return `${body}.${b64u(sig)}`
-}
-
-export const sessCookie = async (email: string) => `sess=${await makeToken({ t: "sess", e: email })}`
+// `sub` is derived from the address rather than fixed, so two identities in one
+// test are two subjects. Nothing in the worker reads it — the roster keys on
+// email — but a shared sub across tenants would be a misleading fixture.
+export const sessCookie = async (email: string) =>
+   `${SESSION_COOKIE}=${await mintSession(env, { sub: `sub-${email}`, email })}`

@@ -1,25 +1,12 @@
-# Copy to .dev.vars (gitignored). In production BOTH of these are secrets
-# (`cd cloud/worker && npx wrangler secret put SESSION_SECRET` / `… ROSTER`) —
-# never values in wrangler.toml, and never committed.
-
-# The HMAC key the login app signs its sess cookie with (src/auth.ts verifies,
-# never mints). Any value works for `wrangler dev` and the smoke test; to accept
-# REAL sessions it must equal the login app's own SESSION_SECRET byte for byte.
-SESSION_SECRET=dev-secret-change-me
-
-# AUTHORIZATION: which authenticated email owns which tenant store, as one line
-# of JSON (email → {uid, active}). `active: false` is the revocation lever — the
-# entry stays, the cookie keeps verifying, and every request 403s. An email
-# absent here is authenticated-but-unauthorized, exactly the same answer.
+# Copy to .dev.vars (gitignored). Every value below is a `wrangler secret put`
+# in production — never a value in wrangler.toml, and never committed.
 #
-# uids must match /^[a-z0-9][a-z0-9_-]{0,31}$/ (they name the store prefix
-# u/<uid>/); a row that does not is dropped at parse. Malformed rows are dropped
-# too, and an unparseable value authorizes NOBODY rather than falling back.
-ROSTER={"you@example.com":{"uid":"t1","active":true},"someone-else@example.com":{"uid":"t2","active":true}}
+# Both workers in this package read this one file under `wrangler dev`, and the
+# OIDC four are shared by both: they are the same relying-party machinery
+# (src/oidc.ts + src/session.ts), pointed at whichever host is being run.
+# ROSTER is the cloud worker's alone.
 
-# --- the reader worker (wrangler.reader.toml, src/reader.ts) -----------------
-# All four are `wrangler secret put …` in production. They live here for
-# `npx wrangler dev -c wrangler.reader.toml`, which reads this same file.
+# --- OIDC: both workers -----------------------------------------------------
 #
 # The issuer to PIN. Every endpoint is read from the discovery document beneath
 # it, so this is the only IdP address in the configuration — note it carries a
@@ -31,10 +18,31 @@ OIDC_ISSUER=https://auth.example.com/t/your-tenant
 # redirect_uri EXACTLY `https://<this worker's host>/auth/callback` — the
 # comparison there is un-normalized on purpose, so a trailing slash is a
 # different URI and sign-in stops at the IdP with "misconfigured application".
+#
+# The two workers answer on two hostnames, so they are TWO registered clients
+# with two ids and two secrets, not one shared pair — which is also what keeps
+# revoking one from signing the other's users out.
 OIDC_CLIENT_ID=srr
 OIDC_CLIENT_SECRET=dev-client-secret-change-me
 
-# The key this worker signs its OWN session cookie with (session.ts) — unrelated
+# The key the worker signs its OWN session cookie with (session.ts) — unrelated
 # to the IdP, and never shared with anything. Rotating it signs everybody out,
-# which is the intended emergency lever. Any value works locally.
+# which is the intended emergency lever. Any value works locally, and the smoke
+# test mints against whatever is here.
 SESSION_HMAC_SECRET=dev-session-hmac-change-me
+
+# --- the cloud worker alone (wrangler.toml, src/index.ts) -------------------
+#
+# AUTHORIZATION: which authenticated email owns which tenant store, as one line
+# of JSON (email → {uid, active}). `active: false` is the revocation lever — the
+# entry stays, the session keeps verifying, and every request 403s. An email
+# absent here is authenticated-but-unauthorized, exactly the same answer.
+#
+# It is the ONLY revocation lever this worker has, because a session it minted
+# is verified locally against its own key: a sign-out at the IdP does not reach
+# an already-issued cookie, only its `exp` does (session.ts states the limit).
+#
+# uids must match /^[a-z0-9][a-z0-9_-]{0,31}$/ (they name the store prefix
+# u/<uid>/); a row that does not is dropped at parse. Malformed rows are dropped
+# too, and an unparseable value authorizes NOBODY rather than falling back.
+ROSTER={"you@example.com":{"uid":"t1","active":true},"someone-else@example.com":{"uid":"t2","active":true}}

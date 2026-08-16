@@ -1,15 +1,16 @@
 import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config"
-import { TEST_LOGIN_URL, TEST_ROSTER } from "./test/fixture-env"
+import { TEST_OIDC, TEST_ROSTER } from "./test/fixture-env"
 
-// The test SESSION_SECRET is a fixed known value so tests can forge tokens
-// (test/helpers.ts signs with it; the real secret is a wrangler secret).
+// ROSTER and the OIDC four are bound here rather than left to the local
+// configuration, because they are the operator's in production (.dev.vars /
+// wrangler.toml, both gitignored) and the suites must run against a synthetic
+// set instead of whatever the machine happens to hold. These bindings OVERRIDE
+// the wrangler config's, and they have to be set here rather than in a
+// beforeAll — `env` mutations from a test are invisible to the worker
+// `SELF.fetch` runs.
 //
-// ROSTER and LOGIN_URL are bound here for a stricter reason: they are the
-// operator's config in production (.dev.vars / wrangler.toml, both gitignored),
-// so the suites must run against a synthetic pair instead of whatever the local
-// machine happens to hold. These bindings OVERRIDE the wrangler config's, and
-// they have to be set here rather than in a beforeAll — `env` mutations from a
-// test are invisible to the worker `SELF.fetch` runs.
+// SESSION_HMAC_SECRET is a fixed known value so test/helpers.ts can mint a
+// session the worker will accept; in production it is a wrangler secret.
 export default defineWorkersConfig({
    test: {
       poolOptions: {
@@ -23,9 +24,8 @@ export default defineWorkersConfig({
             wrangler: { configPath: "./wrangler.toml" },
             miniflare: {
                bindings: {
-                  SESSION_SECRET: "test-secret",
+                  ...TEST_OIDC,
                   ROSTER: JSON.stringify(TEST_ROSTER),
-                  LOGIN_URL: TEST_LOGIN_URL,
                },
             },
          },

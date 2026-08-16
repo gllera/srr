@@ -1,9 +1,29 @@
 import { describe, expect, it } from "vitest"
-import { classify } from "../src/router"
+import { classify, classifyReader } from "../src/router"
 
 describe("classify", () => {
    it("root", () => {
       expect(classify("/")).toEqual({ kind: "root" })
+   })
+
+   it("names the three sign-in routes, and only those three", () => {
+      expect(classify("/auth/login")).toEqual({ kind: "login" })
+      expect(classify("/auth/callback")).toEqual({ kind: "callback" })
+      expect(classify("/auth/logout")).toEqual({ kind: "logout" })
+      // Not a prefix: a route filed under /auth/ later is gated by default.
+      expect(classify("/auth/")).toEqual({ kind: "none" })
+      expect(classify("/auth/whatever")).toEqual({ kind: "none" })
+      expect(classify("/auth/login/extra")).toEqual({ kind: "none" })
+   })
+
+   it("gives both workers the SAME three sign-in paths", () => {
+      // One table feeds both (router.ts classifyAuth). The failure this pins is
+      // not a mismatched route table — it is oidc.ts's redirect_uri, built from
+      // the `/auth/callback` literal and compared un-normalized at the IdP, so a
+      // divergence here is a sign-in that cannot complete on one of the two.
+      for (const p of ["/auth/login", "/auth/callback", "/auth/logout"]) {
+         expect(classify(p), p).toEqual(classifyReader(p))
+      }
    })
 
    it("bare tenant prefix redirects to the slash form", () => {

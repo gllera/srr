@@ -4,6 +4,7 @@
 // this function; the ".." / "//" guards are hygiene on top of R2's flat
 // keyspace, not the actual traversal defense.
 export type Route =
+   | AuthRoute
    | { kind: "root" }
    | { kind: "redirect-slash"; uid: string }
    | { kind: "shell-index"; uid: string }
@@ -12,6 +13,25 @@ export type Route =
    | { kind: "denied"; uid: string }
    | { kind: "store"; uid: string; key: string }
    | { kind: "none" }
+
+// The sign-in routes, and BOTH workers answer at exactly these three paths.
+//
+// One table rather than a copy per classifier, for a sharper reason than tidiness:
+// oidc.ts builds its redirect_uri out of `/auth/callback` and links `/auth/login`
+// off its failure page, and the IdP compares that URI un-normalized. A classifier
+// that drifted from those literals would not read as a routing bug — it would be
+// a sign-in that cannot complete, on whichever worker held the second copy.
+export type AuthRoute = { kind: "login" } | { kind: "callback" } | { kind: "logout" }
+
+// Enumerated, never an `/auth/` PREFIX: a prefix is a hole waiting for a route
+// to appear behind it. Written as an if-chain rather than a lookup table because
+// a bare object's keys include everything on Object.prototype.
+function classifyAuth(pathname: string): AuthRoute | null {
+   if (pathname === "/auth/login") return { kind: "login" }
+   if (pathname === "/auth/callback") return { kind: "callback" }
+   if (pathname === "/auth/logout") return { kind: "logout" }
+   return null
+}
 
 // Tenant ids are minted by us (t1, t2, …): lowercase alphanumeric + dash/underscore.
 // Exported because roster.ts holds the OTHER side of the same equality test — a
@@ -31,6 +51,8 @@ export const SHELL_ASSET_RE =
    /^(?:frontend\.[0-9a-f]{6,20}\.(?:js|css)|sw\.[0-9a-f]{6,20}\.js|icon\.[0-9a-f]{6,20}\.svg|icon-\d+\.[0-9a-f]{6,20}\.png|apple-touch-icon\.[0-9a-f]{6,20}\.png|manifest\.webmanifest)$/
 
 export function classify(pathname: string): Route {
+   const auth = classifyAuth(pathname)
+   if (auth) return auth
    if (pathname === "/") return { kind: "root" }
    const m = pathname.match(/^\/u\/([^/]+)(?:\/(.*))?$/)
    if (!m) return { kind: "none" }
@@ -55,20 +77,11 @@ export function classify(pathname: string): Route {
 // shell's ASSETS do not, and the three sign-in routes must not — `callback`
 // above all, since it is where a session comes from and requiring one there is
 // a redirect loop.
-export type ReaderRoute =
-   | { kind: "login" }
-   | { kind: "callback" }
-   | { kind: "logout" }
-   | { kind: "shell-index" }
-   | { kind: "shell-asset"; name: string }
-   | { kind: "none" }
+export type ReaderRoute = AuthRoute | { kind: "shell-index" } | { kind: "shell-asset"; name: string } | { kind: "none" }
 
 export function classifyReader(pathname: string): ReaderRoute {
-   // Enumerated, never an `/auth/` PREFIX: a prefix is a hole waiting for a
-   // route to appear behind it.
-   if (pathname === "/auth/login") return { kind: "login" }
-   if (pathname === "/auth/callback") return { kind: "callback" }
-   if (pathname === "/auth/logout") return { kind: "logout" }
+   const auth = classifyAuth(pathname)
+   if (auth) return auth
    if (pathname === "/" || pathname === "/index.html") return { kind: "shell-index" }
    const rest = pathname.slice(1)
    if (!rest.includes("/") && SHELL_ASSET_RE.test(rest)) return { kind: "shell-asset", name: rest }
