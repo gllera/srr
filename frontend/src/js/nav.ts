@@ -1125,6 +1125,27 @@ export async function goTo(idx: number, record = true, replace = false): Promise
    return found === -1 ? last(replace, record) : resolve(found, replace, record)
 }
 
+// The mini-player's "go to the episode" (PlayerDeps.openArticle): land on the
+// EXACT article that owns the active media, never a snapped neighbor — the bar
+// names one article, so showing any other breaks its promise. The active lane
+// keeps the landing when it can address it (isValidSeen: TRUE add_idx under
+// unread-only, the switchFilter-resume predicate — the raised bounds would
+// bounce a just-listened episode off its own lane); a lane that cannot
+// (another tag, ★ Saved without it, a search set it is not in) falls back to
+// [ALL] first, the same containing lane a bare #pos deep link resolves under.
+// record: false throughout — returning to an episode is a resume, not a read
+// (fromHash's rule): recording a forward jump would raise every member's
+// frontier over articles never shown.
+export async function goToArticle(chron: number): Promise<IShowFeed> {
+   if (chron >= 0 && chron < data.db.total_art) {
+      if (!(await isValidSeen(chron))) filter.clear()
+      if (await isValidSeen(chron)) return resolve(chron, false, false)
+   }
+   // Out of range, expired below add_idx, or a deleted feed: the exact article
+   // is unaddressable — keep goTo's clamp (nearest live match, else last).
+   return goTo(chron, false)
+}
+
 // Move the navigation cursor to an exact, already-known-matching chronIdx — the
 // list surface's keyboard selection (A/D/←/→ step the highlighted row). The row
 // is a rendered filter member and its feed is known from the row's data-feed,

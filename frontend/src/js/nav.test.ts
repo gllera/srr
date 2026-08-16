@@ -1736,6 +1736,74 @@ describe("goTo", () => {
    })
 })
 
+// The mini-player's "go to the episode" (PlayerDeps.openArticle): the bar names
+// ONE article, so the landing must be exact — goTo's filter snap showed some
+// other article whenever the active lane could not address the episode's chron
+// (another tag, ★ Saved, or its own lane once unread-only's re-applied bounds
+// excluded the just-listened article).
+describe("goToArticle — the mini-player's exact jump", () => {
+   afterEach(() => nav.setUnreadOnly(false))
+
+   it("lands exactly on the target under [ALL] when the active lane excludes its feed", async () => {
+      // The reported repro: play in feed 1's article, switch to feed 2's lane,
+      // click the bar title — goTo snapped to the next lane match instead.
+      setupIndex([{ feedId: 2 }, { feedId: 1 }, { feedId: 2 }])
+      await nav.fromHash("0!2")
+      const o = await nav.goToArticle(1)
+      expect(data.loadArticle).toHaveBeenLastCalledWith(1)
+      expect(o.article.f).toBe(1)
+      // The lane could not show it: fall back to the containing lane a bare
+      // #pos deep link resolves under.
+      expect(nav.getCurrentFilterKey()).toBe("")
+      expect(history.pushState).toHaveBeenLastCalledWith(null, "", "#1")
+   })
+
+   it("keeps the lane when it can address the target", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }])
+      await nav.fromHash("2!1")
+      await nav.goToArticle(0)
+      expect(data.loadArticle).toHaveBeenLastCalledWith(0)
+      expect(history.pushState).toHaveBeenLastCalledWith(null, "", "#0!1")
+   })
+
+   it("returns to a read article past the raised unseen bounds instead of snapping over it", async () => {
+      // The same-lane variant: the episode's article was read and the lane
+      // re-applied since (a tag switch away and back), so unread-only's raised
+      // bounds exclude it — feedRight would snap PAST it to the next unread.
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 1 })) // 0,1 read
+      nav.setUnreadOnly(true)
+      await nav.switchFilter("1")
+      await nav.goToArticle(0)
+      expect(data.loadArticle).toHaveBeenLastCalledWith(0)
+      // isValidSeen accepts by true add_idx, so the lane itself is kept.
+      expect(nav.getCurrentFilterKey()).toBe("1")
+   })
+
+   it("records nothing — returning to an episode is a resume, not a read", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 2 }])
+      await nav.goToArticle(1)
+      expect(localStorage.getItem("srr-seen")).toBeNull()
+   })
+
+   it("jumps out of ★ Saved to a non-member article", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 2 }])
+      localStorage.setItem("srr-saved", JSON.stringify([0]))
+      nav.filter.set([nav.SAVED_TOKEN])
+      await nav.goToArticle(1)
+      expect(data.loadArticle).toHaveBeenLastCalledWith(1)
+      expect(nav.isSavedFilter()).toBe(false)
+   })
+
+   it("clamps an unaddressable (expired) chron to the nearest live match, like a deep link", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      data.db.feeds[1].add_idx = 1 // chron 0 expired
+      nav.filter.clear() // re-derive membership at the raised add_idx
+      await nav.goToArticle(0)
+      expect(data.loadArticle).toHaveBeenLastCalledWith(1)
+   })
+})
+
 describe("getCurrentFilterKey", () => {
    it("returns empty string when no filter is active", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 2 }])

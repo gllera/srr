@@ -1078,7 +1078,16 @@ async function init() {
                await switchMount(mid)
                if (mid !== data.activeStore().mid) return
             }
-            await guard(() => nav.goTo(chron))
+            // The exact jump, not goTo: the bar names ONE article, and goTo's
+            // filter snap showed a neighbor whenever the active lane could not
+            // address the episode's chron (another tag, ★ Saved, or its own
+            // lane once unread-only's re-applied bounds excluded it).
+            await guard(() => nav.goToArticle(chron))
+            // The landing may have CHANGED the filter — the one player path
+            // that can exit search mode. Under split nothing else re-derives
+            // the pinned bar (the pane never closes), so it would stay up with
+            // the dead query.
+            searchUI.syncSearchBar()
          })()
       },
       rememberPosition: reader.rememberPosition,

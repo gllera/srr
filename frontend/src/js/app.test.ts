@@ -118,6 +118,7 @@ const nav = vi.hoisted(() => {
       // nothing else in the mock moves — only that the URL was published.
       publishHash: vi.fn(),
       goTo: vi.fn(async () => sf()),
+      goToArticle: vi.fn(async () => sf()),
       left: vi.fn(async () => sf()),
       right: vi.fn(async () => sf()),
       first: vi.fn(async () => sf()),
@@ -1548,6 +1549,44 @@ describe("reader media state survives prev/next", () => {
       } finally {
          proto.play = origPlay
       }
+   })
+
+   // The bar's title button names ONE article, so it must route through
+   // nav.goToArticle — the exact jump — never goTo, whose filter snap showed a
+   // neighboring article whenever the active lane could not address the episode
+   // (the switched-tag bug: play, switch tags, click the bar title).
+   it("the bar title jumps to the EXACT article that owns the episode", async () => {
+      await boot()
+      await showAt(1, PODCAST)
+      const episode = content().querySelector("audio") as HTMLMediaElement
+      Object.defineProperty(episode, "paused", { value: false, configurable: true })
+      episode.dispatchEvent(new Event("play"))
+      await showAt(2, "<p>next article</p>") // adopted — the bar is up
+      nav.goTo.mockClear()
+      ;(document.querySelector(".srr-player-title") as HTMLButtonElement).click()
+      await flush()
+      expect(nav.goToArticle).toHaveBeenCalledWith(1)
+      expect(nav.goTo).not.toHaveBeenCalled()
+   })
+
+   // The exact jump can CHANGE the filter (a lane that can't address the episode
+   // falls back to [ALL]) — the one player path that can exit search mode. The
+   // pinned bar must re-derive with it: under split nothing else syncs it (the
+   // pane never closes), so a jump out of a query left a stale bar pinned over
+   // an [ALL] list.
+   it("the bar title jump re-syncs the search bar after leaving search mode", async () => {
+      await boot()
+      await showAt(1, PODCAST)
+      const episode = content().querySelector("audio") as HTMLMediaElement
+      Object.defineProperty(episode, "paused", { value: false, configurable: true })
+      episode.dispatchEvent(new Event("play"))
+      await showAt(2, "<p>next article</p>")
+      // The stale state under test: search mode was on when the title was
+      // clicked, and the jump's landing cleared it (nav mock default: off).
+      document.body.classList.add("srr-searching")
+      ;(document.querySelector(".srr-player-title") as HTMLButtonElement).click()
+      await flush()
+      expect(document.body.classList.contains("srr-searching")).toBe(false)
    })
 })
 
