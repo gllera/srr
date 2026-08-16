@@ -47,8 +47,10 @@ export interface Gestures {
 // swipe, the reader pager), and it has to be shared: every axis lock is the
 // same comparison read in its own direction, so a different slop on any one
 // side would leave a band of gestures that two machines both claim (or that
-// none does).
-const AXIS_SLOP = 8
+// none does). (The two-finger cycle in setupGestures reads it too — not for
+// that interlock, since it runs in its own mode, but because "how far before
+// the finger has said something" is one judgement, not four.)
+export const AXIS_SLOP = 8 // exported: player.ts's local queue-row swipe locks at the same slop
 // Downward travel that arms the refresh.
 const PULL_TRIGGER = 72
 // The badge follows at half the finger's distance (the rubber-band feel every
@@ -614,9 +616,16 @@ export function setupGestures(deps: GestureDeps): Gestures {
    let twoFingerStartY = 0
    let twoFingerStartDist = 0
    let twoFingerDy = 0
-   // Set once a two-finger gesture is recognised as a pinch-zoom rather than a
-   // vertical pan, so the move handler stops claiming it and touchend doesn't cycle.
+   // The two-finger machine's own axis lock, decided on the first DOMINANT move
+   // and held for the gesture's life (the single-finger machines' rule): pinch
+   // when the inter-finger distance change wins, cycling when the centroid's
+   // vertical travel does. Deciding late was the v4.15 a11y bug: cancelling the
+   // FIRST touchmove suppresses the browser's native scroll/zoom for the WHOLE
+   // gesture, so a machine that preventDefaults before recognition kills native
+   // pinch-zoom app-wide — its later "release" frees nothing. A gesture this
+   // machine hasn't claimed must therefore never be touched at all.
    let pinch = false
+   let cycling = false
    // The tracked gesture, if any. The three single-finger machines below are
    // only moved and only settled when the gesture began as a single-finger one
    // ("single"), so a 3+-finger tap/lift ("none") can't drive or commit one.
@@ -680,6 +689,7 @@ export function setupGestures(deps: GestureDeps): Gestures {
             )
             twoFingerDy = 0
             pinch = false
+            cycling = false
             // A second finger landing mid-pull (or mid-row-swipe) hands the
             // gesture to the cycle / pinch guard — retract the affordances rather
             // than leaving one hanging.
@@ -702,20 +712,34 @@ export function setupGestures(deps: GestureDeps): Gestures {
       "touchmove",
       (e) => {
          if (mode === "two" && e.touches.length === 2) {
-            // A pinch-zoom is also a two-finger move, but it changes the
-            // inter-finger distance; the filter-cycle pan keeps the fingers
-            // parallel (distance ~constant) and moves their centroid. Once the
-            // distance shifts past a threshold, treat it as a pinch: stop claiming
-            // the gesture so the browser can zoom (accessibility — the viewport
-            // meta intentionally allows zoom), and don't cycle on touchend.
             const dist = Math.hypot(
                e.touches[0].clientX - e.touches[1].clientX,
                e.touches[0].clientY - e.touches[1].clientY,
             )
-            if (Math.abs(dist - twoFingerStartDist) > 25) pinch = true
+            const dy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - twoFingerStartY
+            if (!pinch && !cycling) {
+               // A pinch-zoom is also a two-finger move, but it changes the
+               // inter-finger distance; the filter-cycle pan keeps the fingers
+               // parallel (distance ~constant) and moves their centroid. The
+               // first move where either signal dominates past the slop decides
+               // — and the tie goes to the pinch, because the safe mistake is
+               // leaving a gesture to the browser, never taking one from it
+               // (the viewport meta deliberately allows zoom, and a
+               // wrongly-claimed pinch is exactly the app-wide zoom kill this
+               // decision replaced).
+               const dd = Math.abs(dist - twoFingerStartDist)
+               if (dd > AXIS_SLOP && dd >= Math.abs(dy)) pinch = true
+               else if (Math.abs(dy) > AXIS_SLOP && Math.abs(dy) > dd) cycling = true
+            }
             if (pinch) return
+            twoFingerDy = dy
+            // An unclaimed gesture is left entirely alone: cancelling even one
+            // early move suppresses the browser's native scroll/zoom for the
+            // whole gesture, which is why the shape this replaced —
+            // preventDefault until a pinch is recognized — never actually
+            // released a pinch to the zoom.
+            if (!cycling) return
             e.preventDefault()
-            twoFingerDy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - twoFingerStartY
          } else if (mode === "single" && e.touches.length === 1) {
             // The pull and the row swipe both track (and, once engaged,
             // preventDefault) here — which is why this listener is the
@@ -736,7 +760,11 @@ export function setupGestures(deps: GestureDeps): Gestures {
          if (mode === "two") {
             if (e.touches.length === 0) {
                mode = "none"
-               if (!pinch && Math.abs(twoFingerDy) >= 50) deps.onCycle(twoFingerDy < 0 ? -1 : 1)
+               // Only a CLAIMED gesture cycles (cycling, not merely !pinch):
+               // the lock above means an unclaimed dy can never reach 50, and
+               // stating the machine's own flag here keeps that true by
+               // construction rather than by arithmetic.
+               if (cycling && Math.abs(twoFingerDy) >= 50) deps.onCycle(twoFingerDy < 0 ? -1 : 1)
             } else if (e.touches.length === 1) {
                // Fingers lifted one at a time: the two-finger gesture is over.
                // Re-seed the remaining finger as a fresh single-finger swipe

@@ -351,6 +351,91 @@ describe("two-finger vertical cycle", () => {
       expect(onCycle).not.toHaveBeenCalled()
    })
 
+   // The a11y regression net (v4.15's open finding): cancelling the FIRST
+   // two-finger touchmove suppresses the browser's native scroll/zoom for the
+   // WHOLE gesture — so a machine that preventDefaults before it knows what
+   // the gesture is kills native pinch-zoom app-wide, and the old
+   // "stop claiming once the distance shifts" release never actually released
+   // anything. The claim must wait for the first DOMINANT move (the
+   // single-finger machines' engage rule); these three cases pin it from both
+   // sides.
+   it("never cancels an ambiguous early move — the browser's zoom must stay reachable", () => {
+      twoStart()
+      // 4px of distance drift vs 3px of centroid drift: nothing has said
+      // anything yet, and a machine that claims here claims every pinch's
+      // opening moves too.
+      const m1 = moveTo([
+         { clientX: 98, clientY: 303 },
+         { clientX: 202, clientY: 303 },
+      ])
+      expect(m1.defaultPrevented).toBe(false)
+      const m2 = moveTo([
+         { clientX: 60, clientY: 305 },
+         { clientX: 240, clientY: 305 },
+      ]) // now clearly a pinch: distance 100 → 180
+      expect(m2.defaultPrevented).toBe(false)
+      end(
+         [],
+         [
+            { clientX: 60, clientY: 305 },
+            { clientX: 240, clientY: 305 },
+         ],
+      )
+      expect(onCycle).not.toHaveBeenCalled()
+   })
+
+   it("an anchored-thumb pinch (one finger still) is distance-dominant: a pinch, never a cycle", () => {
+      twoStart()
+      // Only the right finger moves, out and slightly down: the inter-finger
+      // distance grows faster than the centroid drifts, which is a pinch's
+      // signature however slowly it starts. A flat distance threshold reads
+      // this first move as "not a pinch yet" and cancels it — the dominance
+      // test recognizes it immediately.
+      const m1 = moveTo([
+         { clientX: 100, clientY: 300 },
+         { clientX: 215, clientY: 310 },
+      ]) // Δdist ≈ 15 vs centroid dy = 5 — distance-dominant
+      expect(m1.defaultPrevented).toBe(false)
+      const m2 = moveTo([
+         { clientX: 100, clientY: 300 },
+         { clientX: 240, clientY: 330 },
+      ])
+      expect(m2.defaultPrevented).toBe(false)
+      end(
+         [],
+         [
+            { clientX: 100, clientY: 300 },
+            { clientX: 240, clientY: 330 },
+         ],
+      )
+      expect(onCycle).not.toHaveBeenCalled()
+   })
+
+   it("a claimed pan is a cycle for the gesture's life: late finger convergence can't unclaim it", () => {
+      twoStart()
+      moveTo([
+         { clientX: 100, clientY: 240 },
+         { clientX: 200, clientY: 240 },
+      ]) // parallel, dy = -60 → claimed
+      // The fingers drift 40px together while the pan continues. On a claimed
+      // gesture that is wobble, not a pinch — the browser can't zoom it anyway
+      // (the claim cancelled its first move), so flipping to "pinch" here only
+      // swallows the cycle the pan already earned.
+      moveTo([
+         { clientX: 110, clientY: 230 },
+         { clientX: 170, clientY: 230 },
+      ]) // dy = -70, distance 100 → 60
+      end(
+         [],
+         [
+            { clientX: 110, clientY: 230 },
+            { clientX: 170, clientY: 230 },
+         ],
+      )
+      expect(onCycle).toHaveBeenCalledTimes(1)
+      expect(onCycle).toHaveBeenCalledWith(-1)
+   })
+
    it("does not fire a stale cycle when one finger lifts before the other", () => {
       twoStart()
       // The pan MUST travel past the 50px cycle threshold first: with a
