@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -26,9 +27,9 @@ import (
 
 // webui/dist is the Parcel-built admin console (a separate `parcel build` into
 // its own dist dir — see the frontend project). It is generated and gitignored
-// except for a committed placeholder index.html, so a bare `go build`/`go vet`/
-// `go test` still compiles without Node; `all:` embeds Parcel's hashed asset
-// names as-is. The sources are no longer hand-written and no longer minified at
+// except for a tracked .gitkeep, which is what lets a bare `go build`/`go vet`/
+// `go test` compile this embed without Node: the `all:` prefix embeds dotfiles,
+// and Parcel's hashed asset names as-is. The sources are no longer hand-written and no longer minified at
 // startup (Parcel minifies): `minifiedWebUI` + the tdewolff/minify pass are gone.
 //
 //go:embed all:webui/dist
@@ -144,10 +145,59 @@ func newMux() http.Handler {
 	// serves the Parcel-built bundle embedded above instead of hand-written
 	// sources. "GET /mcp" still beats this "GET /" wildcard on path specificity.
 	ui := embeddedWebUI()
+	// A binary built without the Parcel bundle has an embedded dir holding only
+	// the .gitkeep that satisfies //go:embed, so the file server would answer a
+	// bare 404 at "/" with nothing to explain it. "GET /{$}" matches the root
+	// exactly and so beats the wildcard below, but only when there is no
+	// index.html to serve.
+	if _, err := fs.Stat(ui, "index.html"); err != nil {
+		mux.HandleFunc("GET /{$}", serveUnbuiltNote)
+	}
 	mux.Handle("GET /", webUICacheHeaders(ui, http.FileServerFS(ui)))
 	// secHeaders wraps OUTSIDE hostGuard so even a 403 carries the CSP/nosniff/
 	// Referrer-Policy/X-Frame-Options headers (SEC3).
 	return secHeaders(hostGuard(mux))
+}
+
+// unbuiltNote is what `srr serve` answers at "/" when the admin bundle was never
+// built. It lives here, as bytes in the binary, rather than as a placeholder
+// index.html committed into the generated backend/webui/dist — that file was
+// overwritten by every local build, so keeping the right bytes in git needed a
+// manual `git checkout` before every commit plus a Makefile gate to catch the
+// times someone forgot. The directory now tracks only a .gitkeep, which no
+// build ever rewrites, and the note cannot drift from the thing it describes.
+const unbuiltNote = `<!doctype html>
+<html lang="en">
+   <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>SRR admin — bundle not built</title>
+   </head>
+   <body>
+      <main>
+         <h1>SRR admin console — not built</h1>
+         <p>
+            This binary was compiled without the admin bundle. The API under
+            <code>/api/</code> and the MCP endpoint at <code>/mcp</code> work
+            normally; only this page is missing.
+         </p>
+         <p>
+            The console is a Parcel bundle. Build it with
+            <code>make build-admin</code> (or <code>make build-be</code>, which
+            depends on it), then re-run <code>srr serve</code>.
+         </p>
+      </main>
+   </body>
+</html>
+`
+
+func serveUnbuiltNote(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	// 200, not 404: the request reached the right server and this IS the
+	// response for it — an operator hitting a 404 would go looking for a routing
+	// problem instead of reading the note.
+	_, _ = io.WriteString(w, unbuiltNote)
 }
 
 // embeddedWebUI exposes the Parcel dist as the file server's root FS. Embed

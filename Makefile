@@ -1,4 +1,4 @@
-.PHONY: verify verify-fe verify-be typecheck-fe check-admin-placeholder check-coverage-test fuzz-be lint-fe format-check-fe format-fe test-fe build-fe build-admin smoke-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-race-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design design-shots build-cloud verify-cloud smoke-cloud deploy-cloud build-reader check-reader-config deploy-reader
+.PHONY: verify verify-fe verify-be typecheck-fe check-coverage-test fuzz-be lint-fe format-check-fe format-fe test-fe build-fe build-admin smoke-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-race-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design design-shots build-cloud verify-cloud smoke-cloud deploy-cloud build-reader check-reader-config deploy-reader
 
 SHELL := /bin/bash -e
 
@@ -25,7 +25,7 @@ verify: verify-fe verify-be test-contract
 verify-fe: typecheck-fe lint-fe format-check-fe test-fe build-fe smoke-fe
 # verify-be mirrors verify-fe's gates: vet + gofmt check + lint + build +
 # test + contract freshness.
-verify-be: vet-be format-check-be lint-be build-be test-be generate-check check-admin-placeholder check-coverage-test
+verify-be: vet-be format-check-be lint-be build-be test-be generate-check check-coverage-test
 
 # frontend/src/js/format.gen.ts is generated from the backend's Go
 # data-contract declarations (srr gen-ts). generate rewrites it;
@@ -310,25 +310,6 @@ cover-be: | dist
 check-coverage-test:
 	scripts/check-coverage.test.sh
 
-# check-admin-placeholder: backend/webui/dist/index.html is the ONE committed
-# file in an otherwise-generated directory — the placeholder that lets a
-# Node-less `go build`/`go vet`/`go test` compile the //go:embed. build-admin
-# overwrites it in the worktree on every build, so committing it by reflex
-# (`git add -A`) replaces it with a Parcel bundle whose admin.<hash>.{js,css}
-# are gitignored: a fresh clone then embeds a page with two dangling asset
-# references — an unstyled shell with dead tabs — instead of the "run
-# make build-admin" note. That shipped once; this is the gate.
-#
-# It inspects the COMMITTED blob, never the worktree, precisely because verify
-# itself regenerates the worktree copy a step earlier (build-be -> build-admin).
-check-admin-placeholder:
-	@if ! git show HEAD:backend/webui/dist/index.html 2>/dev/null | grep -q 'SRR admin console — placeholder'; then \
-	  echo "backend/webui/dist/index.html is committed as a BUILT bundle, not the placeholder."; \
-	  echo "Its hashed assets are gitignored, so a Node-less build embeds dangling refs."; \
-	  echo "Fix: git checkout origin/main -- backend/webui/dist/index.html && git commit"; \
-	  exit 1; \
-	fi
-
 dist:
 	@mkdir -p $@
 
@@ -341,8 +322,9 @@ build-admin: frontend/node_modules/.package-lock.json
 
 # build-be depends on build-admin so the embedded admin console is fresh before
 # `go build` reads it (mirrors CI, which builds the frontend anyway). A bare
-# `go build`/`go test` without this target still compiles against the committed
-# placeholder backend/webui/dist/index.html.
+# `go build`/`go test` without this target still compiles — the tracked
+# .gitkeep satisfies the //go:embed — and serve answers "/" with its
+# built-in not-built note.
 build-be: build-admin | dist
 	cd backend && go build -o ../dist/srr .
 

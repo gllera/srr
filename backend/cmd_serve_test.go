@@ -335,3 +335,55 @@ func TestServeWriteErrStatusIsStructural(t *testing.T) {
 		t.Errorf("lock contention = %d, want 409", rec3.Code)
 	}
 }
+
+// TestServeUnbuiltNote pins what `srr serve` answers at "/" when the binary was
+// compiled without the admin bundle — the state a Node-less `go build` produces,
+// where webui/dist holds only the .gitkeep that satisfies the //go:embed.
+//
+// It used to be a committed placeholder index.html inside that generated
+// directory, which every local build overwrote; keeping the right bytes in git
+// took a manual `git checkout` before each commit plus a Makefile gate for the
+// times someone forgot. The note is in the binary now, so this asserts the
+// handler rather than a file's contents.
+func TestServeUnbuiltNote(t *testing.T) {
+	rec := httptest.NewRecorder()
+	serveUnbuiltNote(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200: the request reached the right server, and a 404 sends the operator looking for a routing bug", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("Content-Type = %q, want text/html", ct)
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store — the page stops being the answer the moment the bundle is built", cc)
+	}
+	// It has to name the command that fixes it; that is its whole job.
+	for _, want := range []string{"make build-admin", "not built"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("the note does not mention %q: %s", want, rec.Body.String())
+		}
+	}
+}
+
+// TestNewMuxServesTheBundleWhenBuilt guards the other side of that branch: with
+// an index.html present the wildcard file server owns "/", and the note must not
+// shadow it. newMux reads the real embedded FS, so this asserts against whatever
+// this binary was built with — a built bundle in CI, the .gitkeep locally.
+func TestNewMuxServesTheBundleWhenBuilt(t *testing.T) {
+	ui := embeddedWebUI()
+	_, err := fs.Stat(ui, "index.html")
+	built := err == nil
+
+	rec := doReq(t, newMux(), "GET", "/", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET / = %d, want 200 (built=%v)", rec.Code, built)
+	}
+	note := strings.Contains(rec.Body.String(), "make build-admin")
+	if built && note {
+		t.Error("GET / served the not-built note even though an index.html is embedded")
+	}
+	if !built && !note {
+		t.Error("GET / did not serve the not-built note with no index.html embedded")
+	}
+}

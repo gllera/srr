@@ -24,12 +24,12 @@
 /dist/
 
 # The admin console is a Parcel bundle built into backend/webui/dist by
-# `make build-admin`. It is generated (like /dist), except for the committed
-# placeholder index.html that keeps `go build`/`go vet`/`go test` compiling the
-# //go:embed without Node. A local build overwrites the placeholder; restore it
-# with `git checkout backend/webui/dist/index.html` before committing.
+# `make build-admin` — generated, like /dist. The tracked .gitkeep is what lets
+# a Node-less `go build`/`go vet`/`go test` compile the //go:embed (the `all:`
+# prefix embeds dotfiles); no build ever writes that name, so nothing here can
+# turn up dirty. Serve answers "/" from unbuiltNote when index.html is absent.
 /backend/webui/dist/*
-!/backend/webui/dist/index.html
+!/backend/webui/dist/.gitkeep
 
 # design-sync build output (regenerable; see .design-sync/NOTES.md)
 /ds-bundle/
