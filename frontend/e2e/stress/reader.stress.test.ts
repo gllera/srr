@@ -27,14 +27,47 @@ import { mountReader, type MountedReader } from "../contract/mount"
 //     can watch it, with only loose sanity ceilings asserted (timing is flaky).
 
 // --- pack-name classifiers (over the fetch shim's request pathnames) ----------
-const RX = {
-   idxFinal: /\/idx\/\d+\.gz$/, // finalized idx pack (idx/<n>.gz)
-   idxSummary: /\/idx\/h\d+\.gz$/, // idx header summary (idx/h<N>.gz)
-   idxLatest: /\/idx\/L\d+\.gz$/, // latest idx pack (idx/L<seq>.gz)
-   data: /\/data\/(\d+|L\d+)\.gz$/, // any data pack
-   metaShard: /\/meta\/\d+\.gz$/, // finalized meta shard (meta/<n>.gz)
-   metaSummary: /\/meta\/s\d+\.gz$/, // meta bloom summary (meta/s<N>.gz)
-   metaLatest: /\/meta\/L\d+\.gz$/, // latest meta tail (meta/L<seq>.gz)
+//
+// SETS derived from the live manifest, not regexes. Object names are opaque
+// stems now (idx/812.gz) — the kind letters these used to match (idx/h<N>.gz,
+// idx/L<seq>.gz, meta/s<N>.gz) were retired at the manifest cutover, so every
+// letter-shaped pattern silently matched NOTHING while the bare-stem pattern
+// for "finalized idx" silently matched the tail and the summary too. That made
+// this file's only real assertions — the request budget it calls "the
+// deterministic, machine-independent regression guard" — unable to pass at all.
+// A name is only classifiable by asking the manifest which role it holds.
+interface PackSets {
+   idxFinal: Set<string>
+   idxLatest: Set<string>
+   idxSummary: Set<string>
+   data: Set<string>
+   metaShard: Set<string>
+   metaLatest: Set<string>
+   metaSummary: Set<string>
+}
+
+// Memoized per reader: the stress store is written once and never republished
+// during the run, so the derivation is stable — and this is called inside
+// assertions and log lines, not once per test.
+const setsCache = new WeakMap<MountedReader, PackSets>()
+
+function packSets(reader: MountedReader): PackSets {
+   const hit = setsCache.get(reader)
+   if (hit) return hit
+   const n = reader.data.storeNames()
+   const tailOf = (l: { keys: string[]; tail: number }) => (l.tail >= 0 ? [l.keys[l.tail]] : [])
+   const finalOf = (l: { keys: string[]; tail: number }) => l.keys.filter((k, i) => k && i !== l.tail)
+   const out: PackSets = {
+      idxFinal: new Set(finalOf(n.idx)),
+      idxLatest: new Set(tailOf(n.idx)),
+      idxSummary: new Set(n.hsum ? [n.hsum.key] : []),
+      data: new Set([...n.data.keys.filter(Boolean), ...n.deltas]),
+      metaShard: new Set(finalOf(n.meta)),
+      metaLatest: new Set(tailOf(n.meta)),
+      metaSummary: new Set(n.ssum ? [n.ssum.key] : []),
+   }
+   setsCache.set(reader, out)
+   return out
 }
 
 function paths(reader: MountedReader, from = 0): string[] {
@@ -43,8 +76,11 @@ function paths(reader: MountedReader, from = 0): string[] {
 function calls(reader: MountedReader): number {
    return reader.fetchMock.mock.calls.length
 }
-function count(ps: string[], rx: RegExp): number {
-   return ps.filter((p) => rx.test(p)).length
+// A request counts toward a role when its pathname ends with one of that role's
+// object names — the shim serves the store under a prefix, so an exact compare
+// would be prefix-dependent.
+function count(ps: string[], set: Set<string>): number {
+   return ps.filter((p) => [...set].some((name) => p.endsWith("/" + name))).length
 }
 
 // --- timing + a tiny deterministic PRNG --------------------------------------
@@ -145,11 +181,15 @@ describe("stress: store scale invariants & O(1) boot", () => {
    it("boot is O(1): db.gz + idx summary + latest packs, NO finalized idx pack", () => {
       const ps = paths(reader)
       expect(ps.some((p) => p.endsWith("db.gz"))).toBe(true)
-      expect(count(ps, RX.idxSummary)).toBe(1) // idx/h<N>.gz
-      expect(count(ps, RX.idxLatest)).toBe(1) // idx/L<seq>.gz
-      expect(count(ps, RX.idxFinal)).toBe(0) // the whole point: no idx/<n>.gz at boot
+      expect(count(ps, packSets(reader).idxSummary)).toBe(1) // the hsum the manifest names
+      expect(count(ps, packSets(reader).idxLatest)).toBe(1) // the idx series' tail
+      expect(count(ps, packSets(reader).idxFinal)).toBe(0) // the whole point: no FINALIZED idx pack at boot
       // Lazy: search/meta untouched until first query.
-      expect(count(ps, RX.metaShard) + count(ps, RX.metaSummary) + count(ps, RX.metaLatest)).toBe(0)
+      expect(
+         count(ps, packSets(reader).metaShard) +
+            count(ps, packSets(reader).metaSummary) +
+            count(ps, packSets(reader).metaLatest),
+      ).toBe(0)
    })
 
    it("metaReady() is true → search & list-from-meta are available at scale", () => {
@@ -196,8 +236,13 @@ describe("stress: navigation", () => {
       const ps = paths(reader, before)
       // At most one finalized idx pack fetch per finalized pack the sample touched,
       // never more than the pack count — lazy, deduped.
-      expect(count(ps, RX.idxFinal)).toBeLessThanOrEqual(reader.data.numFinalizedIdx())
-      rec("nav", `random loadArticle ×${S}`, ms, `${count(ps, RX.data)} data + ${count(ps, RX.idxFinal)} idx fetches`)
+      expect(count(ps, packSets(reader).idxFinal)).toBeLessThanOrEqual(reader.data.numFinalizedIdx())
+      rec(
+         "nav",
+         `random loadArticle ×${S}`,
+         ms,
+         `${count(ps, packSets(reader).data)} data + ${count(ps, packSets(reader).idxFinal)} idx fetches`,
+      )
    })
 
    it("sequential stepping ACROSS the 50,000-entry idx-pack boundary stays contiguous", async () => {
@@ -215,7 +260,12 @@ describe("stress: navigation", () => {
             prevP = p
          }
       })
-      rec("nav", "step across idx boundary ×13", ms, `${count(paths(reader, before), RX.data)} data fetches`)
+      rec(
+         "nav",
+         "step across idx boundary ×13",
+         ms,
+         `${count(paths(reader, before), packSets(reader).data)} data fetches`,
+      )
    })
 
    it("nav.right() drives the real state machine across the boundary", async () => {
@@ -261,7 +311,9 @@ describe("stress: filtering", () => {
       const feeds = new Map([[busiest.id, busiest.add_idx]])
       const before = calls(reader)
       expect(reader.data.countAll(feeds)).toBe(busiest.total_art)
-      expect(count(paths(reader, before), RX.data) + count(paths(reader, before), RX.idxFinal)).toBe(0)
+      expect(
+         count(paths(reader, before), packSets(reader).data) + count(paths(reader, before), packSets(reader).idxFinal),
+      ).toBe(0)
    })
 
    it("busiest feed: full findRight walk matches total_art, ascending, all same feed", async () => {
@@ -279,8 +331,13 @@ describe("stress: filtering", () => {
       const ps = paths(reader, before)
       // a feed present from the start spans every pack ⇒ the walk DOES touch the
       // finalized idx pack(s) — the contrast that proves skipping is real (below).
-      expect(count(ps, RX.idxFinal)).toBeGreaterThanOrEqual(1)
-      rec("filter", `walk busiest feed (${busiest.total_art})`, ms, `${count(ps, RX.idxFinal)} finalized idx fetched`)
+      expect(count(ps, packSets(reader).idxFinal)).toBeGreaterThanOrEqual(1)
+      rec(
+         "filter",
+         `walk busiest feed (${busiest.total_art})`,
+         ms,
+         `${count(ps, packSets(reader).idxFinal)} finalized idx fetched`,
+      )
    })
 
    it("busiest feed: the reader's count equals the Go writer's own (srr inspect --filter)", async () => {
@@ -306,12 +363,12 @@ describe("stress: filtering", () => {
       const ps = paths(fresh, before)
       // THE assertion: a feed absent from the finalized pack's frozen header is
       // skipped without ever fetching idx/<n>.gz.
-      expect(count(ps, RX.idxFinal)).toBe(0)
+      expect(count(ps, packSets(reader).idxFinal)).toBe(0)
       rec(
          "filter",
          `walk late-added feed (${lateAdded.total_art})`,
          ms,
-         `${count(ps, RX.idxFinal)} finalized idx fetched (skipped)`,
+         `${count(ps, packSets(reader).idxFinal)} finalized idx fetched (skipped)`,
       )
    })
 
@@ -329,7 +386,7 @@ describe("stress: filtering", () => {
          "filter",
          `walk tag "${topTag}" (${hits.length})`,
          ms,
-         `${feeds.size} feeds, ${count(paths(reader, before), RX.idxFinal)} idx fetched`,
+         `${feeds.size} feeds, ${count(paths(reader, before), packSets(reader).idxFinal)} idx fetched`,
       )
    })
 })
@@ -354,8 +411,8 @@ describe("stress: query (search over meta shards)", () => {
       })
       const ps = paths(reader, before)
       // a sub-trigram query can't prune ⇒ scans ONLY the latest tail.
-      expect(count(ps, RX.metaShard)).toBe(0)
-      expect(count(ps, RX.metaSummary)).toBe(0)
+      expect(count(ps, packSets(reader).metaShard)).toBe(0)
+      expect(count(ps, packSets(reader).metaSummary)).toBe(0)
       rec("query", 'short "ab" (tail only)', ms, `${out.length} hits, 0 finalized shards`)
    })
 
@@ -368,8 +425,13 @@ describe("stress: query (search over meta shards)", () => {
       expect(out).toEqual([])
       const ps = paths(reader, before)
       // summary + latest tail are consulted; NO finalized shard body is fetched.
-      expect(count(ps, RX.metaShard)).toBe(0)
-      rec("query", 'absent "qzxwjvbkpf" (pruned)', ms, `0 hits, ${count(ps, RX.metaShard)} shards fetched`)
+      expect(count(ps, packSets(reader).metaShard)).toBe(0)
+      rec(
+         "query",
+         'absent "qzxwjvbkpf" (pruned)',
+         ms,
+         `0 hits, ${count(ps, packSets(reader).metaShard)} shards fetched`,
+      )
    })
 
    it("common term: scans every finalized shard and every hit addresses its real article", async () => {
@@ -393,12 +455,12 @@ describe("stress: query (search over meta shards)", () => {
 
       const ps = paths(reader, before)
       // a corpus word lives in every shard ⇒ no pruning ⇒ all finalized shards scanned.
-      expect(count(ps, RX.metaShard)).toBe(reader.data.numFinalizedMeta())
+      expect(count(ps, packSets(reader).metaShard)).toBe(reader.data.numFinalizedMeta())
       rec(
          "query",
          `common "dolor" (${out.length} hits)`,
          ms,
-         `${count(ps, RX.metaShard)} / ${reader.data.numFinalizedMeta()} shards scanned`,
+         `${count(ps, packSets(reader).metaShard)} / ${reader.data.numFinalizedMeta()} shards scanned`,
       )
    })
 

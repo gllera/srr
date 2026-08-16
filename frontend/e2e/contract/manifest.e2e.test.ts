@@ -148,9 +148,15 @@ describe("contract: generation-manifest root", () => {
       const reader = await mountReader(store)
       const names = reader.data.storeNames()
       const pins = await reader.data.packNamesForFilter(new Map())
-      for (const key of [...names.idx.keys, ...names.data.keys, ...names.meta.keys, ...names.deltas]) {
-         if (key) expect(pins, `pin set must name ${key}`).toContain(key)
-      }
+      // Walked through the series MAP, not an idx/data/meta literal: that
+      // spelling is the one names.ts documents as the bug listedNames() exists
+      // to prevent, and it also skipped the two summaries the pin deliberately
+      // includes. The backend-only singletons (seen/aref) are correctly absent
+      // from the pin, which is why this is not raw listedNames().
+      const listed = [...names.deltas]
+      for (const list of names.series.values()) listed.push(...list.keys.filter(Boolean))
+      for (const sum of [names.hsum, names.ssum]) if (sum) listed.push(sum.key)
+      for (const key of listed) expect(pins, `pin set must name ${key}`).toContain(key)
    })
 
    it("adopts a newer generation in place", async () => {

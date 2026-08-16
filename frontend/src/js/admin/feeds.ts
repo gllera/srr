@@ -150,17 +150,19 @@ function drawBoard(): void {
    box.replaceChildren(...(strip ? [strip] : []), healthBoard())
 }
 
-function feedMatches(f: FeedListView): boolean {
-   if (feedsState.grade && feedGrade(f) !== feedsState.grade) return false
-   if (feedsState.tag) {
-      const want = feedsState.tag === UNTAGGED ? "" : feedsState.tag
-      if ((f.tag || "") !== want) return false
+// The current toolbar filter as a predicate. Built once per drawTable so the
+// search box is lower-cased once rather than once per feed — as a CLOSURE
+// rather than a module-level scratch variable, so the folded query cannot be
+// read before the call that set it.
+function feedFilter(): (f: FeedListView) => boolean {
+   const want = feedsState.tag === UNTAGGED ? "" : feedsState.tag
+   const q = feedsState.search.toLowerCase()
+   return (f) => {
+      if (feedsState.grade && feedGrade(f) !== feedsState.grade) return false
+      if (feedsState.tag && (f.tag || "") !== want) return false
+      if (q && !(f.title + " " + f.url).toLowerCase().includes(q)) return false
+      return true
    }
-   if (feedsState.search) {
-      const q = feedsState.search.toLowerCase()
-      if (!(f.title + " " + f.url).toLowerCase().includes(q)) return false
-   }
-   return true
 }
 
 function drawFeeds(): void {
@@ -345,10 +347,28 @@ export function applyFeedEvent(p: FeedProgress): void {
          state.snapshot.total_art += p.new
       }
    }
-   if (state.currentTab === "feeds") {
+   if (state.currentTab === "feeds") scheduleRedraw()
+}
+
+// One redraw per animation frame. A fetch-all streams one `feed` frame per feed
+// and each redraw is a WHOLE-table rebuild (filter, sort, N rows x ~15 elements,
+// one layout) — so N frames x N rows was the console's one quadratic path, and
+// it discarded hover, focus and scroll on every frame besides. Frames still land
+// within 16ms, so the visible result is unchanged, and the post-stream refresh()
+// redraws regardless.
+let redrawFrame = 0
+function scheduleRedraw(): void {
+   if (typeof requestAnimationFrame !== "function") {
       drawBoard()
       drawTable()
+      return
    }
+   if (redrawFrame) return
+   redrawFrame = requestAnimationFrame(() => {
+      redrawFrame = 0
+      drawBoard()
+      drawTable()
+   })
 }
 
 // fetchAllFromStrip runs the full fetch cycle from the pulse strip's inline
@@ -372,8 +392,14 @@ async function fetchAllFromStrip(btn: HTMLButtonElement): Promise<void> {
 
 // Column comparators for the sortable headers. Numeric columns first-click
 // descending (the triage order); title stays A→Z.
+// Hoisted: String.prototype.localeCompare with an OPTIONS OBJECT defeats the
+// engine's default-collator cache and constructs a fresh ICU collator per
+// comparison, so an N-row sort paid O(N log N) of them — and drawTable re-sorts
+// the whole list on every keystroke of the (undebounced) search box.
+const TITLE_COLLATOR = new Intl.Collator(undefined, { sensitivity: "base" })
+
 const FEED_SORTS: Record<string, (a: FeedListView, b: FeedListView) => number> = {
-   title: (a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }),
+   title: (a, b) => TITLE_COLLATOR.compare(a.title, b.title),
    last_new: (a, b) => a.last_new - b.last_new,
    articles: (a, b) => liveArts(a) - liveArts(b),
 }
@@ -405,7 +431,7 @@ function sortableTh(label: string, key: string): HTMLElement {
 
 function drawTable(): void {
    const wrap = document.getElementById("feedTableWrap")!
-   const rows = state.snapshot.feeds.filter(feedMatches) // fresh array — the in-place sort never reorders the snapshot
+   const rows = state.snapshot.feeds.filter(feedFilter()) // fresh array — the in-place sort never reorders the snapshot
    rows.sort((a, b) => FEED_SORTS[feedsState.sort](a, b) * feedsState.dir)
    const table = dataTable(
       [
@@ -560,6 +586,9 @@ function openFeedModal(f: FeedListView | null): void {
    const dedupTitle = el("input", { id: "f_deduptitle", type: "checkbox" })
    dedupTitle.checked = !!v.dedup_title
    // Clamp to [-1, 36500]; empty/NaN → 0 (inherit). Shared by save + summary chip.
+   // Shared by save + summary chip, exactly like dedupVal below. NOT folded in
+   // with tools.ts's store-wide clamp — the three ranges differ deliberately.
+   const expireVal = (): number => Math.max(0, Math.floor(Number(expire.value) || 0))
    const dedupVal = () => Math.max(-1, Math.min(36500, Math.floor(Number(dedupDays.value) || 0)))
    const err = el("div", { class: "formerr" })
    const status = el("div", { class: "resolve-status" })
@@ -636,7 +665,7 @@ function openFeedModal(f: FeedListView | null): void {
                pipe: pipeSteps.map((s) => s.trim()).filter(Boolean),
                secrets: splitScopes(secretsIn.value),
                no_title: noTitle.checked,
-               expire_days: Math.max(0, Math.floor(Number(expire.value) || 0)),
+               expire_days: expireVal(),
                dedup_days: dedupVal(),
                dedup_title: dedupTitle.checked,
             }
@@ -660,7 +689,7 @@ function openFeedModal(f: FeedListView | null): void {
    // native <details>. It opens itself when anything inside is non-default; while
    // closed the summary wears one chip per value set.
    const advValues = (): string[] => {
-      const days = Math.max(0, Math.floor(Number(expire.value) || 0))
+      const days = expireVal()
       const dd = dedupVal()
       return [
          ingestIn.value.trim() && "ingest",

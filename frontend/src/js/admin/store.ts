@@ -15,7 +15,13 @@ const EMPTY: OverviewView = {
    m: 0,
    total_art: 0,
    fetched_at: 0,
-   dedup_days: 30,
+   // 0, not the backend's built-in 30: serve_overview.go states outright that
+   // it always sends this value "so the webui needn't know the built-in
+   // default". boot() catches a failed loadSnapshot and still shows the tab, so
+   // a mirrored 30 rendered as the store's real setting against a store nobody
+   // could read — and Save would have PUT it back. 0 renders empty (tools.ts's
+   // `|| ""`) until a snapshot lands.
+   dedup_days: 0,
    version: "",
 }
 

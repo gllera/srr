@@ -1,3 +1,5 @@
+// @vitest-environment node
+// No DOM: this suite is pure logic, so it skips jsdom construction (~0.7s/file).
 import { describe, expect, it } from "vitest"
 
 import { parsePackName, RE_ASSET, RE_DB, RE_SHELL_HASHED } from "./sw-grammar"

@@ -720,7 +720,7 @@ describe("restingState — the backlog count is cursor-independent", () => {
       expect((await nav.restingState()).right_count).toBe(4)
       // The list's anchor seed lands on the oldest unread. The panel still
       // describes the same backlog — including the article the list highlights.
-      await nav.goTo(0, false, true)
+      await nav.goTo(0, { record: false, replace: true })
       expect(nav.currentChron()).toBe(0)
       expect((await nav.restingState()).right_count).toBe(4)
    })

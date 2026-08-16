@@ -1,3 +1,5 @@
+// @vitest-environment node
+// No DOM: this suite is pure logic, so it skips jsdom construction (~0.7s/file).
 import { describe, it, expect } from "vitest"
 import { makeLRU, cachedPromise, lazySlot } from "./cache"
 

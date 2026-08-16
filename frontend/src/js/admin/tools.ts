@@ -18,8 +18,11 @@ async function importDryRun(xml: string): Promise<ImportDryRun> {
    return (await api("POST", "/api/import?dry_run=1", xml, "application/xml")) as ImportDryRun
 }
 
+// No `on` flag: the checkbox IS the state. A mirrored boolean meant two
+// sources of truth for one control, and a future row affordance that wrote
+// only one would import the wrong set with nothing failing loudly — the count
+// readout would just disagree with the boxes.
 interface ImportRow {
-   on: boolean
    known: boolean
    url: string
    error: string
@@ -49,19 +52,21 @@ function openImportModal(dry: ImportDryRun): void {
       const recipe = el("select", { class: "imp-recipe" }, el("option", { value: "" }, "default"))
       appendRecipeOptions(recipe, f.recipe || "", state.snapshot.recipes)
       return {
-         on: !known && !f.error,
          known,
          url: f.url,
          error: f.error || "",
-         check: el("input", { type: "checkbox" }),
+         check: el("input", { type: "checkbox", checked: !known && !f.error }),
          title: el("input", { class: "imp-title", value: f.title || "", placeholder: "title (required)" }),
          tag: el("input", { class: "imp-tag", value: f.tag || "", placeholder: "tag" }),
          recipe,
       }
    })
 
+   // The chosen rows, read off the checkboxes themselves.
+   const chosen = (): ImportRow[] => rows.filter((r) => r.check.checked)
+
    function syncHeader(): void {
-      const n = rows.filter((r) => r.on).length
+      const n = chosen().length
       const unres = rows.filter((r) => r.error).length
       counts.textContent = `${n} of ${rows.length} selected` + (unres ? ` · ${unres} unresolved` : "")
       importBtn.textContent = n ? `Import ${n} feed${n === 1 ? "" : "s"}` : "Import"
@@ -72,10 +77,9 @@ function openImportModal(dry: ImportDryRun): void {
 
    const list = el("div", { class: "import-review" })
    for (const r of rows) {
-      r.check.checked = r.on
       r.el = el(
          "div",
-         { class: "import-row" + (r.on ? "" : " off") },
+         { class: "import-row" + (r.check.checked ? "" : " off") },
          r.check,
          r.title,
          r.tag,
@@ -89,23 +93,21 @@ function openImportModal(dry: ImportDryRun): void {
          ),
       )
       r.check.addEventListener("change", () => {
-         r.on = r.check.checked
-         r.el!.classList.toggle("off", !r.on)
+         r.el!.classList.toggle("off", !r.check.checked)
          syncHeader()
       })
       list.append(r.el)
    }
    master.addEventListener("change", () => {
       for (const r of rows) {
-         r.on = master.checked
-         r.check.checked = r.on
-         r.el!.classList.toggle("off", !r.on)
+         r.check.checked = master.checked
+         r.el!.classList.toggle("off", !r.check.checked)
       }
       syncHeader()
    })
 
    importBtn.addEventListener("click", async () => {
-      const sel = rows.filter((r) => r.on)
+      const sel = chosen()
       const blank = sel.find((r) => !r.title.value.trim())
       if (blank) {
          err.textContent = "every selected feed needs a title"

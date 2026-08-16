@@ -20,7 +20,7 @@
 import { VERSION } from "./base"
 import * as data from "./data"
 import { divEl, wrapTabFocus } from "./dropdown"
-import { ageSince, countBadge, formatBytes, formatDate, isStale, stampSrc, timeAgoProse } from "./fmt"
+import { ageSince, countBadge, formatBytes, formatDate, isStale, STALE_AFTER_SEC, stampSrc, timeAgoProse } from "./fmt"
 import { favoritesKey } from "./keys"
 import { mountLabel } from "./mounts"
 import * as nav from "./nav"
@@ -383,7 +383,11 @@ function liveArticles(ch: IFeed): number {
 
 // Feed-health grade for the row's health tint (ported from dropdown.ts). "" healthy,
 // "warn" amber, "crit" red. Degrades gracefully when the new vitals are absent.
-const STALE_WARN_SEC = 3 * 86400
+// The warn threshold IS fmt's — one definition of "3 days without a successful
+// fetch", so retuning it moves the status footer's flag and this per-feed row
+// tint together. The CONSTANT rather than isStale() itself: the subjects differ
+// (the store's fetched_at there, a feed's last_ok here), and sharing the
+// predicate would make one spy govern both in the tests. CRIT is picker's own.
 const STALE_CRIT_SEC = 14 * 86400
 const FAIL_STREAK_CRIT = 3
 function feedGrade(ch: IFeed): "" | "warn" | "crit" {
@@ -394,7 +398,7 @@ function feedGrade(ch: IFeed): "" | "warn" | "crit" {
    if (lastOK > 0) {
       const ageSec = ageSince(lastOK)
       if (ageSec >= STALE_CRIT_SEC) return "crit"
-      if (ageSec >= STALE_WARN_SEC) return "warn"
+      if (ageSec >= STALE_AFTER_SEC) return "warn"
    }
    return ""
 }

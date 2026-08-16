@@ -101,6 +101,20 @@ export function storeNames(dir: string): StoreNames {
    return manifestNames(readDb<IManifestWire>(dir))
 }
 
+// Every object the generation names, walked through the series MAP rather than
+// spelled out as idx/data/meta/deltas. names.ts documents that spelling as the
+// bug listedNames() exists to prevent — a hard-coded list silently ignores each
+// new series until someone remembers to extend it, which is exactly what the
+// `watch` series (FMT5) hit. Summaries included, since a test asserting "the
+// generation's objects are present" means all of them.
+export function storeObjectKeys(dir: string): string[] {
+   const n = storeNames(dir)
+   const keys = [...n.deltas]
+   for (const list of n.series.values()) keys.push(...list.keys.filter(Boolean))
+   for (const sum of [n.hsum, n.ssum]) if (sum) keys.push(sum.key)
+   return keys
+}
+
 // total_art read straight from a store's db.gz, or -1 if it isn't a readable
 // store. Used to decide whether a cached stress store can be reused.
 function storeTotalArt(dir: string): number {

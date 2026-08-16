@@ -1,5 +1,8 @@
+// @vitest-environment node
+// No DOM: this suite is pure logic, so it skips jsdom construction (~0.7s/file).
 import { describe, expect, it } from "vitest"
 
+import { DB_FORMAT_VERSION } from "./format.gen"
 import {
    bootWarmNames,
    expandSeries,
@@ -16,7 +19,7 @@ import {
 // through another store's names.
 
 const manifest = (names: Record<string, unknown>, over: Partial<IManifestWire> = {}): IManifestWire => ({
-   v: 2,
+   v: DB_FORMAT_VERSION,
    m: 7,
    fetched_at: 100,
    total_art: 0,

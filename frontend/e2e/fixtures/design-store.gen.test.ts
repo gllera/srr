@@ -10,12 +10,15 @@ import { gunzipSync } from "node:zlib"
 
 import { describe, expect, it } from "vitest"
 
-import { srr, feedServer, inspectValidate, readDb } from "../harness"
+import { srr, feedServer, inspectValidate, readDb, storeNames } from "../harness"
 
-// Pin the pre-delta tail: readLatestData below reads data/L<seq>.gz directly,
-// which an all-delta store (the writer's default since v4.5.0) never writes —
-// the fixture generator ENOENT'd on every run from that release until this.
-// The six contract suites that pin legacy tail mechanics set the same knob.
+// Pin the pre-delta tail so the store consolidates into one data pack, which is
+// what makes "row index == chronIdx" below true. The pack is ADDRESSED through
+// the manifest (storeNames), never by a derived name: this file used to read
+// data/L<seq>.gz directly off a `seq` it read from the manifest — a field the
+// manifest does not carry — so the fallback made it ask for data/L1.gz, a name
+// the writer stopped producing at the cutover, and the generator ENOENT'd on
+// every run. There is no computed-name fallback anywhere; ask the manifest.
 process.env.SRR_MAX_DELTAS = "0"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -42,7 +45,6 @@ function rss(title: string, items: { title: string; body: string; guid: string; 
 }
 
 interface DbCore {
-   seq?: number
    total_art: number
    feeds: Record<string, { title?: string; ferr?: string }>
 }
@@ -50,8 +52,9 @@ interface DbCore {
 // Decode the latest data pack (the only one for a tiny store) into ordered
 // {f,t} rows. Line position == chron offset within the latest pack, and with a
 // single pack the latest starts at chron 0 — so the row index IS the chronIdx.
-function readLatestData(dir: string, seq: number): { f: number; t?: string }[] {
-   const buf = gunzipSync(readFileSync(join(dir, "data", `L${seq}.gz`)))
+function readLatestData(dir: string): { f: number; t?: string }[] {
+   const names = storeNames(dir)
+   const buf = gunzipSync(readFileSync(join(dir, names.data.keys[names.data.tail])))
    return buf
       .toString("utf8")
       .split("\n")
@@ -98,12 +101,11 @@ describe("design fixture store", () => {
          expect(await inspectValidate(OUT)).toContain("OK: all checks passed")
 
          const db = readDb<DbCore>(OUT)
-         const seq = db.seq ?? 1
          const idByTitle = (t: string) => Object.entries(db.feeds).find(([, f]) => f.title === t)?.[0]
          const ferrToken = Object.entries(db.feeds).find(([, f]) => f.ferr)?.[0]
          const goneId = idByTitle("Soon Deleted")
 
-         const rows = readLatestData(OUT, seq)
+         const rows = readLatestData(OUT)
          const longTitlePos = rows.findIndex((r) => r.t === LONG_TITLE)
          const savedDeletedChron = goneId != null ? rows.findIndex((r) => r.f === Number(goneId)) : -1
 
@@ -113,7 +115,7 @@ describe("design fixture store", () => {
             "[design-fixture] rows:",
             rows.map((r, i) => `${i}:f${r.f}:${(r.t ?? "").slice(0, 18)}`).join(" | "),
          )
-         console.log("[design-fixture] derived:", { seq, ferrToken, goneId, longTitlePos, savedDeletedChron })
+         console.log("[design-fixture] derived:", { ferrToken, goneId, longTitlePos, savedDeletedChron })
 
          expect(db.total_art).toBeGreaterThanOrEqual(5)
          expect(ferrToken).toBeTruthy()

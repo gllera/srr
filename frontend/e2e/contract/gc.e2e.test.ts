@@ -2,7 +2,7 @@ import { existsSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
-import { feedServer, inspectValidate, makeStore, srr, storeNames, type FeedServer } from "../harness"
+import { feedServer, inspectValidate, makeStore, srr, storeObjectKeys, type FeedServer } from "../harness"
 import { nItems, rssFeed } from "../fixtures"
 import { mountReader } from "./mount"
 
@@ -50,9 +50,8 @@ describe("contract: latest-pack GC grace window", () => {
       // The GC rule is one sentence — delete what the last K manifests do not
       // name — so what a test can assert is exactly that: everything the live
       // generation lists is present, and the reader resolves it.
-      const names = storeNames(store)
-      for (const key of [...names.idx.keys, ...names.data.keys, ...names.meta.keys, ...names.deltas]) {
-         if (key) expect(existsSync(join(store, key)), `${key} is named and must exist`).toBe(true)
+      for (const key of storeObjectKeys(store)) {
+         expect(existsSync(join(store, key)), `${key} is named and must exist`).toBe(true)
       }
    })
 

@@ -19,7 +19,7 @@
 
 import { HOME } from "./base"
 import { HOME_MID, MOUNTS_KEY, PER_STORE_KEYS } from "./keys"
-import { lsSet } from "./storage"
+import { lsGet, lsSet } from "./storage"
 
 // One mount record (§3.1). Carries NO secret — `cred` is a boolean, not a token
 // (§7.3, MS9). Presentation fields (label, ord, cred) plus a single LWW clock
@@ -166,7 +166,7 @@ export function coerceRecord(r: unknown): MountRecord | null {
 export function loadMounts(): MountRecord[] {
    let recs: MountRecord[]
    try {
-      recs = parseRecords(localStorage.getItem(MOUNTS_KEY))
+      recs = parseRecords(lsGet(MOUNTS_KEY))
    } catch {
       recs = []
    }
@@ -192,7 +192,7 @@ function ensureHome(recs: MountRecord[]): MountRecord[] {
 
 export function saveMounts(recs: MountRecord[]): void {
    try {
-      localStorage.setItem(MOUNTS_KEY, JSON.stringify(recs))
+      lsSet(MOUNTS_KEY, JSON.stringify(recs))
    } catch {
       // quota — best-effort, like pin.ts
    }
@@ -294,6 +294,9 @@ function storeStateKeys(mid: string): string[] {
 // makes reconcileMounts idempotent (once state is renamed away, no second move).
 function hasStoreState(mid: string): boolean {
    try {
+      // Raw getItem, deliberately: this asks whether a key EXISTS, and lsGet
+      // collapses "absent" and "empty string" into "". Same reason schema.ts
+      // keeps its own accessor (storage.ts names both exclusions).
       return storeStateKeys(mid).some((k) => localStorage.getItem(k) !== null)
    } catch {
       return false

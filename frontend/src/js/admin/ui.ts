@@ -175,7 +175,14 @@ export function stepsEditor(steps: string[], opts?: StepsOpts): HTMLElement {
             onclick: () => {
                steps.push("")
                draw()
-               box.querySelector<HTMLInputElement>(".step:last-of-type input")!.focus()
+               // NOT `.step:last-of-type`: draw() appends the N step rows and
+               // then a `div.foot`, and :last-of-type keys on the TAG, so no
+               // element is ever both `.step` and the last <div> — the selector
+               // matched nothing and the `!` threw on every click. The step was
+               // still added (draw already ran), which is why only the focus was
+               // missing and nobody noticed.
+               const inputs = box.querySelectorAll<HTMLInputElement>(".step input")
+               inputs[inputs.length - 1]?.focus()
             },
          },
          "+ step",

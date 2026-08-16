@@ -552,70 +552,31 @@ describe("timeAgo", () => {
 
    const now = Math.floor(new Date("2025-01-15T12:00:00Z").getTime() / 1000)
 
-   it("formats seconds ago", () => {
-      const result = timeAgo(now - 30)
-      expect(result).toMatch(/30/)
+   // EXACT strings, not toMatch(/N/). The unit suffix is the only thing timeAgo
+   // adds over timeAgoProse, and a bare digit match cannot see it — "120m" would
+   // have satisfied the "2h" case and "2880m" the "2d" case, so every boundary
+   // below was asserting the arithmetic it shares with the case above it.
+   it.each([
+      ["seconds", 30, "30s"],
+      ["minutes", 120, "2m"],
+      ["hours", 7200, "2h"],
+      ["days", 172800, "2d"],
+      ["months", 5184000, "2mo"],
+      ["years", 63072000, "2y"],
+      ["0 seconds ago", 0, "0s"],
+      // Each boundary is the first second of the next unit.
+      ["boundary 60s → minutes", 60, "1m"],
+      ["boundary 3600s → hours", 3600, "1h"],
+      ["boundary 86400s → days", 86400, "1d"],
+      ["boundary 2592000s (30d) → months", 2592000, "1mo"],
+      ["boundary 31536000s (365d) → years", 31536000, "1y"],
+   ])("formats %s", (_label, ago, want) => {
+      expect(timeAgo(now - ago)).toBe(want)
    })
 
-   it("formats minutes ago", () => {
-      const result = timeAgo(now - 120)
-      expect(result).toMatch(/2/)
-   })
-
-   it("formats hours ago", () => {
-      const result = timeAgo(now - 7200)
-      expect(result).toMatch(/2/)
-   })
-
-   it("formats days ago", () => {
-      const result = timeAgo(now - 172800)
-      expect(result).toMatch(/2/)
-   })
-
-   it("formats months ago", () => {
-      const result = timeAgo(now - 5184000)
-      expect(result).toMatch(/2/)
-   })
-
-   it("formats years ago", () => {
-      const result = timeAgo(now - 63072000)
-      expect(result).toMatch(/2/)
-   })
-
-   it("boundary: exactly 60 seconds shows minutes", () => {
-      const result = timeAgo(now - 60)
-      expect(result).toMatch(/1/)
-      expect(result).not.toMatch(/60/)
-   })
-
-   it("boundary: exactly 3600 seconds shows hours", () => {
-      const result = timeAgo(now - 3600)
-      expect(result).toMatch(/1/)
-   })
-
-   it("boundary: exactly 86400 seconds shows days", () => {
-      const result = timeAgo(now - 86400)
-      expect(result).toMatch(/1/)
-   })
-
-   it("handles 0 seconds ago", () => {
-      const result = timeAgo(now)
-      expect(result).toMatch(/0/)
-   })
-
-   it("boundary: exactly 2592000 seconds (30 days) shows months", () => {
-      const result = timeAgo(now - 2592000)
-      expect(result).toMatch(/1/)
-   })
-
-   it("boundary: exactly 31536000 seconds (365 days) shows years", () => {
-      const result = timeAgo(now - 31536000)
-      expect(result).toMatch(/1/)
-   })
-
-   it("handles future timestamp (negative elapsed)", () => {
-      const result = timeAgo(now + 60)
-      expect(result).toBeDefined()
+   // ageSince clamps a future stamp to 0 rather than emitting a negative count.
+   it("handles a future timestamp (negative elapsed)", () => {
+      expect(timeAgo(now + 60)).toBe("0s")
    })
 })
 

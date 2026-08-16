@@ -58,15 +58,22 @@ describe("skeleton drift guard", () => {
 
    // The harness boots the REAL app, which needs index.html's exact .srr-* DOM,
    // so design.html must embed the same skeleton. Compare the marked regions
-   // whitespace-insensitively: prettier wraps inline <p> text differently
-   // between the two files, but any added/removed/renamed element or attribute
-   // still trips this guard. If it fails, re-sync design.html's skeleton region.
+   // structurally: COMMENTS are stripped and whitespace collapsed, so prettier's
+   // different inline wrapping between the two files is invisible and so is the
+   // prose — while any added/removed/renamed element or attribute still trips
+   // it. Stripping comments is what makes the guard structural rather than
+   // textual: it used to force ~8k characters of markup documentation to be
+   // pasted into both files, so editing one word of a comment failed the suite.
+   // If it fails, re-sync design.html's skeleton region.
    function skeleton(file: string): string {
       const html = readFileSync(join(SRC, file), "utf8")
       const start = html.indexOf("<!-- srr:skeleton:start -->")
       const end = html.indexOf("<!-- srr:skeleton:end -->")
       if (start < 0 || end < 0) throw new Error(`${file}: skeleton markers missing`)
-      return html.slice(start, end).replace(/\s+/g, "")
+      return html
+         .slice(start, end)
+         .replace(/<!--[\s\S]*?-->/g, "")
+         .replace(/\s+/g, "")
    }
 
    it("design.html embeds index.html's skeleton (structure)", () => {

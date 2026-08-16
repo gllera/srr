@@ -1,3 +1,5 @@
+// @vitest-environment node
+// No DOM: this suite is pure logic, so it skips jsdom construction (~0.7s/file).
 import { describe, it, expect, vi } from "vitest"
 
 // data.ts has top-level side effects (fetch at module load), so we mock the

@@ -658,9 +658,16 @@ export function fillRow(a: HTMLElement, art: import("./format.gen").IMetaWire, s
    // by comparing the day label of consecutive rows.
    a.dataset.ts = String(art.w)
    a.classList.toggle("srr-row-unread", nav.isRowUnread(chron, art.f, seen))
-   a.querySelector(".srr-row-source")!.textContent = data.feedTitle(art.f)
-   a.querySelector(".srr-row-age")!.textContent = timeAgo(art.w)
-   paintTitle(a.querySelector(".srr-row-title")!, art.t || "(untitled)")
+   // rowEl builds every row as a.append(body, star) / body.append(head, title) /
+   // head.append(source, age), and fillRow is only ever handed a row rowEl made
+   // — so these are O(1) sibling reads rather than three descendant queries per
+   // row, ~90 per scroll page-in. Same trade the star lookup in refresh() takes:
+   // it couples this function to rowEl's shape, which is why they sit together.
+   const body = a.firstElementChild!
+   const head = body.firstElementChild!
+   head.firstElementChild!.textContent = data.feedTitle(art.f) // .srr-row-source
+   head.lastElementChild!.textContent = timeAgo(art.w) // .srr-row-age
+   paintTitle(body.lastElementChild as HTMLElement, art.t || "(untitled)")
    a.classList.remove("srr-row-skeleton")
    // If selectRow placed the cursor on this row while it was still a skeleton
    // (feed unknown → nav.select was deferred via data-select-pending), sync now —

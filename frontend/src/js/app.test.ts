@@ -111,7 +111,6 @@ const nav = vi.hoisted(() => {
       tagUnreadFromCounts: vi.fn(() => 0),
       probeCurrent: vi.fn(async () => null),
       currentChron: vi.fn(() => -1),
-      currentFeedId: vi.fn(() => -1),
       isSaved: vi.fn(() => false),
       toggleSaved: vi.fn(() => true),
       // The focus-only re-entry's hash write (openArticle): no landing, so
@@ -289,6 +288,17 @@ vi.mock("./fmt", () => ({
    collapseBrokenMedia: () => {},
    handleFragmentClick: () => {},
    extractAssetKeys: vi.fn((): string[] => []),
+   // Real bodies: player.safeSrc's store-base bound runs through these, and a
+   // stub would either reject every relative store path or accept a foreign one.
+   isRelative: (v: string) => !/^[a-z][a-z0-9+.-]*:/i.test(v),
+   resolvePackRelative: (v: string, base: URL) => {
+      try {
+         const resolved = new URL(v, base).href
+         return resolved.startsWith(base.href) ? resolved : null
+      } catch {
+         return null
+      }
+   },
 }))
 
 const gestures = vi.hoisted(() => {
@@ -965,7 +975,7 @@ describe("split view (body.srr-split)", () => {
          nav.goTo.mockClear()
          pickerHooks()!.onSelect("42")
          await flush()
-         expect(nav.goTo).toHaveBeenCalledWith(40, false, true) // record = false, replace = true
+         expect(nav.goTo).toHaveBeenCalledWith(40, { record: false, replace: true })
       })
 
       // The follow-up is the PANE catching up, not a trip to the reader. Two
@@ -1007,7 +1017,7 @@ describe("split view (body.srr-split)", () => {
          pickerHooks()!.onSelect("42")
          await flush()
          expect(nav.goTo).not.toHaveBeenCalled()
-         expect(nav.last).toHaveBeenCalledWith(true, false) // replace = true, record = false
+         expect(nav.last).toHaveBeenCalledWith({ record: false, replace: true })
       })
 
       it("leaves the pane alone in the narrow layout", async () => {
@@ -1049,7 +1059,7 @@ describe("split view (body.srr-split)", () => {
          pickerHooks()!.onSelect("42")
          await flush()
          expect(reader().classList.contains("srr-reader-empty")).toBe(false)
-         expect(nav.goTo).toHaveBeenCalledWith(9, false, true) // record = false, replace = true
+         expect(nav.goTo).toHaveBeenCalledWith(9, { record: false, replace: true })
       })
 
       // A lane that DOES resume onto an article is switchFilter's own answer and
@@ -1120,7 +1130,7 @@ describe("split view (body.srr-split)", () => {
          document.dispatchEvent(new KeyboardEvent("keydown", { key: "s", bubbles: true, cancelable: true }))
          await flush()
          expect(nav.cycleFilter).toHaveBeenCalled()
-         expect(nav.goTo).toHaveBeenCalledWith(9, false, true)
+         expect(nav.goTo).toHaveBeenCalledWith(9, { record: false, replace: true })
       })
    })
 
@@ -3082,7 +3092,18 @@ async function invokePinAction(isUnreadOnly: boolean): Promise<void> {
    const fakePort = { onmessage: null }
    const fakeSW = { postMessage: vi.fn() }
    Object.defineProperty(navigator, "serviceWorker", {
-      value: { controller: fakeSW, getRegistrations: () => Promise.resolve([]), register: () => Promise.resolve() },
+      value: {
+         controller: fakeSW,
+         getRegistrations: () => Promise.resolve([]),
+         register: () => Promise.resolve(),
+         // Load-bearing, and the only one of the seven SW stubs that lacked it:
+         // app.ts's `navigator.serviceWorker?.addEventListener("controllerchange")`
+         // guards a missing OBJECT, not a missing METHOD, so init() threw there,
+         // init().catch(showError) swallowed it, and everything after — the
+         // listener, syncUnreadBadge(), the srr:ready dispatch — was silently
+         // skipped while these cases still passed on handlers bound earlier.
+         addEventListener: () => {},
+      },
       configurable: true,
    })
    // MessageChannel: the SW progress messages are sent over a port; simulate the

@@ -113,6 +113,13 @@ function readerLive(): boolean {
    return isSplit() && reader.hasArticle() && nav.currentChron() >= 0
 }
 
+// Landing a pane on a lane it did not navigate to: don't consume unread, and
+// don't leave a history entry — the user's own act was the pick, not this
+// follow-up. Named because the two call sites below used to spell it as the
+// same two booleans in opposite orders (nav.last(true,false) beside
+// nav.goTo(anchor,false,true)) and read as two different intentions.
+const RESUME: nav.Landing = { record: false, replace: true }
+
 // The list pane's twin: is the LIST on screen right now? Under split the pane
 // is always on screen whatever `view` (the focus surface) says; off split the
 // two views alternate, so it is `view` itself. Every "should the list repaint"
@@ -340,7 +347,7 @@ function reprobePaneChrome() {
 async function landPaneOnLane(hadArticle: boolean): Promise<void> {
    if (!isSplit() || !hadArticle || reader.hasArticle()) return
    const anchor = await nav.listAnchor()
-   if (anchor >= 0) await guard(() => nav.goTo(anchor, false, true))
+   if (anchor >= 0) await guard(() => nav.goTo(anchor, RESUME))
 }
 
 // Every lane change made from the READER surface — the picker's pick, the W/S
@@ -674,7 +681,7 @@ async function selectTokens(tokens: string[]) {
       // replace, not push: goToList already pushed this filter change, and a
       // second entry would make the first browser-back a visual no-op.
       if (anchor !== beforeChron) {
-         await guard(() => (anchor < 0 ? nav.last(true, false) : nav.goTo(anchor, false, true)))
+         await guard(() => (anchor < 0 ? nav.last(RESUME) : nav.goTo(anchor, RESUME)))
          // The follow-up is the PANE catching up with a pick made on the list —
          // it must not be mistaken for going to the reader. Two things do
          // mistake it: guard()'s render path calls showReader(), and the landing

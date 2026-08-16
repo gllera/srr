@@ -1,3 +1,5 @@
+// @vitest-environment node
+// No DOM: this suite is pure logic, so it skips jsdom construction (~0.7s/file).
 import { describe, expect, it, vi } from "vitest"
 
 // route.ts reads only data.activeStore().mid (the mount half of the token

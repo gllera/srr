@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
-import { IDX_BOUNDARY_SIZE, IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_STATE_SIZE, PACK_SERIES_KINDS } from "./format.gen"
+import {
+   DB_FORMAT_VERSION,
+   IDX_BOUNDARY_SIZE,
+   IDX_ENTRY_SIZE,
+   IDX_HEADER_PREFIX,
+   IDX_STATE_SIZE,
+   PACK_SERIES_KINDS,
+} from "./format.gen"
 
 // --- helpers copied from data.edge.test.ts ---
 
@@ -98,7 +105,7 @@ function manifestFor(db: Partial<IDB>) {
    if (db.hdrs) names.hsum = { s: "idx", stem: HSUM_STEM, covers: db.hdrs }
    if (mp) names.ssum = { s: "meta", stem: SSUM_STEM, covers: mp }
    return {
-      v: 2,
+      v: DB_FORMAT_VERSION,
       m: 1,
       fetched_at: 1,
       total_art: total,
@@ -112,7 +119,7 @@ function manifestFor(db: Partial<IDB>) {
 
 async function mount(db: Partial<IDB>, packs: Record<string, ArrayBuffer | string> = {}) {
    const files = new Map<string, Uint8Array>()
-   files.set("/db.gz", await gzip(JSON.stringify({ v: 2, m: 1, t: 1 })))
+   files.set("/db.gz", await gzip(JSON.stringify({ v: DB_FORMAT_VERSION, m: 1, t: 1 })))
    files.set("/manifest/1.gz", await gzip(JSON.stringify(manifestFor(db))))
    for (const [path, buf] of Object.entries(packs)) files.set("/" + path, await gzip(buf))
    global.fetch = vi.fn(async (input: URL | string) => {

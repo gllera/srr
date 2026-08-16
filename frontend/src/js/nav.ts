@@ -749,7 +749,23 @@ async function showFeed(article: IArticle, seenMap?: Record<string, number>): Pr
 // count. The switch still resumes at the last-seen position (a no-op raise for a
 // read feed anyway); for a never-seen feed/tag it lands on the oldest article
 // and leaves it unread until the reader actually steps forward.
-async function resolve(target: number, replace = false, record = true): Promise<IShowFeed> {
+// How a landing should be recorded. Two independent axes that every landing
+// function takes, as a named object rather than positionally — `resolve`,
+// `first`, `last` and `goTo` used to take these same two booleans in three
+// different ORDERS (goTo was the odd one out), so app.ts had two adjacent calls
+// expressing one intent with the arguments swapped. Both default the way the
+// common case wants: a landing is recorded and pushes history.
+//   record  — advance the seen frontier (recordSeen). false for a RESUME: a
+//             filter switch, a restored #pos, the mini-player's jump back.
+//   replace — replaceState instead of pushState, so the landing does not leave
+//             a history entry of its own.
+export interface Landing {
+   record?: boolean
+   replace?: boolean
+}
+
+async function resolve(target: number, o: Landing = {}): Promise<IShowFeed> {
+   const { replace = false, record = true } = o
    // Load first; commit pos only on success so a Retry replays the same chron.
    const article = await data.loadArticle(target)
    pos = target
@@ -801,7 +817,8 @@ export function markUnreadFrom(chron: number): boolean {
 // The reader's no-article state. `notStarted` picks which unread-only message the
 // empty state shows: true = a never-opened feed/tag (has unread, no resume point →
 // "start from the list"); false = caught-up (nothing unread) or a plain no-match.
-function resolveNoMatch(replace = false, notStarted = false): IShowFeed {
+function resolveNoMatch(o: Landing & { notStarted?: boolean } = {}): IShowFeed {
+   const { replace = false, notStarted = false } = o
    pos = -1
    currentFeed = -1
    // Same cleanup as resolve(): the cached neighbor probes, the saved ghost, and
@@ -898,9 +915,9 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
    // Unread-only + a fully-read feed/tag (or [ALL] fully caught up): a reload
    // onto it shows the "All caught up" placeholder, the same as switching to it —
    // no unread to restore. (A feed/tag with unread proceeds to honor the #pos.)
-   if (await noUnreadLeft()) return resolveNoMatch(true)
-   if (!(await isValidSeen(target))) return last(true, false)
-   return resolve(target, true, false)
+   if (await noUnreadLeft()) return resolveNoMatch({ replace: true })
+   if (!(await isValidSeen(target))) return last({ replace: true, record: false })
+   return resolve(target, { replace: true, record: false })
 }
 
 // One directional navigation step. The post-navigation neighbor lookup is
@@ -937,27 +954,29 @@ export function right(): Promise<IShowFeed> {
 // The smallest value in an iterable, computed WITHOUT a spread: Math.min(...it)
 // overflows the JS engine's spread-argument limit and throws on a store
 // approaching FEED_ID_CEILING (~65k feeds) — the same reason data.ts reduces
-// instead of Math.max(...ids). Returns `fallback` for an empty iterable.
+// instead of Math.max(...ids). Returns 0 for an empty iterable.
 function minOf(values: Iterable<number>): number {
    let m = Infinity
    for (const v of values) if (v < m) m = v
    return m === Infinity ? 0 : m
 }
 
-export async function first(record = true): Promise<IShowFeed> {
+export async function first(o: Landing = {}): Promise<IShowFeed> {
+   const { record = true } = o
    // ★ Saved is a queue read front-to-back: "first" is the FRONT — the earliest
    // save (save-index 0), not the lowest chronIdx.
    if (filter.saved) {
       const front = savedOrder()[0]
-      return front === undefined ? resolveNoMatch() : resolve(front, false, record)
+      return front === undefined ? resolveNoMatch() : resolve(front, { record })
    }
    // No article from a feed with add_idx N exists below chronIdx N, so the
    // earliest matching article is at or after the smallest add_idx in filter.
    const start = minOf(filter.feeds.values())
-   return goTo(start, record)
+   return goTo(start, { record })
 }
 
-export async function last(replace = false, record = true): Promise<IShowFeed> {
+export async function last(o: Landing = {}): Promise<IShowFeed> {
+   const { replace = false, record = true } = o
    // ★ Saved: the BACK of the queue is the newest save (highest save-index).
    let found: number
    if (filter.saved) {
@@ -966,8 +985,8 @@ export async function last(replace = false, record = true): Promise<IShowFeed> {
    } else {
       found = await feedLeft(data.db.total_art - 1)
    }
-   if (found === -1) return resolveNoMatch(replace)
-   return resolve(found, replace, record)
+   if (found === -1) return resolveNoMatch({ replace })
+   return resolve(found, { replace, record })
 }
 
 async function isValidSeen(idx: number): Promise<boolean> {
@@ -1043,8 +1062,8 @@ export async function switchFilter(token: string): Promise<IShowFeed> {
       // caught up falls back to the newest available — or, in unread-only mode, the
       // "All caught up" placeholder (nothing unread anywhere to show).
       const idx = await oldestUnread()
-      if (idx !== -1) return resolve(idx, false, false)
-      return unseenActive() ? resolveNoMatch() : last(false, false)
+      if (idx !== -1) return resolve(idx, { record: false })
+      return unseenActive() ? resolveNoMatch() : last({ record: false })
    }
    filter.set([token])
    if (!filter.active) {
@@ -1054,18 +1073,18 @@ export async function switchFilter(token: string): Promise<IShowFeed> {
       // empty-state placeholder rather than teleporting into [ALL]'s newest article.
       // An unrecognised token (not reachable from the picker today) still falls
       // back to [ALL].
-      if (!isKnownToken(token)) return last(false, false)
+      if (!isKnownToken(token)) return last({ record: false })
       filter.tokens = [token]
       filter.feeds = new Map<number, number>()
       return resolveNoMatch()
    }
    // Search has no per-feed resume position; open at the newest hit (top of
    // the list), the same place selecting it on the list shows.
-   if (filter.search) return last(false, false)
+   if (filter.search) return last({ record: false })
    // ★ Saved is a read-later queue consumed front-to-back: open at the OLDEST
    // saved article — the same landing the list anchors on — and read forward.
    // first() with an empty filter.feeds walks the saved set from chron 0.
-   if (filter.saved) return first(false)
+   if (filter.saved) return first({ record: false })
    // Oldest unread under the raised bounds — ONE scan, reused for both the
    // caught-up test here and the not-started startFeed name below (it was two
    // identical scans: noUnreadLeft's probe, then a re-tread for startFeed).
@@ -1076,7 +1095,7 @@ export async function switchFilter(token: string): Promise<IShowFeed> {
    // "All caught up" placeholder rather than opening an already-read article.
    if (unreadKnown && firstUnread === -1) return resolveNoMatch()
    const seenIdx = getSeen(token)
-   if (seenIdx !== undefined && (await isValidSeen(seenIdx))) return resolve(seenIdx, false, false)
+   if (seenIdx !== undefined && (await isValidSeen(seenIdx))) return resolve(seenIdx, { record: false })
    // No already-read article to resume onto, but there IS unread (not caught up
    // above). In unread-only mode the reader is a resume surface: show the distinct
    // "not started" placeholder rather than dropping the reader onto an unread
@@ -1086,8 +1105,8 @@ export async function switchFilter(token: string): Promise<IShowFeed> {
    // through the list. With pos at -1 the pill has no cursor to floor at, so
    // it reads the feed's whole unread backlog — exactly the picker badge.
    // Show-read mode opens the oldest article as before (you browse there).
-   if (!unseenActive()) return first(false)
-   const o = resolveNoMatch(false, true)
+   if (!unseenActive()) return first({ record: false })
+   const o = resolveNoMatch({ notStarted: true })
    o.has_right = true // the unread probe above found a right-match (a blip assumes one)
    o.right_count = await pendingRight().catch(() => -1)
    // Name WHICH feed the never-read backlog starts with: the oldest unread's own
@@ -1103,14 +1122,15 @@ export async function switchFilter(token: string): Promise<IShowFeed> {
 // `replace` is for a landing that FOLLOWS a navigation the caller already
 // pushed — the split view's lane-change follow-up, which would otherwise cost a
 // second history entry and make browser-back a visual no-op on the first press.
-export async function goTo(idx: number, record = true, replace = false): Promise<IShowFeed> {
-   if (idx < 0 || idx >= data.db.total_art) return last(replace, record)
+export async function goTo(idx: number, o: Landing = {}): Promise<IShowFeed> {
+   const { record = true, replace = false } = o
+   if (idx < 0 || idx >= data.db.total_art) return last({ replace, record })
    // ★ Saved has no value order to snap through: land on the exact saved article
    // (a list-row tap / deep-link always names a member), else fall back to the
    // front of the queue for a stale ~saved deep-link.
-   if (filter.saved) return isSaved(idx) ? resolve(idx, replace, record) : first(false)
+   if (filter.saved) return isSaved(idx) ? resolve(idx, { replace, record }) : first({ record: false })
    const found = await feedRight(idx)
-   return found === -1 ? last(replace, record) : resolve(found, replace, record)
+   return found === -1 ? last({ replace, record }) : resolve(found, { replace, record })
 }
 
 // The mini-player's "go to the episode" (PlayerDeps.openArticle): land on the
@@ -1131,11 +1151,11 @@ export async function goToArticle(chron: number): Promise<IShowFeed> {
          filter.clear()
          addressable = await isValidSeen(chron)
       }
-      if (addressable) return resolve(chron, false, false)
+      if (addressable) return resolve(chron, { record: false })
    }
    // Out of range, expired below add_idx, or a deleted feed: the exact article
    // is unaddressable — keep goTo's clamp (nearest live match, else last).
-   return goTo(chron, false)
+   return goTo(chron, { record: false })
 }
 
 // Move the navigation cursor to an exact, already-known-matching chronIdx — the

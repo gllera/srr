@@ -31,29 +31,44 @@ export async function api(method: string, path: string, body?: unknown, contentT
    } catch {
       if (res.ok) throw new Error("invalid JSON from " + path)
    }
-   if (!res.ok) {
-      const errBody =
-         data && typeof data === "object" && "error" in data ? String((data as { error: unknown }).error) : ""
-      let msg = errBody || text.trim().slice(0, 300) || res.statusText
-      // Give 409 (store lock contention) an explicit affordance so it does not
-      // read like a validation 400 in the banner (S40 spec §3). The server's own
-      // message already names the lock; only a lock-less intermediary 409 is tagged.
-      if (res.status === 409 && !/lock/i.test(msg)) msg = "the fetch loop holds the store lock — retry (" + msg + ")"
-      throw new Error(msg)
-   }
+   if (!res.ok) throw new Error(errorMessage(res, text))
    return data
+}
+
+// The human message behind a failed Response — the ONE place the server's
+// {"error": …} envelope is unwrapped and the 409 lock affordance is added.
+// Shared with streamSSE below, which used to re-derive only half of it: it
+// raised the raw body, so a pre-stream error (backend/serve_fetch.go's
+// "streaming unsupported" and `invalid feed id %q` both go through writeErr)
+// surfaced in the banner as literal {"error":"…"} JSON — exactly the opaque
+// body this unwrap exists to prevent — and never carried the 409 tag.
+//
+// statusText is empty over HTTP/2, hence the body-first order.
+export function errorMessage(res: Response, text: string): string {
+   let data: unknown = null
+   try {
+      data = text ? JSON.parse(text) : null
+   } catch {
+      // not JSON — fall through to the raw body
+   }
+   const errBody = data && typeof data === "object" && "error" in data ? String((data as { error: unknown }).error) : ""
+   const msg = errBody || text.trim().slice(0, 300) || res.statusText
+   // Give 409 (store lock contention) an explicit affordance so it does not
+   // read like a validation 400 in the banner (S40 spec §3). The server's own
+   // message already names the lock; only a lock-less intermediary 409 is tagged.
+   return res.status === 409 && !/lock/i.test(msg) ? "the fetch loop holds the store lock — retry (" + msg + ")" : msg
 }
 
 export const apiGet = (p: string): Promise<unknown> => api("GET", p)
 
 // streamSSE POSTs to path and invokes onEvent({event, data}) for each SSE
 // frame; an optional AbortSignal cancels the stream (and, server-side, the
-// fetch cycle it drives — the handler runs under the request context). A 409
-// (the fetch loop holds the store lock) surfaces its message verbatim.
+// fetch cycle it drives — the handler runs under the request context). A
+// pre-stream failure raises through the SAME envelope api() uses, 409 lock
+// affordance included — see errorMessage above.
 export async function streamSSE(path: string, onEvent: (ev: SSEEvent) => void, signal?: AbortSignal): Promise<void> {
    const res = await fetch(path, { method: "POST", signal })
-   // statusText is empty over HTTP/2 — prefer the error body (see api()).
-   if (!res.ok) throw new Error((await res.text()).trim().slice(0, 300) || res.statusText)
+   if (!res.ok) throw new Error(errorMessage(res, await res.text()))
    const reader = res.body!.getReader()
    const dec = new TextDecoder()
    let buf = ""

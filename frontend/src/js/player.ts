@@ -34,7 +34,7 @@ import { mediaList } from "./article-view"
 import * as data from "./data"
 import { bindPressMenu, btn, type MenuItem } from "./dropdown"
 import { el } from "./els"
-import { stampSrc } from "./fmt"
+import { isRelative, resolvePackRelative, stampSrc } from "./fmt"
 import { AXIS_SLOP, ROW_SWIPE_TRIGGER, verticalDominant } from "./gestures"
 import { PLAYER_RATE_KEY, playerStateKey } from "./keys"
 import { restartAnimation } from "./motion"
@@ -212,8 +212,15 @@ function safeSrc(raw: string, base: URL): string | null {
    // An absolute http(s) media URL is whatever the feed carried — same trust
    // level as any <audio src> the sanitizer already lets through. A RELATIVE one
    // names a store object, so it must stay within the store.
-   const isRelative = !/^[a-z][a-z0-9+.-]*:/i.test(raw) && !raw.startsWith("//")
-   if (isRelative && !u.href.startsWith(base.href)) return null
+   //
+   // Both halves come from fmt.ts rather than being restated here, because the
+   // restatement had already drifted on the case that matters: it excluded a
+   // protocol-relative "//host" from `isRelative` and so skipped the bounds
+   // check entirely, returning a foreign origin verbatim — where fmt counts
+   // "//host" as relative precisely SO the bounds check drops it. That is the
+   // one shape this function exists to catch, since its input is the untrusted
+   // srr-player localStorage blob.
+   if (isRelative(raw) && resolvePackRelative(raw, base) === null) return null
    return u.href
 }
 

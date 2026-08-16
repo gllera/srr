@@ -49,6 +49,7 @@ vi.mock("./fmt", () => ({
    countBadge: (n: number) => (n > 999 ? "999+" : String(n)),
    formatBytes: (n: number) => `${n}B`,
    isStale: vi.fn(() => false),
+   STALE_AFTER_SEC: 3 * 86400,
    // The real body — feedGrade's age arithmetic is what these cases assert.
    ageSince: (unix: number) => Math.max(0, Math.floor(Date.now() / 1000) - unix),
 }))

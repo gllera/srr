@@ -22,15 +22,15 @@
    </head>
    <body>
       <!-- srr:skeleton:start -->
+      <!-- The skeleton is index.html's, verbatim; its prose lives THERE, and
+           design.test.ts compares the two regions with comments stripped so this
+           copy never has to carry them. Edit index.html, then re-sync here. -->
+
       <div class="srr-popup" role="dialog" aria-modal="true" aria-live="assertive">
          <span class="srr-popup-text"></span>
          <button class="srr-popup-retry srr-hidden">Retry</button>
          <button class="srr-popup-close" aria-label="Close">&times;</button>
       </div>
-      <!-- Image-proxy settings dialog — a true centered modal (dimmed backdrop),
-           opened from the ⋯ overflow menu. dropdown.ts injects the editable body
-           (input + Save/Disable/Cancel) into .srr-imgproxy-body on open, shows the
-           overlay, traps focus, and closes on Escape / backdrop / commit. -->
       <div class="srr-imgproxy-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-imgproxy-title">
          <div class="srr-imgproxy-card">
             <h2 class="srr-imgproxy-title" id="srr-imgproxy-title">Image proxy</h2>
@@ -41,9 +41,6 @@
             <div class="srr-imgproxy-body"></div>
          </div>
       </div>
-      <!-- Backup / Restore dialog — export the portable profile (seen progress,
-           saved articles, preferences) as JSON, or import a blob from another
-           device. dropdown.ts populates .srr-backup-body on open. -->
       <div class="srr-backup-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-backup-title">
          <div class="srr-backup-card">
             <h2 class="srr-backup-title" id="srr-backup-title">Backup / Restore</h2>
@@ -54,9 +51,6 @@
             <div class="srr-backup-body"></div>
          </div>
       </div>
-      <!-- Sync dialog — set the optional cross-device sync endpoint (any URL
-           answering GET/PUT of the profile JSON). Same editor shape as the
-           image-proxy dialog; dropdown.ts populates .srr-sync-body on open. -->
       <div class="srr-sync-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-sync-title">
          <div class="srr-sync-card">
             <h2 class="srr-sync-title" id="srr-sync-title">Sync</h2>
@@ -68,12 +62,6 @@
             <div class="srr-sync-body"></div>
          </div>
       </div>
-      <!-- Feed / tag info dialog — opened by tapping a picker filter row while
-           the header Info (stats) toggle is pressed. A read-only detail card;
-           picker.ts builds the per-feed / per-tag / store body into
-           .srr-info-body on open. Same centered-modal pattern as the
-           image-proxy / backup dialogs (dimmed backdrop, focus trap, Escape /
-           backdrop close). -->
       <div class="srr-info-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-info-title">
          <div class="srr-info-card">
             <header class="srr-info-head">
@@ -100,16 +88,9 @@
             <div class="srr-search-note" role="status" hidden></div>
          </div>
          <article class="srr-reader" hidden>
-            <!-- The whole masthead row is the article's "open original" permalink
-                 (source · date · title) — one link, so the title's former inner <a>
-                 is unwrapped (no <a> nesting). A titleless feed hides just the <h1>
-                 and the source · date kicker stands in as the permalink; the reader
-                 empty-state hides the whole row. app.ts sets/removes its href. -->
             <a class="srr-title-row" rel="noreferrer">
                <div class="srr-kicker">
                   <span class="srr-source"></span>
-                  <!-- Desk/section the dispatch is filed under (the feed's tag), a
-                       wire slug after the source name. Empty (hidden) when untagged. -->
                   <span class="srr-desk"></span>
                   <time class="srr-date"></time>
                </div>
@@ -118,39 +99,13 @@
             <div class="srr-content"></div>
          </article>
          <div class="srr-list" id="srr-list" aria-label="Article list" hidden></div>
-         <!-- The column rule: the split pane's resize handle, and the round's one
-              new visual. A hairline between the list and the article that
-              thickens into the accent under the cursor. pane.ts stamps its ARIA
-              (role=separator + aria-value*) and owns the drag; it is empty here
-              so a narrow viewport renders nothing at all. It stops at the
-              toolbar's top edge, so the rail below reads as continuous and the
-              two never contend for a layer. -->
          <div class="srr-pane-grip"></div>
-         <!-- Filter picker overlay (ephemeral; not hash-routed). Opened by the
-              toolbar's filter button (.srr-filter, both surfaces); a fixed
-              full-viewport panel with its own scroll, so the list keeps its scroll
-              position untouched underneath. picker.ts renders the [ALL] / ★ Saved
-              scope-chip pair and the feed / tag rows (tag groups, feeds — chips,
-              health tints, inline ×N unread counts) into .srr-picker-filter;
-              picking one closes the overlay and
-              re-filters the list — unless the header Info (stats) toggle is
-              pressed, in which case a tap opens the row's detail card instead.
-              The settings that used to share this surface live on the
-              now-viewing readout's anchored menu (app.ts openSettingsMenu). -->
          <section class="srr-picker" aria-label="Feeds" hidden>
             <header class="srr-picker-head">
                <h2 class="srr-picker-title">Feeds</h2>
-               <!-- The favorites-mode toggle (RDR9): while pressed, tapping a FEED row
-                    marks/unmarks it instead of filtering, and the marked feeds ride a
-                    "★ Favorites" lane above the tag groups. A third row mode rather
-                    than a per-row star: it costs one control instead of one per row,
-                    and it is the same idiom that replaced the per-row ⓘ buttons. -->
                <button class="srr-picker-fav" aria-pressed="false" aria-label="Mark favorites" title="Mark favorites">
                   <span class="srr-picker-fav-icon" aria-hidden="true">&#9733;</span>
                </button>
-               <!-- The stats-mode toggle: while pressed, tapping a filter row opens
-                    its detail card (the info dialog) instead of filtering.
-                    picker.ts owns the state and resets it on every open. -->
                <button
                   class="srr-picker-info"
                   aria-pressed="false"
@@ -163,14 +118,8 @@
                      <path d="M12 7.6h.01" />
                   </svg>
                </button>
-               <!-- The unread-only view toggle (was in the settings menu). aria-pressed
-                    tracks the mode — pressed = read articles shown; picker.ts syncs it. -->
                <button class="srr-picker-showread" aria-pressed="false" title="Show read articles">Show read</button>
                <button class="srr-picker-close" aria-label="Close" title="Close">&times;</button>
-               <!-- Type-to-filter (RDR9). Wraps onto its own header line, so it sticks
-                    with the header inside the overlay's scroll. picker.ts narrows the
-                    ALREADY-RENDERED rows by folded substring (a visibility pass, never
-                    a rebuild — the async unread badges filling in behind it survive). -->
                <div class="srr-picker-search">
                   <span class="srr-search-icon" aria-hidden="true"></span>
                   <input
@@ -188,33 +137,8 @@
             </header>
             <div class="srr-picker-filter" aria-label="Filter"></div>
          </section>
-         <!-- The bottom bar, in two SEGMENTS — one per pane. Split view parks
-              .srr-tb-pane exactly over the list pane and .srr-tb-reader over
-              the reading column, so a control sits above the surface it acts
-              on: the now-viewing readout and the filter funnel govern the
-              LIST, and pinned over the article instead they were ~700px from
-              the pane they steer. The readout is a button — tapping it opens
-              the anchored settings menu; the filter button opens the filter
-              picker overlay; the open-article button jumps to the article you
-              were reading (the tap counterpart of the reader's back button);
-              the reader's next pill doubles as the frontier-menu anchor
-              (right-click / long-press).
-              Below the split breakpoint the two wrappers are display:contents
-              (styles.css), so every button is a direct grid item of the bar
-              again and the phone templates place exactly the elements they
-              always did. That retires the DOM-interleaving trick this bar used
-              to encode — the phone reader bar now NAMES its columns, because
-              one filter button shared by both surfaces cannot be ordered
-              correctly for both by document order alone. The other surface's
-              controls are display:none per the view rules in styles.css. -->
          <nav class="srr-toolbar" aria-label="Article navigation">
             <span class="srr-tb-pane">
-               <!-- Split-view only: collapse / restore the list pane. aria-expanded
-                    (not aria-pressed) because it discloses a region, and
-                    aria-controls names it. The attributes here are the OPEN
-                    state's; pane.ts owns the click and keeps all three in step
-                    from that point on, including the states no press produces
-                    (a drag collapse, a restore from storage). -->
                <button
                   class="srr-pane-toggle"
                   aria-expanded="true"
@@ -245,10 +169,6 @@
             <span class="srr-tb-reader">
                <button class="srr-back" aria-label="Back to list" title="Back to list">
                   <span class="srr-back-icon" aria-hidden="true"></span>
-                  <!-- Active-filter breadcrumb: names the filtered list this button
-                       returns to (#tag / feed name / ★ Saved). Empty (hidden) when
-                       reading the full unfiltered wire. aria-hidden: the button's
-                       aria-label carries the filter for AT (app.ts). -->
                   <span class="srr-back-label" aria-hidden="true"></span>
                </button>
                <button
@@ -284,25 +204,6 @@
                </button>
             </span>
          </nav>
-         <!-- Podcast mini-player (player.ts) — the transport for whatever is
-              playing right now, a sibling of the toolbar it stacks on top of.
-              The bar owns NO media element of its own: the article's live
-              <audio>/<video> is MOVED in here — one atomic appendChild, which
-              the HTML spec's "removed from a Document" pause steps let through
-              — before reader.ts's replaceChildren destroys the content that
-              held it, and moved back into its slot when you return to the
-              owning article. That relocation is why prev/next and
-              back-to-list stop killing playback: same node, same buffer, no
-              second element, no currentTime handoff, no re-buffer gap; video
-              rides the identical path, CSS-constrained to a compact frame.
-              Relocation is about SURVIVAL; this bar is about CONTROL, so it
-              shows whenever media is active and you cannot see it — its
-              article isn't rendered, or is rendered but scrolled away — which
-              is what makes the transport follow you down the show notes
-              instead of the element leaping out of the prose as you scroll.
-              data-kind ("audio"/"video") selects the media-host treatment and
-              data-src carries the feed's source color, the same ramp the list
-              rails and the reader masthead wear. -->
          <div class="srr-player" role="region" aria-label="Now playing" hidden>
             <div class="srr-player-media"></div>
             <div class="srr-player-body">
@@ -334,12 +235,6 @@
             </div>
          </div>
          <div class="srr-pin-progress" hidden></div>
-         <!-- Transient snackbar: a report of something that already happened,
-              with at most one way to answer it (Undo a frontier jump, reload
-              after a worker update). Deliberately NOT the .srr-popup dialog —
-              that one is modal and takes focus, which is right for an error you
-              must acknowledge and wrong for a notice you may ignore. role=status
-              announces it once without stealing the reading position. -->
          <div class="srr-snackbar" role="status" hidden>
             <span class="srr-snackbar-text"></span>
             <button class="srr-snackbar-action srr-hidden"></button>

@@ -98,7 +98,7 @@ export function imgProxy(url: string, prefix: string): string {
 // (e.g. "assets/ab/cd.jpg", "/img/x.jpg", "#frag"). A protocol-relative "//host"
 // ref counts as relative too: it has no scheme, and resolvePackRelative's bounds
 // check then drops it because it resolves to a foreign origin.
-function isRelative(v: string): boolean {
+export function isRelative(v: string): boolean {
    return !ABS_SCHEME.test(v)
 }
 
@@ -112,7 +112,7 @@ function isRelative(v: string): boolean {
 // resolve against its own store, never the home base (docs/MULTI-STORE-SPEC.md
 // MS7) — resolving a peer ref against home would let a peer address the home
 // origin.
-function resolvePackRelative(v: string, base: URL): string | null {
+export function resolvePackRelative(v: string, base: URL): string | null {
    // new URL() THROWS (not returns null) on a relative-shaped ref WHATWG rejects
    // — e.g. "//[" or "//10.0.0.1:99999999" (which Go's lenient url.Parse accepts,
    // so it can survive the backend into content). Drop the attribute on a throw;
@@ -469,7 +469,7 @@ export function timeAgoProse(unix: number): string {
 
 // Crude global freshness threshold: 3 days without a successful backend fetch
 // is long enough to suggest the backend may be down.
-const STALE_AFTER_SEC = 3 * 86400
+export const STALE_AFTER_SEC = 3 * 86400
 
 // Returns true when the last fetch is old enough to suggest something is wrong.
 // A fetched_at of 0 (never fetched / absent) is treated as not-stale: there is

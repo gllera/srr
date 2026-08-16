@@ -12,6 +12,19 @@ vi.mock("./data", () => data)
 vi.mock("./fmt", () => ({
    srcColorIndex: () => 3,
    stampSrc: (n: HTMLElement) => (n.dataset.src = "3"),
+   // The REAL bodies: safeSrc's store-base bound is what this suite's persisted
+   // -blob cases assert, so a stub would test nothing. Kept byte-equivalent to
+   // fmt.ts — a protocol-relative "//host" counts as relative precisely so the
+   // bounds check below rejects it.
+   isRelative: (v: string) => !/^[a-z][a-z0-9+.-]*:/i.test(v),
+   resolvePackRelative: (v: string, base: URL) => {
+      try {
+         const resolved = new URL(v, base).href
+         return resolved.startsWith(base.href) ? resolved : null
+      } catch {
+         return null
+      }
+   },
 }))
 // The chip's long-press menu goes through the shared anchored card; mocking it
 // keeps this suite off dropdown's DOM and lets tests invoke item actions. The

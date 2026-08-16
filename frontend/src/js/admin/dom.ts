@@ -21,6 +21,12 @@ export function el<K extends keyof HTMLElementTagNameMap>(
    for (const [k, v] of Object.entries(attrs || {})) {
       if (k === "class") e.className = String(v)
       else if (k.startsWith("on")) e.addEventListener(k.slice(2), v as EventListener)
+      // A boolean sets the PROPERTY, never the attribute: setAttribute("checked",
+      // "false") checks the box — the presence of the attribute is what counts —
+      // so the attribute path silently inverts every `false` it is handed. The
+      // call sites that predate this all worked around it with the
+      // `x ? "" : null` idiom, which stays valid.
+      else if (typeof v === "boolean") (e as unknown as Record<string, unknown>)[k] = v
       else if (v !== null && v !== undefined) e.setAttribute(k, String(v))
    }
    for (const kid of kids) if (kid !== "") e.append(kid) // "" = no child — keeps :empty selectors honest

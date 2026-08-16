@@ -1,3 +1,5 @@
+// @vitest-environment node
+// No DOM: this suite is pure logic, so it skips jsdom construction (~0.7s/file).
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { META_PACK_SIZE, SEARCH_BLOOM_BYTES, SEARCH_BLOOM_K, SEARCH_GRAM } from "./format.gen"

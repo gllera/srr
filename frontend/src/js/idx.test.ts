@@ -1,3 +1,5 @@
+// @vitest-environment node
+// No DOM: this suite is pure logic, so it skips jsdom construction (~0.7s/file).
 import { describe, it, expect } from "vitest"
 import { IDX_BOUNDARY_SIZE, IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_STATE_SIZE } from "./format.gen"
 import { IDX_PACK_SIZE, lowerBound, makeFeedsLookup, makeIdxPack, parseIdxHeaders, tallyUnread } from "./idx"

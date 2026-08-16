@@ -5,12 +5,15 @@
 // this owns how wide the pane is and whether it is on screen. Imports only
 // keys.ts, so it stays unit-testable without a running pack server.
 //
-// Four things change the pane's VISIBILITY, and only three of them are a press:
-// the rail's .srr-pane-toggle button (wired here), the grip's Enter/Space,
-// app.ts's `L` — and a DRAG past the collapse threshold, which puts the pane
-// away without anybody aiming at a hide control at all. That fourth one is why
-// the button's label is synced from applyHidden below rather than from the
-// committed setter.
+// FIVE things change the pane's VISIBILITY, and only three of them are a press:
+// the rail's .srr-pane-toggle button (wired here), the grip's Enter/Space and
+// app.ts's `L` — plus a DRAG past the collapse threshold, and the grip's own
+// ARROW keys, which walk the width down through applyDragWidth unclamped and so
+// cross that same threshold (from the 280 floor a single Shift+← is 216, below
+// PANE_COLLAPSE_W). Neither of the last two aims at a hide control at all, which
+// is why the button's label is synced from applyHidden below rather than from
+// the committed setter. Note the arrow path also hides the GRIP (styles.css
+// display:none), so the key that did it cannot undo it — the toggle or `L` can.
 // Two custom properties, one written here and one derived in CSS:
 //   --split-pane-open-w  the width the pane is SET to. Written on <html> here,
 //                        never zero. tokens.css carries the default, because

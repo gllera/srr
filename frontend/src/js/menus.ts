@@ -25,7 +25,7 @@ import {
 } from "./dropdown"
 import { el } from "./els"
 import * as list from "./list"
-import { addMount, removeMount, type MountRecord } from "./mounts"
+import { addMount, mountLabel, removeMount, type MountRecord } from "./mounts"
 import * as nav from "./nav"
 import * as picker from "./picker"
 import { forgetMountState, pinMenuEntry, postMounts } from "./pin-ui"
@@ -235,7 +235,12 @@ function openMountsDialog(): void {
             .map((r) => ({
                id: r.id,
                url: r.url,
-               label: r.label,
+               // Through mountLabel, the one owner picker.ts and reader.ts
+               // already use: an unlabeled HOME mount reads "Home" everywhere
+               // else and its full URL here, and an unlabeled peer printed its
+               // URL twice — once as the label line, once as the url line
+               // directly below it.
+               label: mountLabel(r),
                role: r.role,
                chip: picker.mountChip(data.mountStatus(r.id)),
             })),
