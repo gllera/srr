@@ -1,6 +1,9 @@
+import { POOL_LIMIT, runPool } from "./cache"
 import * as data from "./data"
-import { timeAgo, srcColorIndex, dayLabelCtx, dayLabelWith, countBadge, CHECK_SVG } from "./fmt"
+import { el, emptyStateEl } from "./empty-state"
+import { timeAgo, stampSrc, dayLabelCtx, dayLabelWith, countBadge, type DayLabelCtx } from "./fmt"
 import { ROW_SWIPE_TRIGGER, setPullRefresh, setRowSwipe } from "./gestures"
+import { prefersReducedMotion, restartAnimation } from "./motion"
 import * as nav from "./nav"
 // Named, NOT `import * as refresh`: this module exports its own refresh(), and a
 // namespace binding of that name is shadowed by the local function declaration —
@@ -22,7 +25,7 @@ import { isSplit } from "./split"
 // knows its own scope, so the row swipe passes its own instead of adding a
 // second frontier-write path. Everything else — the tallies, the seen map, the
 // undo machinery — still comes through nav.
-import { markUnreadFrom as lowerFeedFrom, recordSeen as raiseFeedTo } from "./seen"
+import { feedKey, markUnreadFrom as lowerFeedFrom, recordSeen as raiseFeedTo } from "./seen"
 
 // The list surface — the app's home: a scannable feed of headlines under the
 // current filter, newest-first, source-keyed with read/unread weighting. Tapping a row
@@ -56,20 +59,21 @@ import { markUnreadFrom as lowerFeedFrom, recordSeen as raiseFeedTo } from "./se
 // meta lags), so this is a paint-budget knob, not a fetch-count one.
 const BATCH = 30
 
-// Max meta-card fetches in flight while filling a freshly-rendered batch. Bounds
-// concurrency so the packs NEAREST the navigation anchor (filled first, see
-// render) actually win the network before off-screen rows, instead of all BATCH
-// fetches racing. ~the classic per-origin connection budget.
-const FILL_CONCURRENCY = 6
-
 // Start fetching the next batch this far beyond the fold (a scroll runway so
 // rows are ready before they're scrolled into view), in either direction.
 const ROOT_MARGIN = "800px"
 
 // Per-row save star. Tapping it toggles nav.toggleSaved without opening the
 // reader; the row carries .srr-row-saved for the filled look.
-const STAR_SVG =
-   '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.4l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z"/></svg>'
+// Parsed ONCE and cloned per row: rowEl runs for up to 60 rows on a render and 30
+// more on every page-in, and an innerHTML assignment is a full HTML parse where
+// cloning a two-node subtree is not.
+const STAR_SVG = (() => {
+   const t = document.createElement("template")
+   t.innerHTML =
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.4l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z"/></svg>'
+   return t.content.firstElementChild as SVGElement
+})()
 
 let container: HTMLElement
 let rowsEl: HTMLElement | null = null
@@ -262,12 +266,6 @@ export function setup(
    })
 }
 
-function el(tag: string, className: string): HTMLElement {
-   const e = document.createElement(tag)
-   e.className = className
-   return e
-}
-
 // Count `n` freshly prepended rows toward the arrivals pill and (re)paint it.
 // Search is exempt: its rows are an explicit query result rather than a wire
 // that grows, and the pinned search bar owns the strip of viewport the pill
@@ -318,9 +316,7 @@ function paintNewPill(): void {
 // reach a scroll behavior, so this one check lives here).
 function jumpToNew(): void {
    resetNewPill()
-   const reduced =
-      typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches
-   if (reduced) sc.to(0)
+   if (prefersReducedMotion()) sc.to(0)
    else sc.smoothTo(0)
    notifyScroll()
 }
@@ -384,7 +380,7 @@ let swipeClickGuard = false
 // the one consumer of the record, so the invariant stays local to it: a snapshot
 // from another lane simply fails the guard and falls through to the explicit
 // rewind, which is exactly what a caller with no valid snapshot should do.
-let readSwipeUndo: { mid: string; chron: number; feed: number; to: number; undo: nav.FrontierUndo } | null = null
+let readSwipeUndo: { mid: string; chron: number; feed: number; undo: nav.FrontierUndo } | null = null
 
 // ★ Saved / search are peek modes: ./seen exempts them from every frontier write,
 // so the read toggle has nothing to act on there. swipeAction declines the
@@ -511,16 +507,16 @@ function toggleRowSave(a: HTMLElement): void {
 
 // Mark the row read: raise its feed's seen frontier to this chron.
 //
-// recordSeen is ./seen's raise primitive — it raises `article.f`'s frontier to
+// recordSeen is ./seen's raise primitive — it raises the feed's frontier to
 // `pos` plus every member of the scope, stamps the per-key ordering timestamp,
 // pushes to sync, and snapshots the move for S57's undo. An EMPTY membership is
 // exactly the single-feed raise this gesture means: OPENING a row makes the same
 // statement across the whole navigation list, and a row gesture is about one row.
 // Going through that body keeps one owner for the seen write, the sync push and
-// the snapshot. Only `.f` is read off the article, hence the minimal literal.
+// the snapshot.
 function markRowRead(chron: number, feed: number): void {
-   const key = "feed:" + feed
-   raiseFeedTo({ f: feed, a: 0, p: 0, t: "", l: "", c: "" }, chron, { peek: frontierPeek(), members: [] })
+   const key = feedKey(feed)
+   raiseFeedTo(feed, chron, { peek: frontierPeek(), members: [] })
    // Adopt the snapshot only if it is unmistakably the raise just made (this
    // feed's key alone, moved to this chron) — pendingFrontierUndo() otherwise
    // still holds whatever came before, e.g. when the feed is unknown to the store
@@ -528,7 +524,7 @@ function markRowRead(chron: number, feed: number): void {
    const u = nav.pendingFrontierUndo()
    readSwipeUndo =
       u && u.to === chron && Object.keys(u.prev).length === 1 && key in u.prev
-         ? { mid: data.activeStore().mid, chron, feed, to: chron, undo: u }
+         ? { mid: data.activeStore().mid, chron, feed, undo: u }
          : null
    // Answer the offer HERE, not on the next reader render — by then the swipe is
    // minutes old and on another surface, announcing a number nobody can place.
@@ -562,7 +558,7 @@ function markRowUnread(chron: number, feed: number): void {
       u.mid === data.activeStore().mid &&
       u.chron === chron &&
       u.feed === feed &&
-      nav.getSeenMap()["feed:" + feed] === u.to
+      nav.getSeenMap()[feedKey(feed)] === chron
    ) {
       if (nav.undoFrontierMove(u.undo)) return
    }
@@ -616,7 +612,7 @@ export function rowEl(
    star.setAttribute("role", "button")
    star.setAttribute("aria-label", "Save article")
    star.setAttribute("aria-pressed", String(saved))
-   star.innerHTML = STAR_SVG
+   star.appendChild(STAR_SVG.cloneNode(true))
    a.append(body, star)
    if (art) fillRow(a, art, seen)
    else a.classList.add("srr-row-skeleton")
@@ -657,7 +653,7 @@ export function fillRow(a: HTMLElement, art: import("./format.gen").IMetaWire, s
    // Stable per-source color slot (see styles.css [data-src]): the source-colored
    // left rail + eyebrow let the feed be triaged by origin.
    a.dataset.feed = String(art.f)
-   a.dataset.src = String(srcColorIndex(art.f))
+   stampSrc(a, art.f)
    // The article's own timestamp — relabelDividers buckets rows into day strata
    // by comparing the day label of consecutive rows.
    a.dataset.ts = String(art.w)
@@ -678,25 +674,6 @@ export function fillRow(a: HTMLElement, art: import("./format.gen").IMetaWire, s
    }
 }
 
-// Pin each row's REAL height as its content-visibility intrinsic size. Rows are
-// virtualized with `content-visibility: auto; contain-intrinsic-size: auto 4rem`
-// (styles.css) — but a real row is 1- or 2-line (≈60 vs 80px), so the 4rem (64px)
-// placeholder is wrong for every row. With the list's browser scroll anchoring
-// off (overflow-anchor:none, for Safari parity), nothing absorbs a placeholder→
-// real correction happening ABOVE the viewport: the moment a skipped row renders
-// (scrolled into view, or swept past by a prepend's compensation scroll) its size
-// jumps and shoves the viewport — the upward-scroll jump. Measuring each row once
-// and pinning its true height makes the reserved space exact, so a row's size
-// never changes when it later renders or skips, on any engine. Called at every
-// insertion path so the invariant "every loaded row's intrinsic size is its real
-// height" holds, keeping the fetchNewer prepend compensation exact. One forced
-// layout per batch (the offsetHeight read); the rows stay virtualized afterward.
-//
-// `contain-intrinsic-size` sizes the CONTENT box, but offsetHeight is the
-// border-box (box-sizing:border-box). Pinning offsetHeight directly makes a
-// skipped row reserve offsetHeight + padding + border — ~19px too tall per row,
-// which over-scrolls the prepend compensation. Subtract the row chrome (identical
-// for every .srr-row) so the reserved border-box equals the real rendered height.
 // The list's DOM window: how many screens' worth of rows stay materialized,
 // centered on the viewport (~3 above, ~3 below the visible one).
 //
@@ -726,19 +703,36 @@ function rowBudget(rows: HTMLElement[]): number {
    return Math.max(MIN_WINDOW_ROWS, Math.ceil((WINDOW_VIEWPORTS * sc.viewportH()) / mean))
 }
 
+// Viewport-anchored scroll compensation — the ONE bracket trimWindow's removal
+// and fetchNewer's prepend both run their mutation inside: record where `anchor`
+// (a row actually reaching into the viewport) sits, mutate, and scroll by how
+// far it moved. Never a scrollHeight delta, which folds in changes that aren't
+// directly above the viewport and lurches it.
+function compensateAround(anchor: HTMLElement | null, mutate: () => void): void {
+   const before = anchor ? anchor.getBoundingClientRect().top : 0
+   mutate()
+   const shift = anchor ? anchor.getBoundingClientRect().top - before : 0
+   if (shift) {
+      sc.to(sc.y() + shift)
+      notifyScroll()
+   }
+}
+
 // Drop rows past the budget from the FAR side of the direction just paged.
 //
 // A trimmed edge is RE-PAGEABLE, never exhausted: the matching exhausted flag is
 // cleared and its terminus removed, so scrolling back re-materializes those rows
 // through the existing fetch paths (rowEl/fillRow), which is the whole point —
-// nothing here knows how to build a row.
-//
-// Removing rows above the viewport shifts the content up, so the scroll is
-// compensated the same way fetchNewer's prepend is: by how far a row that is
-// actually IN the viewport moves, never by a scrollHeight delta (which folds in
-// changes that aren't directly above the viewport and lurches it).
+// nothing here knows how to build a row. The removal runs inside
+// compensateAround, whose bracket is what keeps the viewport still.
 function trimWindow(side: "top" | "bottom"): void {
    if (!rowsEl) return
+   // Every budget rowBudget can return is at least MIN_WINDOW_ROWS, so a window
+   // that small has no excess by construction — bail before materializing the
+   // row list and before rowBudget's offsetHeight sample forces a layout (it
+   // runs right after pinHeights dirtied it). childElementCount counts the
+   // dividers and termini too, so it can only OVER-estimate the row count.
+   if (rowsEl.childElementCount <= MIN_WINDOW_ROWS) return
    const rows = [...rowsEl.querySelectorAll<HTMLElement>("a.srr-row")]
    const excess = rows.length - rowBudget(rows)
    if (excess <= 0) return
@@ -750,154 +744,67 @@ function trimWindow(side: "top" | "bottom"): void {
    // Anchor among the SURVIVORS, so a trim that reaches into the viewport still
    // measures against a row that is still in the document afterwards.
    const anchor = kept.find((r) => r.getBoundingClientRect().bottom > 0) ?? kept[0]
-   const anchorBefore = anchor.getBoundingClientRect().top
+   compensateAround(anchor, () => {
+      for (const r of victims) r.remove()
 
-   for (const r of victims) r.remove()
-
-   // The window edge moved, so the paging cursor moves with it — and the edge is
-   // open again by construction.
-   if (side === "top") {
-      newest = Number(kept[0].dataset.chron)
-      exhaustedTop = false
-      syncTopTerminus() // no compensate: the bracket below covers this removal too
-      // The rows the pill points at just left the window (paged far enough down
-      // that the recycler reclaimed them), so "jump to the top" would no longer
-      // land on them. A pointer that has lost its referent is dropped, not kept.
-      resetNewPill()
-   } else {
-      oldest = Number(kept[kept.length - 1].dataset.chron)
-      exhaustedBottom = false
-      syncBottomTerminus()
-   }
-   relabelDividers()
-
-   const shift = anchor.getBoundingClientRect().top - anchorBefore
-   if (shift) {
-      sc.to(sc.y() + shift)
-      notifyScroll()
-   }
+      // The window edge moved, so the paging cursor moves with it — and the edge
+      // is open again by construction.
+      if (side === "top") {
+         newest = Number(kept[0].dataset.chron)
+         exhaustedTop = false
+         syncTopTerminus() // no compensate: the enclosing bracket covers this removal too
+         // The rows the pill points at just left the window (paged far enough down
+         // that the recycler reclaimed them), so "jump to the top" would no longer
+         // land on them. A pointer that has lost its referent is dropped, not kept.
+         resetNewPill()
+      } else {
+         oldest = Number(kept[kept.length - 1].dataset.chron)
+         exhaustedBottom = false
+         syncBottomTerminus()
+      }
+      relabelDividers()
+   })
 }
 
+// The per-row chrome (padding + border) subtracted from every measured height.
+// Identical for every .srr-row — .srr-row's box carries no media-query override —
+// so it is sampled once per build instead of once per pinHeights call, which the
+// land-once settle loop runs up to 20 times.
+let rowChrome = -1
+
+// Pin each row's REAL height as its content-visibility intrinsic size. Rows are
+// virtualized with `content-visibility: auto; contain-intrinsic-size: auto 4rem`
+// (styles.css) — but a real row is 1- or 2-line (≈60 vs 80px), so the 4rem (64px)
+// placeholder is wrong for every row. With the list's browser scroll anchoring
+// off (overflow-anchor:none, for Safari parity), nothing absorbs a placeholder→
+// real correction happening ABOVE the viewport: the moment a skipped row renders
+// (scrolled into view, or swept past by a prepend's compensation scroll) its size
+// jumps and shoves the viewport — the upward-scroll jump. Measuring each row once
+// and pinning its true height makes the reserved space exact, so a row's size
+// never changes when it later renders or skips, on any engine. Called at every
+// insertion path so the invariant "every loaded row's intrinsic size is its real
+// height" holds, keeping the fetchNewer prepend compensation exact. One forced
+// layout per batch (the offsetHeight read); the rows stay virtualized afterward.
+//
+// `contain-intrinsic-size` sizes the CONTENT box, but offsetHeight is the
+// border-box (box-sizing:border-box). Pinning offsetHeight directly makes a
+// skipped row reserve offsetHeight + padding + border — ~19px too tall per row,
+// which over-scrolls the prepend compensation. Subtract the row chrome (identical
+// for every .srr-row) so the reserved border-box equals the real rendered height.
 function pinHeights(rows: HTMLElement[]): void {
    if (!rows.length) return
    for (const r of rows) r.style.setProperty("content-visibility", "visible")
    const heights = rows.map((r) => r.offsetHeight) // single forced layout, then cached reads
-   const cs = getComputedStyle(rows[0])
-   const px = (v: string): number => parseFloat(v) || 0 // "" (jsdom) / "auto" → 0
-   const chrome = px(cs.paddingTop) + px(cs.paddingBottom) + px(cs.borderTopWidth) + px(cs.borderBottomWidth)
+   if (rowChrome < 0) {
+      const cs = getComputedStyle(rows[0])
+      const px = (v: string): number => parseFloat(v) || 0 // "" (jsdom) / "auto" → 0
+      rowChrome = px(cs.paddingTop) + px(cs.paddingBottom) + px(cs.borderTopWidth) + px(cs.borderBottomWidth)
+   }
+   const chrome = rowChrome
    rows.forEach((r, i) => {
       r.style.setProperty("contain-intrinsic-size", `auto ${Math.max(0, heights[i] - chrome)}px`)
       r.style.removeProperty("content-visibility")
    })
-}
-
-// The "wire when it's quiet": each empty/in-between state is a directed station —
-// a mono eyebrow (the wire voice) over one plain, specific line that says what's
-// true and what to do next, instead of a vague "Nothing here". The caught-up
-// state (unseen-only on, everything read) is the reward for the app's purpose.
-// Returns the element so BOTH surfaces mount the same voice: the list (home) drops
-// it into the feed, and the reader (app.ts) shows it in place of the bare
-// "(no matching articles)" placeholder — keyed off the same nav state, so the two
-// can't drift.
-export function emptyStateEl(opts: { notStarted?: boolean; startFeed?: number } = {}): HTMLElement {
-   const wrap = el("div", "srr-list-empty")
-   const eyebrow = (text: string): void => {
-      const e = el("span", "srr-empty-eyebrow")
-      e.textContent = text
-      wrap.appendChild(e)
-   }
-   const msg = el("p", "srr-empty-msg")
-   const em = (text: string): HTMLElement => {
-      const s = el("strong", "srr-empty-em")
-      s.textContent = text
-      return s
-   }
-
-   if (opts.notStarted) {
-      // The reader's "not started" placeholder: a feed/tag you've never opened
-      // (it HAS unread, but no already-read article to resume onto — the reader is
-      // a resume surface). Deliberately NOT the "All caught up" reward, which would
-      // be false here; a cold directive that points at Next — the placeholder
-      // arrives with Next armed (nav.switchFilter), so one step starts reading
-      // from the oldest unread right here, no detour through the list.
-      // Reader-only — the list surface shows the unread rows and never this state.
-      // The station OPENS with the wire-head — the never-read feed's name in the
-      // reader-masthead voice (mono, upper, source-tinted) between the same
-      // dashed hairlines that cap the list at LATEST/OLDEST — mirroring the
-      // article anatomy (masthead first) that replaces it once Next is tapped;
-      // the state + directive read under it. startFeed (the oldest unread's own
-      // feed, threaded from nav.switchFilter) names WHICH feed the backlog
-      // starts with: under a tag lane the label alone couldn't say which member
-      // feed is the never-read one. Fallback (probe blip): the lane label.
-      let label = ""
-      if (opts.startFeed !== undefined) label = data.feedTitle(opts.startFeed)
-      else {
-         const key = nav.getCurrentFilterKey()
-         if (key) label = nav.filterLabel(key)
-      }
-      if (label) {
-         const head = el("div", "srr-empty-wirehead")
-         const name = el("strong", "srr-empty-name")
-         name.textContent = label
-         if (opts.startFeed !== undefined) name.dataset.src = String(srcColorIndex(opts.startFeed))
-         head.appendChild(name)
-         wrap.appendChild(head)
-      }
-      eyebrow("Not started")
-      msg.textContent = "Tap Next to start reading."
-   } else if (nav.isSearchFilter()) {
-      const q = nav.searchQuery()
-      // A scoped query (RDR8) names its lane: "no match" means something quite
-      // different when the search only ever looked inside one feed or tag, and
-      // the pinned bar shows the words but never the scope.
-      const scope = nav.searchScope()
-      if (q) {
-         msg.append("No titles match ", em(`“${q}”`))
-         if (scope) msg.append(" in ", em(nav.filterLabel(scope)))
-         msg.append(". Try fewer or different words.")
-      } else {
-         eyebrow("Search")
-         msg.textContent = scope
-            ? `Find an article in ${nav.filterLabel(scope)} by its title.`
-            : "Find any article by its title."
-      }
-   } else if (nav.isSavedFilter()) {
-      // Saved is a peek mode independent of the unread-only flag (which defaults
-      // ON), so its empty state must be checked BEFORE the caught-up reward below
-      // — otherwise an empty Saved view mis-reads as "All caught up".
-      eyebrow("Nothing saved")
-      const star = el("span", "srr-empty-star")
-      star.textContent = "★"
-      msg.append("Tap ", star, " on any article to keep it here for later.")
-   } else if (nav.isUnreadOnly() && data.db.total_art > 0) {
-      // The one empty state that's a reward, not an absence (unseen-only spans
-      // [ALL] too): an empty list with articles present means there's nothing
-      // left to read. Mark it with a plain checkmark in the warm accent the
-      // cold/absent states never get; the eyebrow + line match the other states.
-      wrap.classList.add("srr-caughtup")
-      const check = el("div", "srr-caughtup-check")
-      check.setAttribute("aria-hidden", "true") // decorative; the eyebrow + line are the accessible text
-      check.innerHTML = CHECK_SVG
-      wrap.appendChild(check)
-      eyebrow("All caught up")
-      const key = nav.getCurrentFilterKey()
-      // Name the tag/feed (filterLabel turns a single-feed filter's raw id into
-      // its title), not the key — "" (all/multi) stays the unscoped line.
-      if (key) msg.append("Nothing unread in ", em(nav.filterLabel(key)), ".")
-      else msg.textContent = "You've read everything."
-   } else if (nav.isFilterActive()) {
-      // Name the scope when it's a single feed/tag (filterLabel resolves a raw id
-      // to its title) — the common case for the reader's empty-feed placeholder; a
-      // multi-token filter's key is "" → the unscoped line.
-      const key = nav.getCurrentFilterKey()
-      if (key) msg.append("Nothing in ", em(nav.filterLabel(key)), " yet.")
-      else msg.textContent = "No articles under this filter yet."
-   } else {
-      eyebrow("No dispatches")
-      msg.textContent = "New articles show up here once your feeds are fetched."
-   }
-   wrap.appendChild(msg)
-   return wrap
 }
 
 function emptyState(): void {
@@ -914,14 +821,16 @@ function showEmptyState(): void {
    emptyState()
 }
 
-// The list's TIME axis: rebuild the sticky day-strata dividers from scratch over
-// the currently rendered rows (idempotent — drop the old ones, walk the rows
-// newest-first, and insert a divider before the first row of each new day).
-// Cheap: the window is bounded, and the day label is unique per calendar day so a
-// label change IS a day boundary. Suppressed in search and ★ Saved (both are
-// cross-time explicit sets, not a date-ordered walk). Callers run
-// it inside any scroll-compensation bracket so the divider heights ride the same
-// scrollHeight delta as the rows.
+// "Nothing to show, and the surface is done": the exit render()/renderSearch()
+// take from all five of their no-rows branches (an empty store, a dead seed, an
+// empty walk). Paired on purpose — an empty render still has to release the
+// caller's first-paint signal, and splitting the two is how a bail leaves the
+// loading veil up forever.
+function bailEmpty(onInteractive?: () => void): void {
+   emptyState()
+   onInteractive?.()
+}
+
 // Re-assert the anchor after a progressive fill changed row heights, unless the
 // user has scrolled (then their position wins). Only meaningful for an
 // anchoredMid seed (rows above it can grow/shrink); a newest-top anchor is at
@@ -931,6 +840,35 @@ function reassertAnchor(seed: number): void {
    scrollChronToView(seed)
 }
 
+// The day label memo. relabelDividers runs once per fill FRAME during a
+// progressive render and again at both paging edges, each time walking the whole
+// loaded window and allocating two Dates per row — for a label that is a pure
+// function of (ts, ctx) and that consecutive rows repeat by definition. Keyed on
+// the context's own local midnight, so it self-invalidates at the day boundary
+// rather than going stale in a session left open overnight.
+let dayMemo = new Map<number, string>()
+let dayMemoAt = -1
+function dayLabel(ts: number, ctx: DayLabelCtx): string {
+   if (dayMemoAt !== ctx.midnightNow) {
+      dayMemo = new Map()
+      dayMemoAt = ctx.midnightNow
+   }
+   let label = dayMemo.get(ts)
+   if (label === undefined) {
+      label = dayLabelWith(ts, ctx)
+      dayMemo.set(ts, label)
+   }
+   return label
+}
+
+// The list's TIME axis: rebuild the sticky day-strata dividers from scratch over
+// the currently rendered rows (idempotent — drop the old ones, walk the rows
+// newest-first, and insert a divider before the first row of each new day).
+// Cheap: the window is bounded, and the day label is unique per calendar day so a
+// label change IS a day boundary. Suppressed in search and ★ Saved (both are
+// cross-time explicit sets, not a date-ordered walk). Callers run
+// it inside any scroll-compensation bracket so the divider heights ride the same
+// scrollHeight delta as the rows.
 function relabelDividers(): void {
    if (!rowsEl) return
    rowsEl.querySelectorAll(".srr-day-divider").forEach((d) => d.remove())
@@ -943,7 +881,7 @@ function relabelDividers(): void {
    const ctx = dayLabelCtx() // hoisted: the pass walks every loaded row
    for (const row of rowsEl.querySelectorAll<HTMLElement>("a.srr-row")) {
       if (row.dataset.ts === undefined) continue // skeleton: no timestamp yet
-      const label = dayLabelWith(Number(row.dataset.ts), ctx)
+      const label = dayLabel(Number(row.dataset.ts), ctx)
       if (label !== prev) {
          const d = el("div", "srr-day-divider")
          d.textContent = label
@@ -1027,29 +965,21 @@ async function walk(
    return { chrons, exhausted: cur === -1 }
 }
 
-// Run `items` through `worker` with at most `limit` in flight, pulling them in
-// the given order — so the earliest items (here: nearest the anchor) dispatch and
-// resolve before later ones, regardless of transport (HTTP/2 would otherwise race
-// them all at once). Each worker is token-guarded by its caller.
-async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
-   let next = 0
-   let failed = false
-   const run = async (): Promise<void> => {
-      while (next < items.length && !failed) {
-         const i = next++
-         try {
-            await worker(items[i])
-         } catch (e) {
-            // First failure rejects the whole pool (render surfaces it). Flip the
-            // flag so the other lanes stop claiming work instead of running on as
-            // orphans — writing to detached rows and raising further unhandled
-            // rejections after Promise.all has already settled.
-            failed = true
-            throw e
-         }
-      }
-   }
-   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => run()))
+// Mount a fresh row window: the sentinel/rows scaffold plus the post-mount
+// syncs — the termini caps and the roving Tab stop (the seed/current row, or
+// the first) — that BOTH renderers owe. Each caller keeps its own seed,
+// exhaustion and scroll logic; a post-mount sync added here reaches both paths.
+function mountRows(rows: HTMLElement[]): void {
+   rowsEl = el("div", "srr-list-rows")
+   topSentinel = el("div", "srr-list-sentinel")
+   bottomSentinel = el("div", "srr-list-sentinel")
+   const frag = document.createDocumentFragment()
+   for (const r of rows) frag.appendChild(r)
+   rowsEl.appendChild(frag)
+   container.append(topSentinel, rowsEl, bottomSentinel)
+   syncBottomTerminus() // cap the rows when the whole view fits one batch
+   syncTopTerminus() // and cap the top when already anchored at the newest
+   syncRovingTab()
 }
 
 // Full (re)build: clears the list, resolves the anchor (the reader's article when
@@ -1085,6 +1015,14 @@ function mayClaimCursor(): boolean {
    return !isSplit() || !readerHoldsCursor()
 }
 
+// The global ends of the chron axis. Both shortcuts hold only where display
+// order IS chronIdx order (feed/tag/[ALL]/search): ★ Saved walks by save-index,
+// so a saved chron 0 can sit mid-queue and only that walk's own exhaustion (a
+// -1 neighbour) ends the lane. Stated once because it was the same carve-out
+// copied to four sites, one of which had already lost it.
+const atOldestEnd = (chron: number): boolean => !nav.isSavedFilter() && chron === 0
+const atNewestEnd = (chron: number): boolean => !nav.isSavedFilter() && chron === data.db.total_art - 1
+
 export async function render(anchorNow = false, onInteractive?: () => void): Promise<void> {
    const my = (tok = {})
    teardownObserver()
@@ -1097,12 +1035,13 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    // A rebuild lays a fresh window: whatever the pill was pointing at is gone
    // with the old rows, and no reopened runway is in flight any more.
    resetNewPill()
+   dayMemo.clear() // bounded to one build's timestamps, not a whole archive walk's
+   rowChrome = -1 // re-sample once per build (a zoom or font change between builds)
    grownRunway = false
    container.replaceChildren()
 
    if (data.db.total_art === 0) {
-      emptyState()
-      onInteractive?.()
+      bailEmpty(onInteractive)
       return
    }
 
@@ -1122,8 +1061,7 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    if (seed === -1 && anchor !== -1 && !nav.isSavedFilter()) seed = await nav.feedLeft(data.db.total_art - 1)
    if (my !== tok) return
    if (seed === -1) {
-      emptyState()
-      onInteractive?.()
+      bailEmpty(onInteractive)
       return
    }
    const anchoredMid = anchor !== -1 && seed === anchor
@@ -1154,8 +1092,7 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
       if (my !== tok) return
    }
    if (older.chrons.length === 0) {
-      emptyState()
-      onInteractive?.()
+      bailEmpty(onInteractive)
       return
    }
 
@@ -1165,24 +1102,15 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    // hold when display order IS chronIdx order (feed/search). ★ Saved walks by
    // save-index, so a saved chron 0 can sit mid-queue — its own walk exhaustion
    // (a -1 neighbor) is the only reliable end signal there.
-   exhaustedBottom = older.exhausted || (!nav.isSavedFilter() && oldest === 0)
-   exhaustedTop = newer.exhausted || (!nav.isSavedFilter() && newest === data.db.total_art - 1)
+   exhaustedBottom = older.exhausted || atOldestEnd(oldest)
+   exhaustedTop = newer.exhausted || atNewestEnd(newest)
 
    const chronsDesc = newer.chrons.slice().reverse().concat(older.chrons) // newest-first
    const seen = nav.getSeenMap()
    const savedSet = nav.getSavedSet()
 
-   rowsEl = el("div", "srr-list-rows")
-   topSentinel = el("div", "srr-list-sentinel")
-   bottomSentinel = el("div", "srr-list-sentinel")
-   const frag = document.createDocumentFragment()
    const rows = chronsDesc.map((c) => rowEl(c, null, seen, savedSet)) // skeletons, in order
-   rows.forEach((r) => frag.appendChild(r))
-   rowsEl.appendChild(frag)
-   container.append(topSentinel, rowsEl, bottomSentinel)
-   syncBottomTerminus() // cap the rows when the whole view fits one batch
-   syncTopTerminus() // and cap the top when we're already anchored at the newest
-   syncRovingTab() // the seed row (or, with no selection, the first row) is the lone Tab stop
+   mountRows(rows)
 
    // Position the surface, then hand it over (interactive) before the fills land.
    // Returning from the reader (anchorNow) centers the live article immediately —
@@ -1236,7 +1164,7 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    }
    const anchorIdx = chronsDesc.indexOf(seed)
    const fillOrder = chronsDesc.map((_, k) => k).sort((a, b) => Math.abs(a - anchorIdx) - Math.abs(b - anchorIdx))
-   await runPool(fillOrder, FILL_CONCURRENCY, async (k) => {
+   await runPool(fillOrder, POOL_LIMIT, async (k) => {
       if (my !== tok) return
       const card = await data.loadMeta(chronsDesc[k])
       if (my !== tok) return
@@ -1264,51 +1192,52 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    // start the observer. Bounded so a never-settling layout can't spin; abandoned
    // if the user scrolls first. No requestAnimationFrame (jsdom) → land
    // synchronously.
-   if (landOnceMode) {
-      const allRows = (): HTMLElement[] => (rowsEl ? [...rowsEl.querySelectorAll<HTMLElement>("a.srr-row")] : [])
-      const commit = (): void => {
-         // The list and the reader share the window scroll. This scroll is DEFERRED
-         // (fonts.ready + a settle loop), so a row opened meanwhile — app.ts
-         // showReader() sets container.hidden (el.listView.hidden) — makes the reader
-         // the visible surface before we land. Centering the list's seed row now
-         // would yank the article view off the top it just scrolled to. Skip the
-         // scroll when we're no longer the visible surface; still start the observer
-         // so infinite scroll is live when the list returns (its offscreen guard
-         // no-ops paging while hidden). A moved cursor (armedChron) bails the same
-         // way: split view keeps the list visible, so it is the only tell there.
-         if (!container.hidden && !userScrolled && nav.currentChron() === armedChron) {
-            scrollChronToView(seed)
-            notifyScroll()
-            userScrolled = false
-         }
-         observe(my)
+   // Nothing deferred to land: the observer is already live (it was started
+   // above), so this is the whole of render's tail.
+   if (!landOnceMode) return
+   const allRows = (): HTMLElement[] => (rowsEl ? [...rowsEl.querySelectorAll<HTMLElement>("a.srr-row")] : [])
+   const commit = (): void => {
+      // The list and the reader share the window scroll. This scroll is DEFERRED
+      // (fonts.ready + a settle loop), so a row opened meanwhile — app.ts
+      // showReader() sets container.hidden (el.listView.hidden) — makes the reader
+      // the visible surface before we land. Centering the list's seed row now
+      // would yank the article view off the top it just scrolled to. Skip the
+      // scroll when we're no longer the visible surface; still start the observer
+      // so infinite scroll is live when the list returns (its offscreen guard
+      // no-ops paging while hidden). A moved cursor (armedChron) bails the same
+      // way: split view keeps the list visible, so it is the only tell there.
+      if (!container.hidden && !userScrolled && nav.currentChron() === armedChron) {
+         scrollChronToView(seed)
+         notifyScroll()
+         userScrolled = false
       }
-      if (typeof requestAnimationFrame === "function") {
-         let lastTarget = -1
-         let stable = 0
-         let tries = 0
-         const tick = (): void => {
-            if (my !== tok) return
-            // Stop the settle loop early once the reader has opened over us, or the
-            // cursor has moved off the armed anchor (commit then skips the scroll
-            // but still starts the observer).
-            if (container.hidden || userScrolled || !rowsEl || nav.currentChron() !== armedChron) return commit()
-            pinHeights(allRows()) // re-measure true (post-paint/post-font) heights
-            const target = chronScrollTarget(seed) ?? -1
-            if (target === lastTarget) stable++
-            else {
-               stable = 0
-               lastTarget = target
-            }
-            if (stable >= 2 || tries++ > 20) return commit()
-            requestAnimationFrame(tick)
+      observe(my)
+   }
+   if (typeof requestAnimationFrame === "function") {
+      let lastTarget = -1
+      let stable = 0
+      let tries = 0
+      const tick = (): void => {
+         if (my !== tok) return
+         // Stop the settle loop early once the reader has opened over us, or the
+         // cursor has moved off the armed anchor (commit then skips the scroll
+         // but still starts the observer).
+         if (container.hidden || userScrolled || !rowsEl || nav.currentChron() !== armedChron) return commit()
+         pinHeights(allRows()) // re-measure true (post-paint/post-font) heights
+         const target = chronScrollTarget(seed) ?? -1
+         if (target === lastTarget) stable++
+         else {
+            stable = 0
+            lastTarget = target
          }
-         const fontsReady = document.fonts?.ready ?? Promise.resolve()
-         void fontsReady.then(() => requestAnimationFrame(tick))
-      } else {
-         pinHeights(allRows())
-         commit()
+         if (stable >= 2 || tries++ > 20) return commit()
+         requestAnimationFrame(tick)
       }
+      const fontsReady = document.fonts?.ready ?? Promise.resolve()
+      void fontsReady.then(() => requestAnimationFrame(tick))
+   } else {
+      pinHeights(allRows())
+      commit()
    }
 }
 
@@ -1323,8 +1252,7 @@ async function renderSearch(my: object, onInteractive?: () => void): Promise<voi
    const seed = await nav.feedLeft(data.db.total_art - 1)
    if (my !== tok) return
    if (seed === -1) {
-      emptyState()
-      onInteractive?.()
+      bailEmpty(onInteractive)
       return
    }
    // The newest hit is the cursor position for a search render (the article
@@ -1338,28 +1266,18 @@ async function renderSearch(my: object, onInteractive?: () => void): Promise<voi
    const older = await walk(my, seed, BATCH, "older")
    if (my !== tok) return
    if (older.chrons.length === 0) {
-      emptyState()
-      onInteractive?.()
+      bailEmpty(onInteractive)
       return
    }
    oldest = older.chrons[older.chrons.length - 1]
    newest = older.chrons[0]
-   exhaustedBottom = older.exhausted || oldest === 0
+   exhaustedBottom = older.exhausted || atOldestEnd(oldest)
    exhaustedTop = true // nothing newer than the newest hit
 
    const seen = nav.getSeenMap()
    const savedSet = nav.getSavedSet()
-   rowsEl = el("div", "srr-list-rows")
-   topSentinel = el("div", "srr-list-sentinel")
-   bottomSentinel = el("div", "srr-list-sentinel")
-   const frag = document.createDocumentFragment()
    const rows = older.chrons.map((c) => rowEl(c, nav.searchCard(c) ?? null, seen, savedSet))
-   rows.forEach((r) => frag.appendChild(r))
-   rowsEl.appendChild(frag)
-   container.append(topSentinel, rowsEl, bottomSentinel)
-   syncBottomTerminus()
-   syncTopTerminus()
-   syncRovingTab() // the newest hit (selected by renderSearch) is the lone Tab stop
+   mountRows(rows)
    sc.to(0)
    notifyScroll()
    userScrolled = false
@@ -1373,7 +1291,7 @@ async function renderSearch(my: object, onInteractive?: () => void): Promise<voi
    if (prefilled.length) pinHeights(prefilled)
    const missing = older.chrons.map((c, k) => (nav.searchCard(c) ? -1 : k)).filter((k) => k >= 0)
    if (missing.length) {
-      await runPool(missing, FILL_CONCURRENCY, async (k) => {
+      await runPool(missing, POOL_LIMIT, async (k) => {
          if (my !== tok) return
          const card = await data.loadMeta(older.chrons[k])
          if (my !== tok) return
@@ -1482,7 +1400,10 @@ export function refresh(): void {
       a.classList.toggle("srr-row-current", chron === current)
       const saved = savedSet.has(chron)
       a.classList.toggle("srr-row-saved", saved)
-      a.querySelector(".srr-row-star")?.setAttribute("aria-pressed", String(saved))
+      // rowEl builds every row as `a.append(body, star)`, so the star IS the last
+      // element child — an O(1) read where the descendant query ran ~90 times per
+      // refresh(), and refresh() runs on every reader-pane step under split.
+      a.lastElementChild?.setAttribute("aria-pressed", String(saved))
       // In the Saved view, an article un-saved from the reader is gone from the
       // feed — drop its row on the way back.
       if (savedView && !saved) {
@@ -1641,7 +1562,7 @@ async function fetchOlder(my: object): Promise<void> {
       // rejection must not advance oldest/exhaustedBottom past a batch that never
       // rendered, which would permanently skip those rows on the next page.
       oldest = chrons[chrons.length - 1]
-      if (exhausted || (!nav.isSavedFilter() && oldest === 0)) exhaustedBottom = true // see render's note on the saved gate
+      if (exhausted || atOldestEnd(oldest)) exhaustedBottom = true
       const frag = document.createDocumentFragment()
       const older: HTMLElement[] = []
       chrons.forEach((c, k) => {
@@ -1684,7 +1605,7 @@ async function fetchNewer(my: object): Promise<void> {
       if (my !== tok) return
       // Commit the cursor only after loadMeta resolves (see fetchOlder).
       newest = chrons[chrons.length - 1]
-      if (exhausted || (!nav.isSavedFilter() && newest === data.db.total_art - 1)) exhaustedTop = true // see render's note on the saved gate
+      if (exhausted || atNewestEnd(newest)) exhaustedTop = true
       const frag = document.createDocumentFragment()
       // chrons is ascending; prepend newest-first so the block reads top-down.
       const fresh: HTMLElement[] = []
@@ -1694,30 +1615,21 @@ async function fetchNewer(my: object): Promise<void> {
          frag.appendChild(row)
       }
       // Pick the compensation anchor — the first row reaching into the viewport
-      // (bottom past the top edge) — BEFORE the insert. Compensating by how far a
-      // VIEWPORT row actually moves (then scrolling to put it back) keeps the
-      // visible content fixed across the insert regardless of ANY height change
-      // above it (the prepended block, or day-divider churn from relabelDividers).
-      // Anchoring to the topmost row or to a scrollHeight delta is wrong: either
-      // folds in changes that aren't directly above the viewport and lurches it.
-      // Rows are never removed, so the anchor survives the mutation.
+      // (bottom past the top edge) — BEFORE the insert (compensateAround's
+      // bracket). Rows are never removed here, so the anchor survives the
+      // mutation. Pinning the prepended rows to their real height inside the
+      // bracket keeps their reserved space exact: the anchor measurement then
+      // reflects the true inserted height, AND the rows never correct when
+      // scrolled up into later.
+      const host = rowsEl
       const anchor =
-         [...rowsEl.querySelectorAll<HTMLElement>("a.srr-row")].find((r) => r.getBoundingClientRect().bottom > 0) ??
-         rowsEl.querySelector<HTMLElement>("a.srr-row")
-      const anchorBefore = anchor ? anchor.getBoundingClientRect().top : 0
-      rowsEl.insertBefore(frag, rowsEl.firstChild)
-      relabelDividers()
-      // Pin the prepended rows to their real height so their reserved space is
-      // exact: the anchor measurement below then reflects the true inserted height,
-      // AND the rows never correct when scrolled up into later. pinHeights leaves
-      // them content-visibility:auto with a contain-intrinsic-size matching their
-      // measured height (getBoundingClientRect forces the layout it relies on).
-      pinHeights(fresh)
-      const shift = anchor ? anchor.getBoundingClientRect().top - anchorBefore : 0
-      if (shift) {
-         sc.to(sc.y() + shift)
-         notifyScroll()
-      }
+         [...host.querySelectorAll<HTMLElement>("a.srr-row")].find((r) => r.getBoundingClientRect().bottom > 0) ??
+         host.querySelector<HTMLElement>("a.srr-row")
+      compensateAround(anchor, () => {
+         host.insertBefore(frag, host.firstChild)
+         relabelDividers()
+         pinHeights(fresh)
+      })
       // The compensation above is exactly what makes these rows invisible when
       // they are fresh arrivals — so that is where the pill's count comes from.
       // Ordinary upward paging (grownRunway false) stays silent as before.
@@ -1856,11 +1768,9 @@ export async function moveSelection(dir: "older" | "newer"): Promise<number> {
 // the newest); the animation self-clears, and a remove+reflow restarts it on a
 // rapid repeat. Honors prefers-reduced-motion via the CSS (animation: none).
 function bumpEdge(row: HTMLElement, dir: "older" | "newer"): void {
-   const cls = dir === "older" ? "srr-row-bump-down" : "srr-row-bump-up"
-   row.classList.remove("srr-row-bump-down", "srr-row-bump-up")
-   void row.offsetWidth // force reflow so re-adding restarts the keyframes
-   row.classList.add(cls)
-   setTimeout(() => row.classList.remove(cls), 220) // > the 0.2s animation
+   // Clear the OTHER direction's bump first; restartAnimation only knows its own.
+   row.classList.remove(dir === "older" ? "srr-row-bump-up" : "srr-row-bump-down")
+   restartAnimation(row, dir === "older" ? "srr-row-bump-down" : "srr-row-bump-up", 220) // > the 0.2s animation
 }
 
 // The adjacent row in `dir` (older = below / next sibling, newer = above /

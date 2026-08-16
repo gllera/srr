@@ -3,7 +3,7 @@ import type { Browser, Page } from "puppeteer"
 
 import { feedServer, srr, type FeedServer } from "../harness"
 import { pubDate, rssFeed, type FeedItem } from "../fixtures"
-import { clearDir, launchBrowser, open as openCtx, waitList, waitReader } from "./helpers"
+import { clearDir, clickRow, launchBrowser, open as openCtx, waitList, waitReader } from "./helpers"
 
 // The image lightbox (RDR7) in a REAL browser. jsdom can prove the module's
 // logic but not the two things that actually decide whether this feature works:
@@ -28,14 +28,6 @@ const $title = (p: Page) => p.$eval(".srr-title", (e) => e.textContent)
 // match — the point of the assertion is that it is THAT element.)
 const $focusIsArticleImg = (p: Page) =>
    p.evaluate(() => document.activeElement === document.querySelector(".srr-content img"))
-
-const clickRow = (p: Page, title: string) =>
-   p.evaluate((t) => {
-      const row = [...document.querySelectorAll(".srr-list a.srr-row")].find(
-         (e) => e.querySelector(".srr-row-title")?.textContent === t,
-      )
-      ;(row as HTMLElement | undefined)?.click()
-   }, title)
 
 // The reader is showing `title` AND its content image has actually decoded — a
 // broken image is hidden by CSS, so clicking one would fail for the wrong reason.

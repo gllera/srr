@@ -3,7 +3,7 @@ import type { Browser, Page } from "puppeteer"
 
 import { feedServer, srr, type FeedServer } from "../harness"
 import { nItems, pubDate, rssFeed } from "../fixtures"
-import { clearDir, launchBrowser, waitList, waitReader } from "./helpers"
+import { clearDir, clickRow, launchBrowser, waitList, waitReader } from "./helpers"
 
 // The two-pane split view (body.srr-split, ≥1000px), driven through the real
 // SPA in real Chrome: the breakpoint stamp, the blank-right-pane v1 contract on
@@ -66,14 +66,6 @@ const hitTest = (p: Page, sel: string) =>
          chain.push(e.tagName.toLowerCase() + [...e.classList].map((c) => `.${c}`).join(""))
       return chain.join(" < ")
    }, sel)
-
-const clickRow = (p: Page, title: string) =>
-   p.evaluate((t) => {
-      const row = [...document.querySelectorAll(".srr-list a.srr-row")].find(
-         (e) => e.querySelector(".srr-row-title")?.textContent === t,
-      )
-      ;(row as HTMLElement | undefined)?.click()
-   }, title)
 
 describe("browser: split view (two-pane desktop)", () => {
    let feeds: FeedServer

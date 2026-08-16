@@ -12,12 +12,13 @@
 // hash, the title, the save button) and the two cross-surface follow-ups (the
 // frontier-undo offer, the unread badge) arrive through ReaderDeps, so the
 // module graph stays acyclic with app.ts at the top.
-import { buildContent, paintMasthead, stampContentHost, type ArticleRefs } from "./article-view"
+import { buildContent, mediaList, paintMasthead, stampContentHost, type ArticleRefs } from "./article-view"
 import { makeLRU } from "./cache"
 import * as data from "./data"
 import { el } from "./els"
-import { countBadge, srcColorIndex } from "./fmt"
-import * as list from "./list"
+import { countBadge, stampSrc } from "./fmt"
+import { emptyStateEl } from "./empty-state"
+import { restartAnimation } from "./motion"
 import { mountLabel } from "./mounts"
 import * as nav from "./nav"
 import * as player from "./player"
@@ -132,10 +133,7 @@ function syncNextCount(o: IShowFeed | null) {
 // restarts it mid-run, and the CSS drops the animation entirely under
 // prefers-reduced-motion.
 function pulseNextPill() {
-   el.next.classList.remove("srr-next-pulse")
-   void el.next.offsetWidth
-   el.next.classList.add("srr-next-pulse")
-   setTimeout(() => el.next.classList.remove("srr-next-pulse"), 900) // > the 0.5s animation
+   restartAnimation(el.next, "srr-next-pulse", 900) // > the 0.5s animation
 }
 
 // Land a freshly rendered article at the top AND resync the toolbar auto-hide
@@ -202,7 +200,7 @@ function harvestMediaState(): void {
    if (mountedChron < 0) return
    const key = stateKey(mountedMid, mountedChron)
    mountedChron = -1
-   const media = el.content.querySelectorAll<HTMLMediaElement>("audio,video")
+   const media = mediaList(el.content)
    if (!media.length) return
    const out: MediaState[] = []
    let worthKeeping = false
@@ -245,7 +243,7 @@ function restoreMediaState(mid: string, chron: number): void {
    // Positional pairing: the same immutable article renders the same media in
    // the same order, so index IS the identity (src would break on a re-proxied
    // or re-resolved URL).
-   el.content.querySelectorAll<HTMLMediaElement>("audio,video").forEach((m, i) => {
+   mediaList(el.content).forEach((m, i) => {
       const s = saved[i]
       if (!s || s.time <= 0) return
       // currentTime is only settable once the element knows its duration;
@@ -337,13 +335,13 @@ export function render(o: IShowFeed) {
       //    is a <button>, never audio/video, so the index pairing the steps
       //    above rely on is untouched.
       player.injectQueueChips()
-      // 7. narration sync — after rehome so the scan sees the final element
-      //    set (a relocated narration element included).
-      wireTTS({ title: el.title, content: el.content })
    } else {
       player.noteMounted(null)
-      wireTTS({ title: el.title, content: el.content }) // rebind or clear for this surface
    }
+   // 7. narration sync — last either way: after rehome so the scan sees the
+   //    final element set (a relocated narration element included), or, with
+   //    nothing mounted, to clear the binding for this surface.
+   wireTTS({ title: el.title, content: el.content })
    el.prev.disabled = !o.has_left
    el.next.disabled = !o.has_right
    syncNextCount(o)
@@ -375,7 +373,7 @@ export function render(o: IShowFeed) {
 
 // The reader's no-match state. Instead of a bare "(no matching articles)" title
 // over an empty body (with a stray "[DELETED]" source for the synthetic feed 0),
-// show the SAME directed empty state the list uses (list.emptyStateEl) so both
+// show the SAME directed empty state the list uses (empty-state.ts) so both
 // surfaces speak one wire voice — search / caught-up / saved / filtered wording,
 // keyed off the same nav state. The article chrome (source · date · h1) is hidden
 // via .srr-reader-empty; prev/save are disabled — a placeholder has nothing to
@@ -420,7 +418,7 @@ function renderEmptyReader(o: IShowFeed, resting = false) {
    // "All caught up" in. `dir` goes with it for the same reason.
    el.content.removeAttribute("lang")
    el.content.removeAttribute("dir")
-   el.content.replaceChildren(list.emptyStateEl({ notStarted: o.notStarted, startFeed: o.startFeed }))
+   el.content.replaceChildren(emptyStateEl({ notStarted: o.notStarted, startFeed: o.startFeed }))
    // Narration sync: the empty state has no narration; drop any binding so a
    // mini-player-adopted episode can't paint or ghost-seek this surface.
    wireTTS({ title: el.title, content: el.content })
@@ -527,8 +525,8 @@ export function refreshFeedLabel() {
    // A single-feed filter tints the toolbar label with that feed's source
    // color (the wire-desk identity in the toolbar); [ALL]/tag/saved/search stay
    // neutral. The chip-less label still says which source you're viewing.
-   const isFeed = /^\d+$/.test(key)
-   if (isFeed) el.feed.dataset.src = String(srcColorIndex(Number(key)))
+   const feedId = nav.feedIdOf(key)
+   if (feedId !== null) stampSrc(el.feed, feedId)
    else delete el.feed.dataset.src
    el.feed.classList.toggle("srr-filter-on", key !== "")
    // The readout is the settings-menu opener: its tooltip / accessible name says
@@ -543,9 +541,9 @@ export function refreshFeedLabel() {
    // lane prev/next walk. Empty on the unfiltered wire — silence means [ALL],
    // the same rule that keeps the list readout neutral. The span is aria-hidden;
    // the filter rides the button's aria-label/tooltip instead.
-   const crumb = key === "" ? "" : isFeed || key === nav.SAVED_TOKEN ? label : "#" + label
+   const crumb = key === "" ? "" : feedId !== null || key === nav.SAVED_TOKEN ? label : "#" + label
    el.backLabel.textContent = crumb
-   if (isFeed) el.backLabel.dataset.src = String(srcColorIndex(Number(key)))
+   if (feedId !== null) stampSrc(el.backLabel, feedId)
    else delete el.backLabel.dataset.src
    const backName = crumb === "" ? "Back to list" : `Back to list — filtered: ${crumb}`
    el.back.setAttribute("aria-label", backName)
@@ -596,16 +594,9 @@ export function reprobeReaderChrome(pulseOnGrowth = false) {
 // bumpEdge). Reduced motion drops the kick (styles.css); the greyed button stays
 // as the static cue.
 export function bumpReaderEdge(side: "prev" | "next") {
-   const bell = side === "prev" ? "srr-bell-left" : "srr-bell-right"
-   el.article.classList.remove("srr-bell-left", "srr-bell-right")
-   void el.article.offsetWidth // force reflow so a rapid repeat restarts the keyframes
-   el.article.classList.add(bell)
-   const btn = side === "prev" ? el.prev : el.next
-   btn.classList.remove("srr-edge-pulse")
-   void btn.offsetWidth
-   btn.classList.add("srr-edge-pulse")
-   setTimeout(() => {
-      el.article.classList.remove(bell)
-      btn.classList.remove("srr-edge-pulse")
-   }, 240) // > the 0.22s animations
+   // A rapid left-then-right must clear the OTHER side's bell before ringing
+   // this one; restartAnimation only knows its own class.
+   el.article.classList.remove(side === "prev" ? "srr-bell-right" : "srr-bell-left")
+   restartAnimation(el.article, side === "prev" ? "srr-bell-left" : "srr-bell-right", 240) // > the 0.22s animations
+   restartAnimation(side === "prev" ? el.prev : el.next, "srr-edge-pulse", 240)
 }

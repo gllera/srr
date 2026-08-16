@@ -101,3 +101,29 @@ export const HOSTILE_HTML =
    `<style>body{display:none}</style>` +
    `<a href="javascript:alert(1)">click</a>` +
    `<b>bold survives</b>`
+
+// A real, decodable RIFF/WAVE file: 8 kHz mono 8-bit PCM, a quiet 220 Hz tone.
+// The media e2e suites (player, pager) serve it as a podcast enclosure so real
+// Chrome actually decodes and plays something. Give it a length no amount of CI
+// slowness can outrun (2 min): an episode that ENDS mid-test releases the
+// player's claim for legitimate reasons and reads as a failure of the thing
+// under test.
+export function wavBytes(seconds: number, rate = 8000): Buffer {
+   const samples = seconds * rate
+   const buf = Buffer.alloc(44 + samples)
+   buf.write("RIFF", 0)
+   buf.writeUInt32LE(36 + samples, 4)
+   buf.write("WAVE", 8)
+   buf.write("fmt ", 12)
+   buf.writeUInt32LE(16, 16) // fmt chunk size
+   buf.writeUInt16LE(1, 20) // PCM
+   buf.writeUInt16LE(1, 22) // mono
+   buf.writeUInt32LE(rate, 24) // sample rate
+   buf.writeUInt32LE(rate, 28) // byte rate (mono, 8-bit ⇒ = sample rate)
+   buf.writeUInt16LE(1, 32) // block align
+   buf.writeUInt16LE(8, 34) // bits per sample
+   buf.write("data", 36)
+   buf.writeUInt32LE(samples, 40)
+   for (let i = 0; i < samples; i++) buf[44 + i] = 128 + Math.round(40 * Math.sin((2 * Math.PI * 220 * i) / rate))
+   return buf
+}

@@ -30,6 +30,7 @@ const nav = vi.hoisted(() => ({
    getCurrentFilterKey: vi.fn(() => ""),
    savedCount: vi.fn(() => 0),
    SAVED_TOKEN: "~saved",
+   feedIdOf: (token: string) => (/^\d+$/.test(token) ? Number(token) : null),
    isUnreadOnly: vi.fn(() => false),
    setUnreadOnly: vi.fn<(on: boolean) => void>(),
    unreadCounts: vi.fn<(chs: IFeed[]) => Promise<Map<number, number>>>(async () => new Map()),
@@ -42,11 +43,14 @@ vi.mock("./nav", () => nav)
 // Deterministic pure-fn stand-ins so the status assertions are stable.
 vi.mock("./fmt", () => ({
    srcColorIndex: (id: number) => id % 8,
+   stampSrc: (n: HTMLElement, id: number) => (n.dataset.src = String(id % 8)),
    formatDate: (t: number) => `D${t}`,
    timeAgoProse: (t: number) => `ago${t}`,
    countBadge: (n: number) => (n > 999 ? "999+" : String(n)),
    formatBytes: (n: number) => `${n}B`,
    isStale: vi.fn(() => false),
+   // The real body — feedGrade's age arithmetic is what these cases assert.
+   ageSince: (unix: number) => Math.max(0, Math.floor(Date.now() / 1000) - unix),
 }))
 import { isStale } from "./fmt"
 

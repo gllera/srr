@@ -183,11 +183,12 @@ vi.mock("./nav", () => nav)
 // member) and record the snapshot recordSeen would have taken, so the tests
 // exercise list's own logic rather than a reimplementation of ./seen's.
 const seenMod = vi.hoisted(() => ({
-   recordSeen: vi.fn((article: IArticle, pos: number, scope: { peek: boolean; members: Iterable<number> }) => {
+   feedKey: (id: number) => "feed:" + id,
+   recordSeen: vi.fn((feedId: number, pos: number, scope: { peek: boolean; members: Iterable<number> }) => {
       if (scope.peek) return
       const map = nav.getSeenMap()
       const prev: Record<string, number | undefined> = {}
-      for (const id of [article.f, ...scope.members]) {
+      for (const id of [feedId, ...scope.members]) {
          const k = "feed:" + id
          if (map[k] !== undefined && map[k] >= pos) continue
          prev[k] = map[k]
@@ -218,6 +219,7 @@ vi.mock("./refresh", () => ({ refreshNow: vi.fn(async () => "") }))
 vi.mock("./fmt", () => ({
    timeAgo: (n: number) => `${n}s`,
    srcColorIndex: (id: number) => id % 8,
+   stampSrc: (n: HTMLElement, id: number) => (n.dataset.src = String(id % 8)),
    // Two chrons per "day" so a small fixture spans multiple strata. list.ts
    // relabels through the hoisted-ctx pair; the ctx itself is opaque to it.
    dayLabelCtx: () => ({ nowYear: 0, midnightNow: 0 }),
@@ -229,6 +231,10 @@ vi.mock("./fmt", () => ({
 }))
 
 type List = typeof import("./list")
+// The directed empty state moved to its own leaf (empty-state.ts) so the reader
+// can show it without importing the list surface; it reads the same mocked
+// ./data + ./nav + ./fmt this suite installs, so it re-imports alongside `list`.
+let emptyStateEl: (typeof import("./empty-state"))["emptyStateEl"]
 
 const art = (over: Partial<IArticle>): IArticle => ({ f: 1, a: 100, p: 0, t: "T", l: "", c: "", ...over }) as IArticle
 
@@ -266,6 +272,7 @@ describe("list", () => {
       nav._setSearchScope("")
       vi.resetModules()
       list = await import("./list")
+      emptyStateEl = (await import("./empty-state")).emptyStateEl
       list.setup(container, (chron) => opened.push(chron))
    })
 
@@ -946,7 +953,7 @@ describe("list", () => {
       // No startFeed here (the probe-blip fallback): the lane label names it.
       nav._setUnreadOnly(true)
       nav.getCurrentFilterKey.mockReturnValueOnce("99")
-      const empty = list.emptyStateEl({ notStarted: true })
+      const empty = emptyStateEl({ notStarted: true })
       expect(empty.querySelector(".srr-empty-eyebrow")!.textContent).toBe("Not started")
       expect(empty.querySelector(".srr-caughtup-check")).toBeNull() // not the reward state
       expect(empty.querySelector(".srr-empty-msg")!.textContent).toBe("Tap Next to start reading.")
@@ -963,7 +970,7 @@ describe("list", () => {
       // names it, tinted with its source color like every other feed identity.
       nav._setUnreadOnly(true)
       nav.getCurrentFilterKey.mockReturnValueOnce("news") // a tag lane
-      const empty = list.emptyStateEl({ notStarted: true, startFeed: 7 })
+      const empty = emptyStateEl({ notStarted: true, startFeed: 7 })
       expect(empty.querySelector(".srr-empty-eyebrow")!.textContent).toBe("Not started")
       expect(empty.querySelector(".srr-empty-msg")!.textContent).toBe("Tap Next to start reading.")
       // The wire-head names the member feed (not the tag), source-tinted, as the
@@ -981,7 +988,7 @@ describe("list", () => {
       data.db.total_art = 4
       nav.filter.saved = true
       nav._setUnreadOnly(true)
-      const empty = list.emptyStateEl({})
+      const empty = emptyStateEl({})
       expect(empty.querySelector(".srr-empty-eyebrow")!.textContent).toBe("Nothing saved")
       expect(empty.querySelector(".srr-caughtup-check")).toBeNull() // not the reward state
    })
@@ -1882,8 +1889,8 @@ describe("list", () => {
          // ./seen's raise primitive, with an EMPTY membership: opening the row
          // would raise the whole navigation list, a row gesture raises one feed.
          expect(seenMod.recordSeen).toHaveBeenCalledTimes(1)
-         const [article, pos, scope] = seenMod.recordSeen.mock.calls[0]
-         expect(article.f).toBe(1)
+         const [feedId, pos, scope] = seenMod.recordSeen.mock.calls[0]
+         expect(feedId).toBe(1)
          expect(pos).toBe(1)
          expect([...scope.members]).toEqual([])
          expect(scope.peek).toBe(false)

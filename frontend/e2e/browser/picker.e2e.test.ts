@@ -3,7 +3,7 @@ import type { Browser, Page } from "puppeteer"
 
 import { feedServer, srr, type FeedServer } from "../harness"
 import { nItems, rssFeed } from "../fixtures"
-import { $rowTitles, clearDir, launchBrowser, open as openCtx, waitList, waitReader } from "./helpers"
+import { $rowTitles, clearDir, clickRow, launchBrowser, open as openCtx, waitList, waitReader } from "./helpers"
 
 // The filter-picker overlay and the frontier context menu, driven through the
 // real UI: pick a feed row / a tag header / the [ALL] scope chip and watch the
@@ -20,14 +20,6 @@ const packsDir = inject("packsDir")
 // Disjoint published ranges → chron 0,1 = news (tag "world") · 2,3 = sport.
 const news = nItems(2, "news", 0, 0)
 const sport = nItems(2, "sport", 0, 10)
-
-const clickRow = (p: Page, title: string) =>
-   p.evaluate((t) => {
-      const row = [...document.querySelectorAll(".srr-list a.srr-row")].find(
-         (e) => e.querySelector(".srr-row-title")?.textContent === t,
-      )
-      ;(row as HTMLElement | undefined)?.click()
-   }, title)
 
 const waitPicker = (p: Page) =>
    p.waitForFunction(() => {

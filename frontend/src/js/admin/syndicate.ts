@@ -3,9 +3,9 @@
 // flag, tag/feed checklists, limit). Ported from app.js's syndicate section.
 
 import { api } from "./api"
-import { el, icon } from "./dom"
+import { el, iconBtn } from "./dom"
 import { renderers, state } from "./store"
-import { checkList, confirmDelete, dialogRow, emptyState, makeDialog, saveModal } from "./ui"
+import { checkList, confirmDelete, dataTable, dialogRow, emptyState, lazyDialog, saveModal } from "./ui"
 import type { OutFeed } from "./types"
 
 const outFileURL = (o: OutFeed): string =>
@@ -37,32 +37,14 @@ function renderSyndicate(): void {
       )
       return
    }
-   const table = el(
-      "table",
-      {},
-      el(
-         "thead",
-         {},
-         el(
-            "tr",
-            {},
-            el("th", {}, "name"),
-            el("th", {}, "format"),
-            el("th", {}, "tags"),
-            el("th", {}, "feeds"),
-            el("th", {}, "limit"),
-            el("th", {}, ""),
-         ),
-      ),
-   )
-   const tb = el("tbody", {})
+   const body: HTMLElement[] = []
    for (const o of outs) {
       // With a CDN URL configured the name links the live out/<name> file the
       // fetch loop writes; without one there is nothing to link (writes skip).
       const name = state.snapshot.cdn_url
          ? el("a", { class: "chip", href: outFileURL(o), target: "_blank", rel: "noopener" }, o.name)
          : el("span", { class: "chip" }, o.name)
-      tb.append(
+      body.push(
          el(
             "tr",
             {},
@@ -79,27 +61,21 @@ function renderSyndicate(): void {
             el(
                "td",
                { class: "actions" },
-               el(
-                  "button",
-                  { class: "btn icon", title: "Edit", "aria-label": "Edit", onclick: () => openOutModal(o) },
-                  icon("edit"),
-               ),
+               iconBtn("edit", "Edit", () => openOutModal(o)),
             ),
          ),
       )
    }
-   table.append(tb)
-   root.append(table)
+   root.append(dataTable(["name", "format", "tags", "feeds", "limit", ""], body))
 }
 
 async function deleteOut(name: string): Promise<boolean> {
    return confirmDelete(`Delete output "${name}"?`, "/api/syndicate/" + encodeURIComponent(name), "Deleted " + name)
 }
 
-let outDialog: HTMLDialogElement | undefined
+const outDialog = lazyDialog({})
 function openOutModal(o: OutFeed | null): void {
-   outDialog ||= makeDialog({})
-   const dlg = outDialog
+   const dlg = outDialog()
    const isEdit = !!o
    const v = o || {
       name: "",

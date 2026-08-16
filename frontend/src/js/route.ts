@@ -9,14 +9,15 @@
 import * as data from "./data"
 import { HOME_MID } from "./keys"
 
-const encTok = (t: string): string => encodeURIComponent(t).replaceAll("+", "%2B")
+const encTok = (t: string): string => encodeURIComponent(t)
 
 // The `!tokens` hash suffix for the given filter tokens ("" when there are none)
 // — shared by updateHash (reader `#pos!tokens`) and the list surface
 // (`#!tokens`, no pos).
-// `+` joins tokens, so a literal `+` inside one (e.g. a search query "c++") is
-// escaped to %2B — encodeURIComponent leaves `+` alone — and decoded back after
-// the split on the read side (route/fromHash).
+// `+` joins tokens, and a literal `+` inside one (e.g. a search query "c++")
+// survives that join because encodeURIComponent escapes it to %2B itself — `+`
+// is not in its unreserved set — and decodeURIComponent restores it after the
+// split on the read side (route/fromHash).
 //
 // Multi-store (docs/MULTI-STORE-SPEC.md §6.3): the active mount rides IN the
 // token grammar. The HOME mount emits BARE tokens exactly as before, so every
@@ -63,11 +64,28 @@ export function parseHashMount(rawTokens: string[]): { mid: string; tokens: stri
 
 // The position part of a `#pos[!tokens]` hash — everything before the first
 // `!` (the whole hash when there is none). "" means no position (a list hash);
-// an integer routes to the reader; anything else is a foreign hash (app.ts's
-// boot guard drops those). parseHashTokens below is the suffix half.
+// an integer (isPosInt) routes to the reader; anything else is a foreign hash
+// (app.ts's boot guard drops those). parseHashTokens below is the suffix half.
 export function hashPos(hash: string): string {
    const bang = hash.indexOf("!")
    return bang === -1 ? hash : hash.substring(0, bang)
+}
+
+// Is a hashPos() result a well-formed reader position — a bare integer? The
+// classifier behind app.ts's route() (reader vs list surface) and its boot
+// foreign-hash guard (an OAuth token fragment is neither "" nor an integer),
+// living beside the grammar it classifies.
+export function isPosInt(posStr: string): boolean {
+   return /^-?\d+$/.test(posStr)
+}
+
+// Is this filter token a feed id? Returns the id, or null for a tag/meta token.
+// One classifier for the whole token grammar: a feed token is exactly a digit
+// run (String(id)), so a tag that merely LOOKS numeric to Number() — "1e3",
+// "1.5", " 12 " — stays a tag everywhere instead of classifying as a feed at
+// some sites and a tag at others (the two idioms this replaced disagreed).
+export function feedIdOf(token: string): number | null {
+   return /^\d+$/.test(token) ? Number(token) : null
 }
 
 // Parse the `!tokens` segment of a hash into an array of decoded token strings.

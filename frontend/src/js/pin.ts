@@ -9,6 +9,7 @@
 // mount passes its own mid and keeps a separate registry.
 
 import { HOME_MID, pinsKey } from "./keys"
+import { lsSet } from "./storage"
 
 // The home store's pins key (bare `srr-pins`) — the back-compat constant the
 // registry lived under before namespacing; still exported for callers/tests
@@ -69,9 +70,7 @@ export function unpinFilter(key: string, mid = HOME_MID): void {
 // Clear the entire pin registry — used when the SW purges the PINNED cache on a
 // store gen change (the cached bytes are gone, so the registry must reset too).
 export function clearAllPins(mid = HOME_MID): void {
-   try {
-      localStorage.removeItem(pinsKey(mid))
-   } catch {}
+   lsSet(pinsKey(mid), null)
 }
 
 export function isPinned(key: string, mid = HOME_MID): boolean {

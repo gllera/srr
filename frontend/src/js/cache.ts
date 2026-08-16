@@ -54,3 +54,34 @@ export function lazySlot<T>(make: () => Promise<T>): () => Promise<T> {
    const slot = makeLRU<Promise<T>>(1)
    return () => cachedPromise(slot, 0, make)
 }
+
+// The default in-flight cap for every pooled fetch loop. It is a property of the
+// TRANSPORT — roughly the per-origin connection budget — not of any one caller,
+// which is why it lives beside runPool rather than being re-declared next to each
+// pool (it was three independent 6s, one of them a bare literal).
+export const POOL_LIMIT = 6
+
+// Run `items` through `worker` with at most `limit` in flight, pulling them in
+// the given order — so the earliest items dispatch and resolve before later
+// ones, regardless of transport (HTTP/2 would otherwise race them all at once).
+// First failure rejects the whole pool and stops the other lanes from claiming
+// further work; a worker that must not fail the pool catches its own errors.
+export async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
+   let next = 0
+   let failed = false
+   const run = async (): Promise<void> => {
+      while (next < items.length && !failed) {
+         const i = next++
+         try {
+            await worker(items[i])
+         } catch (e) {
+            // Flip the flag so the other lanes stop instead of running on as
+            // orphans — writing to torn-down state and raising further unhandled
+            // rejections after Promise.all has already settled.
+            failed = true
+            throw e
+         }
+      }
+   }
+   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => run()))
+}

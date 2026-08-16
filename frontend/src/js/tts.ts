@@ -50,6 +50,15 @@ function started(audio: HTMLAudioElement): boolean {
    return !audio.paused || audio.currentTime > 0
 }
 
+// The data-tts stamp, parsed with the validation stated once: #sanitize strips
+// it to a bare non-negative integer server-side, and this mirrors that on the
+// raw attribute as defense-in-depth — an untrusted or hand-edited stamp
+// (data-tts="", and Number("") is 0) must not parse as a false segment 0.
+function ttsIndex(el: Element): number | null {
+   const raw = el.getAttribute("data-tts")
+   return raw && /^\d+$/.test(raw) ? Number(raw) : null
+}
+
 function segmentAt(starts: number[], t: number): number {
    let i = starts.length - 1
    while (i > 0 && starts[i] > t) i--
@@ -74,14 +83,6 @@ function clear(): void {
    b.refs.content.classList.remove("srr-tts-live")
 }
 
-function onTick(): void {
-   paint()
-}
-
-function onEnded(): void {
-   clear()
-}
-
 function onSeekClick(e: Event): void {
    if (!b || !started(b.audio)) return
    const t = e.target as Element | null
@@ -90,14 +91,8 @@ function onSeekClick(e: Event): void {
    if (sel && !sel.isCollapsed) return // a selection gesture, not a seek
    const block = t.closest("[data-tts]")
    if (!block || !b.refs.content.contains(block)) return
-   // #sanitize strips data-tts to a bare non-negative integer server-side;
-   // this mirrors that on the raw attribute as defense-in-depth (mirrors the
-   // table validation in wireTTS below) — an untrusted or hand-edited stamp
-   // must not parse as a false segment 0 (Number("") is 0).
-   const raw = block.getAttribute("data-tts")
-   if (!raw || !/^\d+$/.test(raw)) return
-   const idx = Number(raw)
-   if (!(idx in b.starts)) return
+   const idx = ttsIndex(block)
+   if (idx === null || !(idx in b.starts)) return
    b.audio.currentTime = b.starts[idx]
    paint()
 }
@@ -105,11 +100,11 @@ function onSeekClick(e: Event): void {
 function unbind(): void {
    if (!b) return
    clear()
-   b.audio.removeEventListener("timeupdate", onTick)
-   b.audio.removeEventListener("seeked", onTick)
-   b.audio.removeEventListener("play", onTick)
-   b.audio.removeEventListener("ended", onEnded)
-   b.audio.removeEventListener("emptied", onEnded)
+   b.audio.removeEventListener("timeupdate", paint)
+   b.audio.removeEventListener("seeked", paint)
+   b.audio.removeEventListener("play", paint)
+   b.audio.removeEventListener("ended", clear)
+   b.audio.removeEventListener("emptied", clear)
    b.refs.content.removeEventListener("click", onSeekClick)
    b = null
 }
@@ -126,18 +121,17 @@ export function wireTTS(refs: TTSRefs): void {
    if (!starts.length || starts.some((s, i) => !Number.isFinite(s) || s < 0 || (i > 0 && s < starts[i - 1]))) return
    const targets = new Map<number, HTMLElement>()
    for (const el of refs.content.querySelectorAll<HTMLElement>("[data-tts]")) {
-      // #sanitize strips this to a bare non-negative integer server-side;
-      // mirror that on the raw attribute so a stray data-tts="" (Number("")
-      // is 0) can't steal segment 0 away from the title fallback below.
-      const raw = el.getAttribute("data-tts")
-      if (raw && /^\d+$/.test(raw) && !targets.has(Number(raw))) targets.set(Number(raw), el)
+      // ttsIndex rejects a stray data-tts="" so it can't steal segment 0 away
+      // from the title fallback below.
+      const idx = ttsIndex(el)
+      if (idx !== null && !targets.has(idx)) targets.set(idx, el)
    }
    if (!targets.has(0)) targets.set(0, refs.title) // the title segment
    b = { refs, audio, starts, targets, current: null }
-   audio.addEventListener("timeupdate", onTick)
-   audio.addEventListener("seeked", onTick)
-   audio.addEventListener("play", onTick)
-   audio.addEventListener("ended", onEnded)
-   audio.addEventListener("emptied", onEnded)
+   audio.addEventListener("timeupdate", paint)
+   audio.addEventListener("seeked", paint)
+   audio.addEventListener("play", paint)
+   audio.addEventListener("ended", clear)
+   audio.addEventListener("emptied", clear)
    refs.content.addEventListener("click", onSeekClick)
 }

@@ -71,6 +71,7 @@ import {
    saveMounts,
    type MountRecord,
 } from "./mounts"
+import { lsGet, lsSet, readIdSet } from "./storage"
 import { isValidHttpish, normalizeHttpish } from "./urlish"
 
 // The portable profile is the HOME store's device state (the blob's top-level
@@ -84,27 +85,8 @@ const PROFILE_TS_KEY = profileTsKey(HOME_MID)
 // parameterized by mount id (the home store just passes HOME_MID), so one body
 // serves both the top-level fields and every peer substate.
 
-function lsGet(key: string): string {
-   try {
-      return localStorage.getItem(key) ?? ""
-   } catch {
-      return ""
-   }
-}
-
-function lsSet(key: string, value: string): void {
-   try {
-      localStorage.setItem(key, value)
-   } catch {}
-}
-
 function readSeen(): Record<string, number> {
-   try {
-      const raw = lsGet(SEEN_KEY)
-      return raw ? JSON.parse(raw) : {}
-   } catch {
-      return {}
-   }
+   return parseAny(lsGet(SEEN_KEY)) as Record<string, number>
 }
 
 // The per-key seen timestamps (srr-seen-ts): unix-second of each seen key's
@@ -112,17 +94,18 @@ function readSeen(): Record<string, number> {
 // == 0 == "no ordering information" (pre-upgrade state) — merges fall back to
 // the legacy raise-only max for it.
 function readSeenTs(): Record<string, number> {
-   try {
-      const raw = lsGet(SEEN_TS_KEY)
-      return raw ? JSON.parse(raw) : {}
-   } catch {
-      return {}
-   }
+   return parseAny(lsGet(SEEN_TS_KEY)) as Record<string, number>
 }
 
 // Parse an incoming st-shaped value (a blob's `st` field) into a clean map;
 // anything malformed degrades to {} (every key then merges by legacy max).
-function cleanTsMap(incoming: unknown): Record<string, number> {
+//
+// Exported for sync.ts, which reads the SAME two wire fields off the SAME blob
+// one step earlier: its behind-check and this module's merge must agree bit for
+// bit on what counts as a stamp, or a stamp one side sees and the other ignores
+// re-fires the push on every cycle. That is the argument posInt already makes,
+// applied to the maps.
+export function cleanTsMap(incoming: unknown): Record<string, number> {
    const out: Record<string, number> = {}
    if (incoming === null || typeof incoming !== "object" || Array.isArray(incoming)) return out
    for (const [k, v] of Object.entries(incoming as Record<string, unknown>))
@@ -133,15 +116,13 @@ function cleanTsMap(incoming: unknown): Record<string, number> {
 // Save order (insertion order as stored), NOT sorted: the ★ Saved queue is read
 // front-to-back and new saves append, so the order is meaningful and travels in
 // the blob. Deduped (first occurrence wins) to survive a hand-edited endpoint.
+// Through storage.readIdSet, the same reader saved.ts uses on this same key —
+// so the module that OWNS the set and the module that backs it up can't
+// disagree about what is in it. Set iteration preserves insertion order and
+// dedupes (first occurrence wins), which is the order and the tolerance this
+// wants anyway.
 function readSavedOrder(mid = HOME_MID): number[] {
-   try {
-      const raw = lsGet(savedKey(mid))
-      const arr = raw ? JSON.parse(raw) : []
-      const ints = Array.isArray(arr) ? arr.filter((n) => Number.isInteger(n)) : []
-      return [...new Set(ints)] as number[]
-   } catch {
-      return []
-   }
+   return [...readIdSet(savedKey(mid))]
 }
 
 // ── ★ Saved: the per-key stamps (`sd`, srr-saved-ts) — RDR18 ─────────────────
@@ -355,9 +336,17 @@ function savedKeyUnion(
 // (0 = never). Pref changes deliberately do NOT stamp it — prefs are never
 // applied on pull, so a mere pref flip must not make this device "newest" and
 // cost another device its real progress on the next adoption.
-export function profileTs(): number {
-   const n = Number(lsGet(PROFILE_TS_KEY))
+// The ordering-timestamp coercion, in one place: a positive finite integer, or 0
+// for "no stamp". Every ts on this path — the blob-level one, a substate's, and
+// both incoming blob halves — is read through it, so the local and the incoming
+// sides can never disagree about what counts as a stamp.
+export function posInt(v: unknown): number {
+   const n = Number(v)
    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
+}
+
+export function profileTs(): number {
+   return posInt(lsGet(PROFILE_TS_KEY))
 }
 
 export function touchProfile(now = Math.floor(Date.now() / 1000)): void {
@@ -482,24 +471,25 @@ interface StoreSubstate {
 function readSubstate(mid: string): StoreSubstate | null {
    const seen = parseMap(lsGet(seenKey(mid)))
    const st = cleanTsMap(parseAny(lsGet(seenTsKey(mid))))
-   const saved = parseIntArray(lsGet(savedKey(mid)))
-   const tsN = Number(lsGet(profileTsKey(mid)))
-   const ts = Number.isFinite(tsN) && tsN > 0 ? Math.floor(tsN) : 0
+   const saved = readSavedOrder(mid)
+   const ts = posInt(lsGet(profileTsKey(mid)))
    if (Object.keys(seen).length === 0 && saved.length === 0 && ts === 0) return null
    return { ts, seen, st, saved, sd: savedTsView(mid) }
 }
 
+// A seen-shaped value (chron per key), cleaned to finite numbers. The looser
+// twin of cleanTsMap: a frontier may legitimately be 0, where a stamp may not.
+// Exported for the same reason cleanTsMap is — sync.ts decodes this same field.
+export function coerceNumMap(o: unknown): Record<string, number> {
+   const out: Record<string, number> = {}
+   if (o === null || typeof o !== "object" || Array.isArray(o)) return out
+   for (const [k, v] of Object.entries(o as Record<string, unknown>))
+      if (typeof v === "number" && Number.isFinite(v)) out[k] = v
+   return out
+}
+
 function parseMap(raw: string): Record<string, number> {
-   try {
-      const o = raw ? (JSON.parse(raw) as unknown) : {}
-      if (o === null || typeof o !== "object" || Array.isArray(o)) return {}
-      const out: Record<string, number> = {}
-      for (const [k, v] of Object.entries(o as Record<string, unknown>))
-         if (typeof v === "number" && Number.isFinite(v)) out[k] = v
-      return out
-   } catch {
-      return {}
-   }
+   return coerceNumMap(parseAny(raw))
 }
 function parseAny(raw: string): unknown {
    try {
@@ -508,17 +498,6 @@ function parseAny(raw: string): unknown {
       return {}
    }
 }
-function parseIntArray(raw: string): number[] {
-   try {
-      const a = raw ? (JSON.parse(raw) as unknown) : []
-      return Array.isArray(a)
-         ? [...new Set(a.filter((n) => Number.isInteger(n) && (n as number) >= 0) as number[])]
-         : []
-   } catch {
-      return []
-   }
-}
-
 // Merge one incoming peer substate into a mount's namespaced keys, by the SAME
 // rules as the home store: seen+st per-key LWW (mergeSeenMid) and saved+sd
 // through the shared mergeSaved (per-key LWW over the blob-level base, or the
@@ -529,9 +508,13 @@ function mergeSubstate(mid: string, sub: unknown, mode: "merge" | "sync"): boole
    const o = sub as Record<string, unknown>
    const incomingSt = cleanTsMap(o["st"])
    let changed = mergeSeenMid(mid, o["seen"], incomingSt)
-   const tsRaw = o["ts"]
-   const blobTs = typeof tsRaw === "number" && Number.isFinite(tsRaw) && tsRaw > 0 ? Math.floor(tsRaw) : 0
-   const localTs = readSubstate(mid)?.ts ?? 0
+   const blobTs = typeof o["ts"] === "number" ? posInt(o["ts"]) : 0
+   // Just the stamp — readSubstate() would parse the whole substate (four
+   // localStorage reads, a saved-tombstone view, possibly a 1024-entry sort) and
+   // then discard all but this one number. Its only null case is an entirely
+   // empty substate, whose ts is 0 as well, so the old `?? 0` was this parsed
+   // stamp in every branch.
+   const localTs = posInt(lsGet(profileTsKey(mid)))
    if (mergeSaved(mid, o["saved"], tsMapOrNull(o["sd"]), mode, blobTs > localTs)) changed = true
    // The blob-level ordering field still converges to max, and still only in
    // sync mode — a peer store's ts is its own, never the home store's.
@@ -679,8 +662,7 @@ export function importProfile(json: string, opts: { prefs: boolean; mode?: "merg
       // ── sync (one-reader hybrid pull) — NOT for file restores; those go
       // through the merge branch below even on a v2 blob (opts.mode unset).
       changed = mergeSeen(obj["seen"], incomingSt) // per-key rule, ts deliberately untouched
-      const tsRaw = obj["ts"]
-      const blobTs = typeof tsRaw === "number" && Number.isFinite(tsRaw) && tsRaw > 0 ? Math.floor(tsRaw) : 0
+      const blobTs = typeof obj["ts"] === "number" ? posInt(obj["ts"]) : 0
       const adopt = blobTs > profileTs()
       // saved + sd — mergeSaved runs UNCONDITIONALLY, not only under a newer
       // blob: a per-key stamp can win against an older blob (that is the point

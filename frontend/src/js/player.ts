@@ -30,12 +30,15 @@
 // ReaderDeps established, keeping the graph acyclic with app.ts on top. reader.ts
 // also has to TELL us what is on screen (noteMounted), because the chron of the
 // mounted article is its state, not ours.
+import { mediaList } from "./article-view"
 import * as data from "./data"
-import { showContextMenu, type MenuItem } from "./dropdown"
+import { bindPressMenu, btn, type MenuItem } from "./dropdown"
 import { el } from "./els"
-import { srcColorIndex } from "./fmt"
-import { AXIS_SLOP, ROW_SWIPE_TRIGGER } from "./gestures"
+import { stampSrc } from "./fmt"
+import { AXIS_SLOP, ROW_SWIPE_TRIGGER, verticalDominant } from "./gestures"
 import { PLAYER_RATE_KEY, playerStateKey } from "./keys"
+import { restartAnimation } from "./motion"
+import { lsSet } from "./storage"
 import { URL_DENY } from "./urlish"
 
 export interface PlayerDeps {
@@ -182,18 +185,13 @@ function save(): void {
    }
    if (!head && !qlist.length) return clearSaved(mid)
    const state = { ...(head ?? {}), ...(qlist.length ? { queue: qlist } : {}) }
-   try {
-      localStorage.setItem(playerStateKey(mid), JSON.stringify(state))
-      lastSave = Date.now()
-   } catch {
-      // A full or blocked localStorage must never break playback.
-   }
+   // A full or blocked localStorage must never break playback — lsSet swallows.
+   lsSet(playerStateKey(mid), JSON.stringify(state))
+   lastSave = Date.now()
 }
 
 function clearSaved(mid: string): void {
-   try {
-      localStorage.removeItem(playerStateKey(mid))
-   } catch {}
+   lsSet(playerStateKey(mid), null)
 }
 
 // The persisted `src` comes back from localStorage, which makes it UNTRUSTED
@@ -237,7 +235,7 @@ function syncMediaSession(): void {
    }
    if (typeof MediaMetadata === "function") {
       ms.metadata = new MediaMetadata({
-         title: active.title || "(untitled)",
+         title: entryLabel(active.title),
          artist: data.feedTitle(active.feedId),
          album: "SRR",
       })
@@ -273,8 +271,12 @@ function bindMediaSession(): void {
 // Claim / release
 // ---------------------------------------------------------------------------
 
-function mediaList(root: ParentNode): HTMLMediaElement[] {
-   return [...root.querySelectorAll<HTMLMediaElement>("audio,video")]
+// The GIF idiom: #embed and srr-x emit muted+loop+autoplay <video> for what
+// used to be a GIF, and fmt.ts deliberately leaves those chrome-less. One
+// predicate for the transport claim (onPlay) AND chip eligibility
+// (injectQueueChips) — a decoration that can't claim must also not get a chip.
+function isGifIdiom(m: HTMLMediaElement): boolean {
+   return m.autoplay || (m.muted && m.loop)
 }
 
 // A `play` event claims its element as the active episode. `play` does not
@@ -289,22 +291,13 @@ function onPlay(e: Event): void {
       syncMediaSession()
       return syncBar()
    }
-   // The GIF idiom: #embed and srr-x emit muted+loop+autoplay <video> for what
-   // used to be a GIF, and fmt.ts deliberately leaves those chrome-less. They
-   // fire `play` on their own the moment they render, so claiming them would let
-   // a decorative animation hijack the transport away from a real episode.
-   if (m.autoplay || (m.muted && m.loop)) return
+   // The GIF idiom fires `play` on its own the moment it renders, so claiming
+   // it would let a decorative animation hijack the transport from a real episode.
+   if (isGifIdiom(m)) return
    if (!el.content.contains(m) || !mounted) return
    const index = mediaList(el.content).indexOf(m)
    if (index < 0) return
-   // One episode at a time: hand the outgoing one's position back to FEB2 so
-   // returning to it still resumes. If it was ADOPTED, it also has to be taken
-   // out of the bar host — release() deliberately never touches parents, so
-   // without this the old node would stay there still playing, inaudibly
-   // orphaned behind the new episode's chrome (two things playing at once).
-   const outgoingAdopted = active !== null && !el.content.contains(active.media)
-   release()
-   if (outgoingAdopted) discardAdopted()
+   releaseOutgoing()
    active = { ...mounted, index, media: m }
    // A manually played element that was sitting in the queue is now the active
    // episode; leaving it queued would replay it later.
@@ -314,8 +307,27 @@ function onPlay(e: Event): void {
    // set: at the default 1 we leave the element alone so a rate FEB2 restored
    // (or one set through native in-content controls) is not silently reset.
    if (rate !== 1) m.playbackRate = rate
+   finishClaim(m, true)
+}
+
+// One episode at a time — the module's central invariant, in one place. Hand the
+// outgoing episode's position back to FEB2, and if it was ADOPTED take it out of
+// the bar host too: release() deliberately never touches parents, so without this
+// the old node would stay there still playing, inaudibly orphaned behind the new
+// episode's chrome (two things playing at once).
+function releaseOutgoing(): void {
+   const outgoingAdopted = active !== null && !el.content.contains(active.media)
+   release()
+   if (outgoingAdopted) discardAdopted()
+}
+
+// The tail every claim ends with, whatever route reached it (a manual in-content
+// play, a queue entry, a boot restore in place or detached). `observeInView` is
+// for a LIVE element only — a detached one built in the bar host has no article
+// scroll position to watch. `active` must already be assigned: save() reads it.
+function finishClaim(m: HTMLMediaElement, observeInView: boolean): void {
    bindMedia(m)
-   watch(m)
+   if (observeInView) watch(m)
    bindMediaSession()
    syncMediaSession()
    syncBar()
@@ -342,30 +354,29 @@ function release(): void {
    }
 }
 
+// The claimed element's event/handler pairs, as ONE table: bind and unbind walk
+// it, so a handler can never be added to one and missed by the other (the leak
+// that mirrored lists invite — a claim would then outlive its release).
+// Function declarations hoist, so the later-defined handlers are fine here.
+const MEDIA_EVENTS: ReadonlyArray<[string, EventListener]> = [
+   ["timeupdate", onTimeUpdate],
+   ["pause", onPauseOrPlay],
+   ["play", onPauseOrPlay],
+   ["ended", onEnded],
+   ["error", onError],
+   ["loadedmetadata", syncBar],
+   ["waiting", onBufferStall],
+   ["stalled", onBufferStall],
+   ["playing", onBufferClear],
+   ["canplay", onBufferClear],
+]
+
 function bindMedia(m: HTMLMediaElement): void {
-   m.addEventListener("timeupdate", onTimeUpdate)
-   m.addEventListener("pause", onPauseOrPlay)
-   m.addEventListener("play", onPauseOrPlay)
-   m.addEventListener("ended", onEnded)
-   m.addEventListener("error", onError)
-   m.addEventListener("loadedmetadata", syncBar)
-   m.addEventListener("waiting", onBufferStall)
-   m.addEventListener("stalled", onBufferStall)
-   m.addEventListener("playing", onBufferClear)
-   m.addEventListener("canplay", onBufferClear)
+   for (const [ev, fn] of MEDIA_EVENTS) m.addEventListener(ev, fn)
 }
 
 function unbindMedia(m: HTMLMediaElement): void {
-   m.removeEventListener("timeupdate", onTimeUpdate)
-   m.removeEventListener("pause", onPauseOrPlay)
-   m.removeEventListener("play", onPauseOrPlay)
-   m.removeEventListener("ended", onEnded)
-   m.removeEventListener("error", onError)
-   m.removeEventListener("loadedmetadata", syncBar)
-   m.removeEventListener("waiting", onBufferStall)
-   m.removeEventListener("stalled", onBufferStall)
-   m.removeEventListener("playing", onBufferClear)
-   m.removeEventListener("canplay", onBufferClear)
+   for (const [ev, fn] of MEDIA_EVENTS) m.removeEventListener(ev, fn)
 }
 
 function onTimeUpdate(): void {
@@ -396,21 +407,28 @@ function onBufferClear(): void {
    syncBar()
 }
 
-function onEnded(): void {
-   // A finished episode has nothing left to resume; drop it wholesale rather
-   // than leaving a bar parked at the end — unless something is queued, in
-   // which case finishing is exactly when the playlist advances.
+// The shared dismissal tail of ended/error: forget the episode wholesale —
+// release the claim, drop its persisted entry, take an adopted node out of the
+// bar — then either advance the playlist or clear the chrome. One body, because
+// the release/clearSaved/discardAdopted ordering is load-bearing (release reads
+// active; discard only after the claim is gone).
+function dismissActive(): void {
    const mid = active?.mid
-   const finished = active ? entryOf(active) : null
    release()
    if (mid) clearSaved(mid)
    discardAdopted()
-   if (queue.length) {
-      lastPlayed = finished
-      return advance(true)
-   }
+   if (queue.length) return advance(true)
    syncMediaSession()
    syncBar()
+}
+
+function onEnded(): void {
+   // A finished episode has nothing left to resume; drop it wholesale rather
+   // than leaving a bar parked at the end — unless something is queued, in
+   // which case finishing is exactly when the playlist advances, with the
+   // finished episode as the prev-track target.
+   if (queue.length) lastPlayed = active ? entryOf(active) : null
+   dismissActive()
 }
 
 function onError(): void {
@@ -459,13 +477,7 @@ function onError(): void {
    // or, with a queue, skip to the next entry (each attempt consumes one, so a
    // run of dead episodes terminates at the plain dismissal). The dead episode
    // deliberately does NOT become the prev-track target.
-   const mid = active?.mid
-   release()
-   if (mid) clearSaved(mid)
-   discardAdopted()
-   if (queue.length) return advance(true)
-   syncMediaSession()
-   syncBar()
+   dismissActive()
 }
 
 // The off-screen rule. Only the in-content case needs observing; while adopted
@@ -487,10 +499,6 @@ function watch(m: HTMLMediaElement): void {
 // ---------------------------------------------------------------------------
 // Playlist — the "up next" queue
 // ---------------------------------------------------------------------------
-
-function isQueued(mid: string, chron: number, index: number): boolean {
-   return queue.some((e) => e.mid === mid && e.chron === chron && e.index === index)
-}
 
 // Snapshot the active episode as a queue entry (the prev-track target, and the
 // re-queue when previoustrack steps back). Null when the element carries no src
@@ -542,12 +550,7 @@ function playEntry(entry: QueueEntry, autoplay: boolean): boolean {
       src = safeSrc(entry.src, data.activeStore().base)
       if (!src) return false
    }
-   // One episode at a time — the onPlay discipline: hand the outgoing position
-   // to FEB2, and take an adopted node out of the bar host or it would keep
-   // playing behind the new episode's chrome.
-   const outgoingAdopted = active !== null && !el.content.contains(active.media)
-   release()
-   if (outgoingAdopted) discardAdopted()
+   releaseOutgoing()
    let m: HTMLMediaElement
    if (live) m = live
    else {
@@ -567,11 +570,7 @@ function playEntry(entry: QueueEntry, autoplay: boolean): boolean {
       feedId: entry.feedId,
       media: m,
    }
-   if (live) watch(m)
-   bindMedia(m)
-   bindMediaSession()
-   syncMediaSession()
-   syncBar()
+   finishClaim(m, !!live)
    if (autoplay) void play()
    return true
 }
@@ -644,6 +643,10 @@ function syncQueueHandlers(): void {
 // Queue chips — the in-content add affordance
 // ---------------------------------------------------------------------------
 
+// The queue's display name for an entry. Spelled six times before this, five of
+// them inside renderPanel/moveBtn alone.
+const entryLabel = (title: string): string => title || "(untitled)"
+
 function queuePos(mid: string, chron: number, index: number): number {
    return queue.findIndex((e) => e.mid === mid && e.chron === chron && e.index === index)
 }
@@ -686,10 +689,7 @@ function onMediaStateForChips(e: Event): void {
 }
 
 function pulseOnce(n: Element | null): void {
-   if (!(n instanceof HTMLElement)) return
-   n.classList.remove("srr-chip-pop")
-   void n.offsetWidth
-   n.classList.add("srr-chip-pop")
+   if (n instanceof HTMLElement) restartAnimation(n, "srr-chip-pop")
 }
 
 // The chip's long-press menu — the power layer over the tap (append): "Play
@@ -752,43 +752,6 @@ function chipMenuItems(index: number): MenuItem[] {
    ]
 }
 
-// bindFrontierMenu's wiring restated (menus.ts is app-side chrome player must
-// not import — the attachRowSwipe precedent): desktop right-click, Android
-// long-press and Shift+F10 all arrive as `contextmenu`; iOS Safari fires none
-// on non-links, so a 500ms touch-hold covers it, with `held` swallowing the
-// finger-lift click (it would otherwise also toggle the queue) and a late
-// native contextmenu (Android fires both).
-function bindChipMenu(chip: HTMLButtonElement, index: number): void {
-   let hold = 0
-   let held = false
-   const open = (): boolean => {
-      const items = chipMenuItems(index)
-      if (items.length > 0) showContextMenu(chip, items)
-      return items.length > 0
-   }
-   chip.addEventListener("contextmenu", (e) => {
-      clearTimeout(hold)
-      if (held || open()) e.preventDefault()
-   })
-   chip.addEventListener("pointerdown", (e) => {
-      if (e.pointerType !== "touch") return
-      held = false
-      clearTimeout(hold)
-      hold = window.setTimeout(() => (held = open()), 500)
-   })
-   for (const ev of ["pointerup", "pointercancel", "pointerleave"]) chip.addEventListener(ev, () => clearTimeout(hold))
-   chip.addEventListener(
-      "click",
-      (e) => {
-         if (!held) return
-         held = false
-         e.preventDefault()
-         e.stopImmediatePropagation()
-      },
-      true,
-   )
-}
-
 // The reader's `p` key (app.ts KEY_ACTIONS): toggle the article's FIRST
 // enclosure in the playlist — keyboard parity with b-for-save, so queueing
 // never needs a pointer. Routed through the chip's own click so there is ONE
@@ -820,7 +783,7 @@ export function injectQueueChips(): void {
    const list = mediaList(el.content)
    for (let i = 0; i < list.length; i++) {
       const m = list[i]
-      if (m.autoplay || (m.muted && m.loop)) continue
+      if (isGifIdiom(m)) continue
       if (!m.getAttribute("src")) continue
       // On the rehome path the chip is already sitting after the element
       // (replaceWith swaps the node, not its siblings) — re-derive its state.
@@ -836,7 +799,10 @@ export function injectQueueChips(): void {
       chip.className = "srr-queue-chip"
       const index = i
       chip.addEventListener("click", () => toggleQueued(index))
-      bindChipMenu(chip, index)
+      // The long-press power layer (Play next / Play now) — dropdown owns the
+      // secondary-gesture wiring; the swallowed finger-lift click is what keeps
+      // a held chip from also toggling the queue.
+      bindPressMenu(chip, () => chipMenuItems(index))
       setChipState(chip, queuePos(mid, chron, i))
       m.insertAdjacentElement("afterend", chip)
       pairAnchor(m, chip, i)
@@ -875,7 +841,7 @@ function syncChips(): void {
 function toggleQueued(index: number): void {
    if (!mounted) return
    const { mid, chron, title, feedId } = mounted
-   if (isQueued(mid, chron, index)) return dropQueued(mid, chron, index)
+   if (queuePos(mid, chron, index) >= 0) return dropQueued(mid, chron, index)
    // The cap as a DOOR: a full queue opens the panel to prune instead of
    // silently eating the tap (the chip already reads ≡ / "Playlist full").
    // Edge accepted: with the bar hidden — an active on-screen episode — the
@@ -932,27 +898,22 @@ function renderPanel(): void {
          const play = document.createElement("button")
          play.type = "button"
          play.className = "srr-player-row-play"
-         play.dataset.src = String(srcColorIndex(entry.feedId))
+         stampSrc(play, entry.feedId)
          const source = document.createElement("span")
          source.className = "srr-player-row-source"
          source.textContent = data.feedTitle(entry.feedId)
          const name = document.createElement("span")
          name.className = "srr-player-row-name"
-         name.textContent = entry.title || "(untitled)"
+         name.textContent = entryLabel(entry.title)
          play.append(source, name)
-         play.setAttribute("aria-label", `Play now — ${entry.title || "(untitled)"} · ${data.feedTitle(entry.feedId)}`)
+         play.setAttribute("aria-label", `Play now — ${entryLabel(entry.title)} · ${data.feedTitle(entry.feedId)}`)
          play.addEventListener("click", () => {
             queue = queue.filter((e) => e !== entry)
             closePanel(true)
             playEntry(entry, true) // a false return just drops the dead entry
             afterQueueChange()
          })
-         const remove = document.createElement("button")
-         remove.type = "button"
-         remove.className = "srr-player-row-remove"
-         remove.textContent = "×"
-         remove.setAttribute("aria-label", `Remove from playlist — ${entry.title || "(untitled)"}`)
-         remove.addEventListener("click", () => {
+         const remove = btn("srr-player-row-remove", `Remove from playlist — ${entryLabel(entry.title)}`, "×", () => {
             queue = queue.filter((e) => e !== entry)
             afterQueueChange()
          })
@@ -966,13 +927,13 @@ function renderPanel(): void {
 // A ▲/▼ reorder handle. Disabled at its dead end rather than hidden, so the
 // four-button row keeps one geometry and a tap never lands on the wrong role.
 function moveBtn(entry: QueueEntry, delta: -1 | 1, dead: boolean): HTMLButtonElement {
-   const b = document.createElement("button")
-   b.type = "button"
-   b.className = delta < 0 ? "srr-player-row-up" : "srr-player-row-down"
-   b.textContent = delta < 0 ? "↑" : "↓"
+   const b = btn(
+      delta < 0 ? "srr-player-row-up" : "srr-player-row-down",
+      `${delta < 0 ? "Move up" : "Move down"} — ${entryLabel(entry.title)}`,
+      delta < 0 ? "↑" : "↓",
+      () => moveQueued(entry, delta),
+   )
    b.disabled = dead
-   b.setAttribute("aria-label", `${delta < 0 ? "Move up" : "Move down"} — ${entry.title || "(untitled)"}`)
-   b.addEventListener("click", () => moveQueued(entry, delta))
    return b
 }
 
@@ -1026,7 +987,7 @@ function attachRowSwipe(row: HTMLElement, entry: QueueEntry): void {
       const dy = e.touches[0].clientY - y0
       if (mode === "idle") {
          // Vertical-dominant past the slop is a scroll for the gesture's life.
-         if (Math.abs(dy) > AXIS_SLOP && Math.abs(dy) >= Math.abs(dx)) {
+         if (verticalDominant(dx, dy)) {
             mode = "veto"
             return
          }
@@ -1213,9 +1174,7 @@ function seekTo(t: number): void {
 function cycleRate(): void {
    if (!active) return
    const next = RATES[(RATES.indexOf(readRate()) + 1) % RATES.length] ?? 1
-   try {
-      localStorage.setItem(PLAYER_RATE_KEY, String(next))
-   } catch {}
+   lsSet(PLAYER_RATE_KEY, String(next))
    active.media.playbackRate = next
    save()
    syncBar()
@@ -1276,7 +1235,7 @@ function syncTime(): void {
 function barVisible(): boolean {
    if (!active) return queue.length > 0
    const adopted = !el.content.contains(active.media)
-   return adopted || el.article.hidden || !inView
+   return adopted || !!el.article.hidden || !inView
 }
 
 // The bar's identity/transport controls, one painter for both bar states: the
@@ -1284,9 +1243,9 @@ function barVisible(): boolean {
 // the value source differs (queue head vs the claimed track).
 function paintBar(kind: "audio" | "video", feedId: number, title: string, paused: boolean): void {
    el.player.dataset.kind = kind
-   el.player.dataset.src = String(srcColorIndex(feedId))
+   stampSrc(el.player, feedId)
    el.playerSource.textContent = data.feedTitle(feedId)
-   el.playerName.textContent = title || "(untitled)"
+   el.playerName.textContent = entryLabel(title)
    el.playerTitle.setAttribute("aria-label", `Go to ${title || "this article"} — ${data.feedTitle(feedId)}`)
    el.playerToggle.setAttribute("aria-label", paused ? "Play" : "Pause")
    el.playerToggle.setAttribute("aria-pressed", String(!paused))
@@ -1334,11 +1293,17 @@ function syncBar(): void {
 // Seek interaction
 // ---------------------------------------------------------------------------
 
+// The seek rail's box, captured at pointerdown and held for the drag. The rail is
+// fixed chrome that cannot move while a finger is down, and measuring it per
+// pointermove — interleaved with syncTime's width write on the fill — forced a
+// layout on every move of the scrub.
+let seekRect: DOMRect | null = null
+
 function seekFromPointer(e: PointerEvent): void {
    if (!active) return
    const dur = active.media.duration
    if (!Number.isFinite(dur) || dur <= 0) return
-   const r = el.playerSeek.getBoundingClientRect()
+   const r = seekRect ?? el.playerSeek.getBoundingClientRect()
    if (r.width <= 0) return
    seekTo(((e.clientX - r.left) / r.width) * dur)
 }
@@ -1347,12 +1312,18 @@ function bindSeek(): void {
    el.playerSeek.addEventListener("pointerdown", (e) => {
       // Pointer capture keeps the drag alive outside the 4px-tall track.
       el.playerSeek.setPointerCapture?.(e.pointerId)
+      seekRect = el.playerSeek.getBoundingClientRect()
       seekFromPointer(e)
    })
    el.playerSeek.addEventListener("pointermove", (e) => {
       // buttons is a bitmask: nonzero means a button is still held (a drag).
       if (e.buttons) seekFromPointer(e)
+      else seekRect = null // the drag ended somewhere we never saw the lift
    })
+   for (const ev of ["pointerup", "pointercancel"] as const)
+      el.playerSeek.addEventListener(ev, () => {
+         seekRect = null
+      })
    // stopPropagation beside every preventDefault — the dialog discipline
    // dropdown.ts / search-ui.ts / lightbox.ts already spell out, applied to a
    // control instead of a modal. The seek bar is a tabindex=0 role=slider DIV,
@@ -1514,11 +1485,7 @@ export function restorePersisted(): void {
       if (live) {
          active = { ...mounted, index, media: live }
          seek(live)
-         bindMedia(live)
-         watch(live)
-         bindMediaSession()
-         syncMediaSession()
-         syncBar()
+         finishClaim(live, true)
          return
       }
    }
@@ -1533,10 +1500,7 @@ export function restorePersisted(): void {
    seek(m)
    el.playerMedia.replaceChildren(m)
    active = { mid: store.mid, chron: saved.chron, index, title, feedId, media: m }
-   bindMedia(m)
-   bindMediaSession()
-   syncMediaSession()
-   syncBar()
+   finishClaim(m, false)
 }
 
 export function isActive(): boolean {

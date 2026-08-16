@@ -1,5 +1,5 @@
 import { HOME, type StoreContext } from "./base"
-import { cachedPromise, makeLRU, type LRU } from "./cache"
+import { cachedPromise, makeLRU, POOL_LIMIT, runPool, type LRU } from "./cache"
 import {
    DB_FORMAT_VERSION,
    IDX_ENTRY_SIZE,
@@ -22,7 +22,15 @@ import {
 } from "./idx"
 import { RELOAD_GUARD_KEY } from "./keys"
 import { activeMounts, loadMounts, reconcileMounts, renameStoreState, saveMounts, type MountRecord } from "./mounts"
-import { gunzipJson, keyAt, legacyNames, manifestNames, type IManifestWire, type StoreNames } from "./names"
+import {
+   gunzipJson,
+   gunzipStream,
+   keyAt,
+   legacyNames,
+   manifestNames,
+   type IManifestWire,
+   type StoreNames,
+} from "./names"
 import { ASSET_KEY_SRC } from "./sw-grammar"
 
 export { IDX_PACK_SIZE, META_PACK_SIZE }
@@ -333,9 +341,13 @@ function assertPackOk(store: Store, res: Response, isLatest: boolean): void {
 }
 
 // The root object as it arrives on the wire, before the dual-path resolution
-// below: either today's full legacy db.gz (IDBWire) or the v2 pointer
-// {v, m, t} the S34 cutover shrinks it to.
-type IRootWire = Partial<IDBWire> & { t?: number }
+// below: either the {v, m, t} pointer the S34 cutover shrank db.gz to (IDBWire),
+// or a PRE-cutover legacy document, which carried the normalized state's own
+// fields inline — rootIsLegacy probes total_art to tell the two apart. Every
+// field is optional because which ones are present is exactly what is being
+// decided here; `feeds` rides at its WIRE type (no client-stamped .id yet).
+type IRootWire = Partial<IDBWire> &
+   Partial<Omit<IDB, "feeds">> & { t?: number; feeds?: Record<number, IFeedWire> | null }
 
 function loadManifest(store: Store, m: number): Promise<IManifestWire> {
    if (store.manifestMemo?.m === m) return store.manifestMemo.man
@@ -426,7 +438,7 @@ function fromLegacyRoot(raw: IRootWire): Snapshot {
          seq: legacy.seq ?? 0,
          nd: legacy.nd,
          na: legacy.na,
-         next_pid: legacy.next_pid,
+         next_pid: legacy.next_pid ?? 0,
          hdrs: legacy.hdrs,
          mp: legacy.mp,
       }),
@@ -446,7 +458,7 @@ async function fromManifestRoot(store: Store, raw: IRootWire): Promise<Snapshot>
    const resolved = manifestNames(man)
    const finalizedMeta = resolved.meta.keys.length - (resolved.meta.tail >= 0 ? 1 : 0)
    const normalized: IDB = {
-      v: raw.v,
+      v: raw.v ?? 0,
       m,
       // `t` on the root is the same fetched_at the manifest carries; the root
       // copy is what lets an idle cycle rewrite 60 bytes and leave `m` — and
@@ -730,21 +742,16 @@ export async function refresh(store: Store = active): Promise<"unchanged" | "upd
    // db's chrons through the new store's name lists — the exact "consistent
    // set, not a mix of old legacy fields and new manifest fields" the
    // Appendix-D rollback rule forbids. All of it lives on the ONE Store record,
-   // so the snapshot is that record's fields captured before the swap.
-   const prev = {
-      db: store.db,
-      names: store.names,
-      slots: store.slots,
-      expiredCounts: store.expiredCounts,
-      idxFetches: store.idxFetches,
-      latestIdx: store.latestIdx,
-      idxHeaders: store.idxHeaders,
-      dataCache: store.dataCache,
-      metaCache: store.metaCache,
-      groupCache: store.groupCache,
-      deltaArts: store.deltaArts,
-      deltaLoad: store.deltaLoad,
-   }
+   // so the snapshot IS that record's fields captured before the swap — spread,
+   // not enumerated: a hand-kept list of what applyDb writes is a second source
+   // of truth for it, and the day it falls behind, the field it forgets is the
+   // one that survives a failed apply as the half-swapped snapshot this whole
+   // paragraph exists to prevent. The fields applyDb does not write are
+   // provably unchanged across the window (mid/base/cred/role are immutable,
+   // dbLoad is written only by init/refreshPeers, manifestMemo was already set
+   // by the loadDb above, and bgRefresh is false here and false again in the
+   // finally), so carrying them costs nothing.
+   const prev = { ...store }
    store.bgRefresh = true
    try {
       await applyDb(store, snap)
@@ -784,11 +791,10 @@ export async function refreshPeers(): Promise<boolean> {
                   s.dbLoad = loadDb(s)
                   s.bgRefresh = true
                   try {
-                     await applyDb(s, await s.dbLoad)
+                     await bootStore(s) // the same boot handshake init() runs, status and backoff included
                   } finally {
                      s.bgRefresh = false
                   }
-                  statuses.set(s.mid, { state: "ok", kind: "", error: "" })
                   anyUpdated = true
                } else if ((await refresh(s)) === "updated") {
                   anyUpdated = true
@@ -857,7 +863,7 @@ export function idxSummaryDegraded(store: Store = active): boolean {
 export async function fetchPackBytes(path: string, isLatest: boolean, store: Store = active): Promise<ArrayBuffer> {
    return fetchTimed(new URL(path, store.base), "force-cache", store.cred, (res) => {
       assertPackOk(store, res, isLatest)
-      return new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer()
+      return new Response(gunzipStream(res)).arrayBuffer()
    })
 }
 
@@ -988,7 +994,7 @@ export function unreadTally<T extends TallyFeed>(
 // A finalized pack can be skipped without fetching it: its per-feed
 // counts are the deltas between consecutive cumulative headers. The latest
 // pack has no next boundary — it is resident anyway and scans cheaply.
-function packHasCandidate(store: Store, p: number, feeds: Map<number, number>): boolean {
+function packHasCandidate(store: Store, p: number, feeds: ReadonlyMap<number, number>): boolean {
    if (p >= numFinalizedIdx(store)) return true
    // Mid-refresh header swap can briefly outrun this array — treat unknown as candidate.
    const cur = store.idxHeaders[p]
@@ -1050,10 +1056,19 @@ async function fetchDataPack(store: Store, packId: number): Promise<IArticle[]> 
    const isLatest = packId === store.names.data.tail
    return fetchTimed(new URL(key, store.base), "force-cache", store.cred, async (res) => {
       assertPackOk(store, res, isLatest)
-      const reader = res
-         .body!.pipeThrough(new DecompressionStream("gzip"))
-         .pipeThrough(new TextDecoderStream())
-         .getReader()
+      // Streamed line-splitting on purpose, NOT fetchPackBytes + parseJsonl:
+      // data packs are the largest objects the reader fetches (multi-MB
+      // decompressed) and sit on the article hot path, so the parse works
+      // per-chunk instead of materializing the whole pack as one string. Every
+      // other, smaller JSONL consumer takes the buffer form.
+      // The cast is a lib.dom variance wart, not a real mismatch: TextDecoderStream's
+      // writable side is typed WritableStream<BufferSource>, which does not unify with
+      // the ReadableStream<Uint8Array> gunzipStream hands it, though every engine
+      // accepts exactly this pairing.
+      const decoded = gunzipStream(res).pipeThrough(
+         new TextDecoderStream() as unknown as ReadableWritablePair<string, Uint8Array>,
+      )
+      const reader = decoded.getReader()
       try {
          const entries: IArticle[] = []
          let remainder = ""
@@ -1108,6 +1123,14 @@ export async function loadArticle(chronIdx: number, store: Store = active): Prom
       throw new Error(`pack ${ref.packId} out of sync (offset ${ref.offset} of ${entries.length}); retry to refresh`)
    }
    return entries[ref.offset]
+}
+
+// The article→meta-card projection — the wire contract's display-time rule
+// (`w` = published falling back to fetched_at), stated ONCE for every site that
+// derives a card where the meta/ series doesn't cover: the delta chain (here
+// and search.ts's synthetic shard) and the data/ fallback.
+export function metaCardOf(a: IArticle): IMetaWire {
+   return { f: a.f, w: a.p || a.a, t: a.t }
 }
 
 // parseJsonl decodes an ArrayBuffer of newline-delimited JSON into typed
@@ -1175,7 +1198,7 @@ export async function loadMeta(chronIdx: number, store: Store = active): Promise
    const tc = tailCovered(store)
    if (chronIdx >= tc) {
       const a = (await store.deltaLoad)[chronIdx - tc]
-      if (a) return { f: a.f, w: a.p || a.a, t: a.t }
+      if (a) return metaCardOf(a)
    }
    const head = store.db.head
    if (head?.length) {
@@ -1190,7 +1213,7 @@ export async function loadMeta(chronIdx: number, store: Store = active): Promise
       // Defensive: an undefined slot (coverage race) — fall through to data/.
    }
    const a = await loadArticle(chronIdx, store)
-   return { f: a.f, w: a.p || a.a, t: a.t }
+   return metaCardOf(a)
 }
 
 type GroupResult = { tagged: Map<string, IFeed[]>; sortedTags: string[]; untagged: IFeed[] }
@@ -1293,12 +1316,15 @@ export async function packNamesForFilter(feeds: ReadonlyMap<number, number>, sto
    } else {
       // Feed/tag/unread scope: walk only the idx packs that have candidates.
       // For each matching chronIdx, derive the data pack id (from idx bounds)
-      // and the meta shard id (floor(chron / META_PACK_SIZE)).
+      // and the meta shard id (floor(chron / META_PACK_SIZE)). The candidate
+      // set is known up front (packHasCandidate reads resident header deltas),
+      // so the idx fetches run through a bounded pool instead of one round-trip
+      // per pack — the Sets the walks fill are order-independent.
       const lookup = makeFeedsLookup(feeds, store.slots)
+      const cands: number[] = []
+      for (let p = 0; p <= nfIdx; p++) if (packHasCandidate(store, p, feeds)) cands.push(p)
 
-      for (let p = 0; p <= nfIdx; p++) {
-         if (!packHasCandidate(store, p, feeds)) continue
-
+      await runPool(cands, POOL_LIMIT, async (p) => {
          // This idx pack is needed (it has at least one matching article). The
          // tail position is listed only when a tail was consolidated.
          const idxKey = names.idx.keys[p]
@@ -1333,7 +1359,7 @@ export async function packNamesForFilter(feeds: ReadonlyMap<number, number>, sto
                if (metaKey) out.add(metaKey)
             }
          }
-      }
+      })
    }
 
    // Enumerate the self-hosted assets/ images the pinned data packs reference, so
@@ -1344,14 +1370,16 @@ export async function packNamesForFilter(feeds: ReadonlyMap<number, number>, sto
    // harmless, since that data pack is pinned anyway and asset keys are
    // content-addressed. Pinning is an explicit "download for offline" action, so
    // the extra reads are acceptable.
+   // A bounded pool here too: an [ALL] pin wants every data pack, and one
+   // round-trip at a time made this pass the pin's dominant wall time.
    const dataTailKey = names.data.tail >= 0 ? names.data.keys[names.data.tail] : null
-   for (const dn of dataWanted) {
+   await runPool([...dataWanted], POOL_LIMIT, async (dn) => {
       const arts = parseJsonl<IArticle>(await fetchPackBytes(dn, dn === dataTailKey, store))
       for (const a of arts) {
          if (!a.c) continue
          for (const m of a.c.matchAll(ASSET_REF_RE)) out.add(m[0])
       }
-   }
+   })
    // Delta-region articles are resident — scrape their asset refs without a fetch.
    for (const a of store.deltaArts) {
       if (!a.c) continue

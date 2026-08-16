@@ -439,7 +439,7 @@ video {
    bottom: 5.5rem;
    max-width: 680px;
    margin: 0 auto;
-   z-index: 5;
+   z-index: var(--z-searchbar);
    font-size: 0.75rem;
    color: var(--muted);
    text-align: center;
@@ -972,7 +972,7 @@ body.srr-playing .srr-pin-progress {
    min-width: 2.2rem;
    border: none;
    background: none;
-   font-size: 1rem;
+   font-size: var(--text-base);
    color: var(--muted);
    cursor: pointer;
    &:hover {
@@ -1013,7 +1013,7 @@ body.srr-playing .srr-pin-progress {
    background: color-mix(in srgb, var(--fg) 7%, transparent);
    font-family: var(--font-mono);
    font-variant-numeric: tabular-nums;
-   font-size: 1rem;
+   font-size: var(--text-base);
    font-weight: 600;
    color: var(--fg-2);
    cursor: pointer;
@@ -1144,7 +1144,7 @@ body.srr-playing .srr-pin-progress {
 .srr-tts-current,
 .srr-content .srr-tts-current {
    background: color-mix(in srgb, var(--accent) 14%, transparent);
-   border-radius: 4px;
+   border-radius: var(--radius);
 }
 .srr-tts-live [data-tts] {
    cursor: pointer;
@@ -1238,9 +1238,23 @@ body:not(.srr-view-list):not(.srr-split) .srr-toolbar {
    transform: translateY(100%);
 }
 
-/* Chrome-stripping reset + 44px (2.75rem) tap target for the square toolbar
-   buttons. The now-viewing readout (.srr-feed) is a full-width text button with
-   its own reset (see its rule above), so it's excluded here. */
+/* Chrome-stripping reset + 44px (2.75rem) square tap target for the toolbar
+   buttons, with a subtle hover fill. The now-viewing readout (.srr-feed) is a
+   full-width text button with its own reset (see its rule above), so it's
+   excluded here. flex-shrink:0 keeps every glyph its size next to the flexible
+   readout button.
+
+   ONE rule, not two: this selector list used to be declared twice a few lines
+   apart, so every toolbar button was matched against it twice and three
+   declarations in the earlier copy were dead on arrival — a `padding` and a whole
+   `transition` the later copy overrode, and a `:hover` dim the later copy's
+   `opacity: 1` beat. Merged here at the values that actually applied.
+
+   :hover deliberately comes LAST. It sits at the same specificity as :active, so
+   on a mouse press (both matching) source order decides, and the later rule wins:
+   a pressed button keeps opacity 1 + the hover fill rather than dimming. That is
+   what shipped when these were two blocks; the order preserves it. On touch,
+   where :hover doesn't stick, :active's dim is the press feedback. */
 .srr-toolbar .srr-pane-toggle,
 .srr-toolbar .srr-back,
 .srr-toolbar .srr-open-reader,
@@ -1250,26 +1264,32 @@ body:not(.srr-view-list):not(.srr-split) .srr-toolbar {
 .srr-toolbar .srr-filter {
    background: none;
    border: none;
-   padding: 0.5rem 0.45rem;
+   min-width: 2.75rem;
    min-height: 2.75rem;
+   padding: 0.55rem 0.5rem;
+   display: inline-flex;
+   align-items: center;
+   justify-content: center;
+   border-radius: var(--radius);
+   flex-shrink: 0;
    color: var(--fg);
    font-family: inherit;
    font-size: var(--text-sm);
    cursor: pointer;
    transition:
       opacity 0.15s,
-      color 0.15s,
       background 0.15s,
       transform 0.09s ease;
-   &:hover:not(:disabled) {
-      opacity: 0.55;
-   }
    &:active:not(:disabled) {
       opacity: 0.3;
    }
    &:disabled {
       opacity: 0.15;
       cursor: default;
+   }
+   &:hover:not(:disabled) {
+      opacity: 1;
+      background: var(--hover);
    }
 }
 
@@ -1295,32 +1315,6 @@ body:not(.srr-view-list):not(.srr-split) .srr-toolbar {
    filter). */
 .srr-toolbar .srr-filter {
    justify-self: end;
-}
-
-/* Icon toolbar buttons — square 44px tap targets with a subtle hover fill.
-   flex-shrink:0 keeps every glyph its size next to the flexible readout button. */
-.srr-toolbar .srr-pane-toggle,
-.srr-toolbar .srr-back,
-.srr-toolbar .srr-open-reader,
-.srr-toolbar .srr-prev,
-.srr-toolbar .srr-next,
-.srr-toolbar .srr-save,
-.srr-toolbar .srr-filter {
-   min-width: 2.75rem;
-   padding: 0.55rem 0.5rem;
-   display: inline-flex;
-   align-items: center;
-   justify-content: center;
-   border-radius: var(--radius);
-   flex-shrink: 0;
-   transition:
-      opacity 0.15s,
-      background 0.15s,
-      transform 0.09s ease;
-   &:hover:not(:disabled) {
-      opacity: 1;
-      background: var(--hover);
-   }
 }
 
 /* Reader breadcrumb — the active-filter token riding the back button (#tag /
@@ -1365,19 +1359,10 @@ body:not(.srr-view-list):not(.srr-split) .srr-toolbar {
    color: var(--src);
 }
 
-/* Save (★) toggle — outline star, filled + accent when the article is saved */
-.srr-save-icon {
-   display: block;
-   width: 1.2rem;
-   height: 1.2rem;
-   fill: none;
-   stroke: currentColor;
-   stroke-width: 1.6;
-   stroke-linejoin: round;
-}
-
-/* Filter (funnel) — the filter-picker opener at both bars' right edge:
-   an outline funnel in the same icon-console voice. */
+/* The toolbar's two outline glyphs, one icon-console voice: the save (★) toggle
+   — filled + accent when the article is saved, below — and the filter funnel
+   that opens the picker at both bars' right edge. */
+.srr-save-icon,
 .srr-filter-icon {
    display: block;
    width: 1.2rem;
@@ -1747,11 +1732,16 @@ body.srr-view-list.srr-searching .srr-searchbar {
    gap: 0.5rem;
    padding: 0 0.35rem;
 }
-.srr-searchbar .srr-search-icon {
+/* One search field, two hosts: the article bar and the picker's row filter are
+   the same control in the same voice, so they share one body. Only their
+   WRAPPERS differ (the picker's sits under a hairline inside the panel head). */
+.srr-searchbar .srr-search-icon,
+.srr-picker-search .srr-search-icon {
    flex: 0 0 auto;
    color: var(--muted);
 }
-.srr-searchbar .srr-search-input {
+.srr-searchbar .srr-search-input,
+.srr-picker-search-input {
    flex: 1 1 auto;
    min-width: 0;
    font: inherit;
@@ -1767,7 +1757,8 @@ body.srr-view-list.srr-searching .srr-searchbar {
       display: none;
    }
 }
-.srr-searchbar .srr-search-clear {
+.srr-searchbar .srr-search-clear,
+.srr-picker-search-clear {
    flex: 0 0 auto;
    background: none;
    border: none;
@@ -1987,7 +1978,7 @@ body:not(.srr-split) .srr-pane-toggle {
 }
 .srr-picker-fav-icon {
    display: block;
-   font-size: 1rem;
+   font-size: var(--text-base);
    line-height: 1.2rem;
 }
 /* The row search (RDR9) — its own full-width line inside the sticky header.
@@ -2001,39 +1992,7 @@ body:not(.srr-split) .srr-pane-toggle {
    border-top: 1px solid var(--faint);
    padding-top: 0.4rem;
 }
-.srr-picker-search .srr-search-icon {
-   flex: 0 0 auto;
-   color: var(--muted);
-}
-.srr-picker-search-input {
-   flex: 1 1 auto;
-   min-width: 0;
-   font: inherit;
-   font-size: var(--text-base);
-   color: var(--fg);
-   background: transparent;
-   border: none;
-   padding: 0.35rem 0;
-   &:focus {
-      outline: none;
-   }
-   &::-webkit-search-cancel-button {
-      display: none;
-   }
-}
-.srr-picker-search-clear {
-   flex: 0 0 auto;
-   background: none;
-   border: none;
-   color: var(--muted);
-   font-size: 1.4rem;
-   line-height: 1;
-   padding: 0.1rem 0.45rem;
-   cursor: pointer;
-   &:hover {
-      color: var(--fg);
-   }
-}
+/* The field itself rides the shared search-bar body, above. */
 .srr-picker-info-icon {
    display: block;
    width: 1.2rem;
@@ -2789,7 +2748,7 @@ html:has(body.srr-view-list) {
    transition: none;
 }
 .srr-pull-icon {
-   font-size: 1rem;
+   font-size: var(--text-base);
    line-height: 1;
    color: var(--muted);
    transition:
@@ -3125,7 +3084,8 @@ html:has(body.srr-view-list) {
    margin-top: 1rem;
 }
 .srr-imgproxy-desc,
-.srr-sync-desc {
+.srr-sync-desc,
+.srr-backup-desc {
    margin: 0 0 1rem;
    font-size: var(--text-sm);
    line-height: 1.5;
@@ -3197,12 +3157,6 @@ html:has(body.srr-view-list) {
 /* Backup / Restore dialog — the shared modal shell (above), a wider card. */
 .srr-backup-card {
    width: min(32rem, 100%);
-}
-.srr-backup-desc {
-   margin: 0 0 1rem;
-   font-size: var(--text-sm);
-   line-height: 1.5;
-   color: var(--muted);
 }
 .srr-backup-body {
    display: flex;
@@ -3639,7 +3593,7 @@ html:has(body.srr-view-list) {
    justify-content: center;
    padding: 0;
    font-family: var(--font-mono);
-   font-size: 1rem;
+   font-size: var(--text-base);
    line-height: 1;
    color: var(--fg);
    background: var(--surface-raised);

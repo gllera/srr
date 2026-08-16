@@ -24,6 +24,7 @@
     "test-stress": "vitest run --config vitest.stress.config.ts",
     "gen-design": "vitest run --config vitest.design.config.ts",
     "shoot-design": "vitest run --config vitest.design-shots.config.ts",
+    "typecheck": "tsc -p tsconfig.check.json",
     "lint": "eslint src/js e2e",
     "format": "prettier --write src \"e2e/**/*.{ts,mjs}\" parcel \"vitest*.ts\" eslint.config.mjs",
     "format-check": "prettier --check src \"e2e/**/*.{ts,mjs}\" parcel \"vitest*.ts\" eslint.config.mjs"

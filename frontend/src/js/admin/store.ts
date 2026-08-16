@@ -32,7 +32,7 @@ export const state = {
 export const renderers: Record<string, () => void> = {}
 
 // drawTab (re)renders the current tab from the cached snapshot — no fetch.
-export function drawTab(): void {
+function drawTab(): void {
    const r = renderers[state.currentTab]
    if (r) {
       try {

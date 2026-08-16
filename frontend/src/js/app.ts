@@ -23,7 +23,6 @@ import * as nav from "./nav"
 import * as pager from "./pager"
 import { initPane, togglePane } from "./pane"
 import * as picker from "./picker"
-import { clearAllPins } from "./pin"
 import * as pinUI from "./pin-ui"
 import * as player from "./player"
 import * as reader from "./reader"
@@ -32,6 +31,7 @@ import { ensureSchema } from "./schema"
 import { elementScroller, windowScroller } from "./scroller"
 import * as searchUI from "./search-ui"
 import { initSplit, isSplit, onSplitChange } from "./split"
+import { lsSet } from "./storage"
 import * as sync from "./sync"
 
 // Which surface is showing. The list is home; the reader is the drill-down.
@@ -123,6 +123,14 @@ function listVisible(): boolean {
    return view === "list" || isSplit()
 }
 
+// The reader's twin of listVisible(): is the READER on screen to be acted on —
+// it holds focus (single-surface), or the split pane is live beside the list.
+// `view` alone answers only the first, which is the same half-answer
+// listVisible() exists to stop the list asking.
+function readerActive(): boolean {
+   return view === "reader" || readerLive()
+}
+
 function showList() {
    view = "list"
    document.body.classList.add("srr-view-list")
@@ -208,9 +216,7 @@ async function enterReader() {
 }
 
 function persistHash(hash: string) {
-   try {
-      localStorage.setItem(HASH_KEY, hash)
-   } catch {}
+   lsSet(HASH_KEY, hash)
 }
 
 function showError(e: unknown, retry?: () => void) {
@@ -358,7 +364,7 @@ function reReadReader() {
    // focus, so a frontier gesture or a Show-read flip made from there left both
    // stale — a next-count that no longer matched the lane, arrows armed against
    // bounds that had moved.
-   if (view !== "reader" && !readerLive()) return
+   if (!readerActive()) return
    if (nav.currentChron() >= 0) {
       reader.reprobeReaderChrome()
       return
@@ -378,6 +384,14 @@ function refreshSaveButton(hasArticle: boolean) {
    const saved = canSave && nav.isSaved(chron)
    el.save.disabled = !canSave
    paintSaveButton(saved)
+}
+
+// Re-derive the star from the live saved set WITHOUT changing enablement: the
+// button's own disabled flag is the "is there an article" answer it was last
+// given, so feeding it back is how a repaint asks for the star alone. A row's ★
+// under split and a profile merge both want exactly this.
+function repaintSaveButton(): void {
+   refreshSaveButton(!el.save.disabled)
 }
 
 // The save-button visual contract (active class + aria), single-sourced so the
@@ -525,10 +539,10 @@ async function renderListSurface() {
    } catch (e) {
       showError(e, () => void renderListSurface())
    } finally {
-      if (!interactive) {
-         if (token === busyToken) document.body.classList.remove("srr-loading")
-         release(token)
-      }
+      // onInteractive is idempotent (its own `interactive` latch), so the
+      // never-painted case is just "call it now" rather than a second copy of
+      // the release path guarded by the same condition.
+      onInteractive()
       searchUI.syncSearchBar()
    }
 }
@@ -553,9 +567,16 @@ function relayoutPane(): void {
    } else void renderListSurface()
 }
 
-// A well-formed reader position: the hash's position part (nav.hashPos) is a
-// bare integer. Shared by route() below and the boot foreign-hash guard.
-const INT_POS = /^-?\d+$/
+// Commit the LIST surface's hash (`#!tokens`, no position) into history AND the
+// reload-restore key in ONE act — the two must always name the same thing, or a
+// reload lands somewhere the URL never showed (the desync class openArticle's
+// comment documents). Every list-hash writer routes through here; search-ui
+// gets it as a dep.
+function commitListHash(push: boolean): void {
+   const h = "#" + nav.tokensSuffix()
+   history[push ? "pushState" : "replaceState"](null, "", h)
+   persistHash(h)
+}
 
 // Hash → surface. A numeric position routes to the reader (deep-link or restored
 // reading position); anything else (empty, or just `!tokens`) is the list at
@@ -571,7 +592,7 @@ async function route(hash: string) {
    // pending debounced query — see selectFilter.
    searchUI.clearSearchDebounce()
    const posStr = nav.hashPos(hash)
-   if (posStr !== "" && INT_POS.test(posStr)) {
+   if (posStr !== "" && nav.isPosInt(posStr)) {
       await guard(() => nav.fromHash(hash))
       // Split view: deliberately no list call here — guard()'s render path runs
       // list.followCursor(), whose not-yet-built fallback is show(true), so a
@@ -587,9 +608,7 @@ async function route(hash: string) {
    nav.applyFilter(tokens)
    // Canonicalize the URL (boot may restore an empty location.hash from
    // localStorage) without growing history.
-   const h = "#" + nav.tokensSuffix()
-   history.replaceState(null, "", h)
-   persistHash(h)
+   commitListHash(false)
    await renderListSurface()
 }
 
@@ -601,9 +620,7 @@ async function goToList(push: boolean) {
    // the mutex, but the pushState/persistHash below would already have rewritten
    // the URL to a filter the dropped render never painted, desyncing URL from view.
    if (held()) return
-   const h = "#" + nav.tokensSuffix()
-   history[push ? "pushState" : "replaceState"](null, "", h)
-   persistHash(h)
+   commitListHash(push)
    await renderListSurface()
 }
 
@@ -668,9 +685,7 @@ async function selectTokens(tokens: string[]) {
          // lane") and the resting pane's. Put both back — showList() is
          // idempotent and keeps the pane's article on screen.
          showList()
-         const listHash = "#" + nav.tokensSuffix()
-         history.replaceState(null, "", listHash)
-         persistHash(listHash)
+         commitListHash(false)
       }
    }
 }
@@ -678,14 +693,9 @@ async function selectTokens(tokens: string[]) {
 async function selectFilter(token: string) {
    if (held()) return
    searchUI.clearSearchDebounce()
-   // A mount-qualified token (a peer lane/section picked from the picker):
-   // switch the active lane first, then apply the bare token in that store's
-   // context (§6.3). A bare token leaves the active mount as-is.
-   if (token.startsWith("@")) {
-      const { mid, tokens } = nav.parseHashMount([token])
-      data.setActive(mid)
-      token = tokens[0] ?? ""
-   }
+   // A mount-qualified token (a peer lane picked from the picker) switches the
+   // active lane and resolves to its bare half — nav owns that grammar (§6.3).
+   token = nav.resolveMountToken(token)
    await selectTokens(token === "" ? [] : [token])
 }
 
@@ -698,9 +708,7 @@ async function switchMount(mid: string) {
    if (mid === data.activeStore().mid) return
    if (!data.setActive(mid)) return
    nav.applyFilter([])
-   const h = "#" + nav.tokensSuffix()
-   history.pushState(null, "", h)
-   persistHash(h)
+   commitListHash(true)
    await renderListSurface()
    if (picker.isOpen()) picker.render()
 }
@@ -726,9 +734,9 @@ function toggleUnseenOnly() {
    // The reader re-derives for the new mode: a real article re-probes its
    // chrome; a placeholder (pos < 0) re-runs the switch (reprobeReaderChrome
    // would no-op and leave it stale). Shared with menus' afterFrontierMove.
-   // Under split BOTH panes are on screen, so both halves run whichever surface
-   // the picker was opened from — reReadReader itself is the layout-aware gate.
-   if (view !== "list" || readerLive()) reReadReader()
+   // Called bare: reReadReader's own first line IS the layout-aware gate, and a
+   // caller-side copy of it is exactly the kind that drifts when the gate moves.
+   reReadReader()
 }
 
 // Two-finger vertical swipe = step the filter. In the reader, cycle to the next
@@ -776,7 +784,7 @@ function onCycle(dir: number) {
 // live beside the list and its prev/next buttons stay enabled on both surfaces:
 // a key must reach the same article the button beside it does, or ← / → go dead
 // on the list surface while the arrows a centimetre away still work.
-const readerSteppable = () => (view === "reader" || readerLive()) && !picker.isOpen() && !lightbox.isOpen()
+const readerSteppable = () => readerActive() && !picker.isOpen() && !lightbox.isOpen()
 const stepLeft = () => {
    if (!readerSteppable()) return
    return el.prev.disabled ? reader.bumpReaderEdge("prev") : guard(() => nav.left())
@@ -865,10 +873,9 @@ async function init() {
    list.setCursorOwner(readerLive)
    // A row's ★ writes the set the reader's save button paints from. Only the
    // article that button describes can be affected — a star on any OTHER row
-   // must leave it alone — and `!el.save.disabled` carries the enablement
-   // through unchanged, the same re-derive refreshAfterMerge uses.
+   // must leave it alone.
    list.setSavedSink((chron) => {
-      if (isSplit() && chron === nav.currentChron()) refreshSaveButton(!el.save.disabled)
+      if (isSplit() && chron === nav.currentChron()) repaintSaveButton()
    })
    // A row swipe's read toggle is a frontier move like every other one, so it
    // owes the same reconciliation menus.afterFrontierMove gives the rest — the
@@ -886,7 +893,6 @@ async function init() {
    initPane({ onSettle: relayoutPane })
    onSplitChange(() => {
       applyScroller()
-      list.invalidate()
       gestures?.resetScroll()
       // Crossing INTO split: the PANE owns the cursor, because the pane is what
       // you have been looking at and it keeps its article across the crossing
@@ -928,13 +934,11 @@ async function init() {
       // resting panel owns its own chrome and reprobeReaderChrome's hasArticle()
       // test leaves it alone.
       if (isSplit() && view === "list") reader.reprobeReaderChrome()
-      // Then rebuild only what the new layout actually needs: the reader keeps
-      // its article and the pane comes along beside it (followCursor's own
-      // fallback builds it); the list surface re-renders through its normal
-      // guarded path.
-      if (view === "reader") {
-         if (isSplit()) list.followCursor()
-      } else void renderListSurface()
+      // Then rebuild only what the new layout actually needs — the shared
+      // re-layout tail (relayoutPane: invalidate the measured row heights, then
+      // followCursor beside a kept article / re-render the list surface). One
+      // body, so this crossing and the pane-geometry settles cannot drift.
+      relayoutPane()
    })
    // Tell the SW its mounted roots BEFORE data.init() (the PWA0 fix, §5.1): the
    // roots come from the mount TABLE (valid pre-init), so a peer store's boot
@@ -985,7 +989,7 @@ async function init() {
    const refreshAfterMerge = (mountsChanged = false) => {
       if (mountsChanged) menus.afterMountChange(loadMounts())
       nav.pruneSeen()
-      refreshSaveButton(!el.save.disabled)
+      repaintSaveButton()
       if (view === "list" && !hasInteracted && !nav.isSavedFilter() && !nav.isSearchFilter()) {
          // The BOOT pull changed the profile before anything was touched — the
          // device-switch moment, and the navigator half of the sync feature
@@ -1213,7 +1217,7 @@ async function init() {
    searchUI.setup({
       listVisible,
       selectTokens,
-      persistHash,
+      commitListHash,
       setTitle,
       listTitle,
       showError,
@@ -1229,15 +1233,11 @@ async function init() {
       if (el.popup.classList.contains("srr-open") && !el.popup.contains(e.target as Node)) closePopup()
    })
 
-   // The SW posts "pins-purged" after a gen-change purge of the PINNED cache —
-   // reset the local pin registry so menu labels match the (now empty) cache.
-   navigator.serviceWorker?.addEventListener("message", (e: MessageEvent) => {
-      if (e.data?.type === "pins-purged") {
-         clearAllPins(data.activeStore().mid)
-         // The pin row derives its label fresh on the next settings-menu open,
-         // so clearing the registry is all it takes to match the empty bucket.
-      }
-   })
+   // (There was a "pins-purged" listener here. It reset the pin registry after
+   // the SW's gen-change purge of the PINNED bucket — but `gen` was retired at
+   // the manifest cutover, and with it that purge: every mutation of PINNED is
+   // now an explicit pin/unpin/unpin-all this page asked for. The worker's only
+   // outbound message is "pin-progress", so the branch had no sender at all.)
 
    window.addEventListener("hashchange", () => void route(location.hash.substring(1)))
    document.addEventListener("keydown", (e) => {
@@ -1368,7 +1368,7 @@ async function init() {
    // OIDC, etc.) so the page lands on the user's last position instead of
    // the latest article. SRR hashes are `[integer][!tokens]` or `!tokens`.
    const posPart = nav.hashPos(hash)
-   if (posPart && !INT_POS.test(posPart)) {
+   if (posPart && !nav.isPosInt(posPart)) {
       history.replaceState(null, "", location.pathname + location.search)
       hash = ""
    }

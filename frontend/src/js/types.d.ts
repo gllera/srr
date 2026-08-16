@@ -10,15 +10,36 @@ declare const process: { env: { NODE_ENV: string } }
 
 type IArticle = import("./format.gen").IArticleWire
 type IFeedWire = import("./format.gen").IFeedWire
-type IDBWire = import("./format.gen").IDBWire
+type IManifestWire = import("./format.gen").IManifestWire
+type IDBWire = import("./format.gen").IDBWire // the ROOT POINTER — data.ts's IRootWire layers on it
 
 interface IFeed extends IFeedWire {
    id: number // populated from the feeds object key at init
 }
 
-interface IDB extends Omit<IDBWire, "seq" | "feeds"> {
+// The NORMALIZED root state — "one store's current shape, whatever root shape it
+// came from" — which is the whole point of parseDb's dual path: everything
+// downstream of it is root-shape-blind.
+//
+// It layers on IManifestWire, NOT on IDBWire: the manifest cutover shrank the
+// root to the pointer {v, m, t}, so the fields the reader actually reads
+// (total_art, fetched_at, head/hb, pack_off, next_pid, …) now arrive from the
+// MANIFEST. Extending the pointer left this interface describing a shape nobody
+// builds and nothing else describing the one everybody uses — which is exactly
+// what an untyped data layer looks like from the inside. Optional across the
+// board because fromLegacyRoot fills the pre-cutover subset; the fields data.ts
+// guarantees are re-declared required below.
+interface IDB extends Partial<Omit<IManifestWire, "names" | "feeds">> {
+   total_art: number
+   fetched_at: number
    seq: number // backend omitempty (absent == 0 == empty store); init() normalizes with ??= 0
    feeds: Record<number, IFeed> // init() normalizes null with ??= {} and stamps each value's .id
+   // Reader-derived counters with no manifest field of their own: the legacy
+   // root carried them, and fromManifestRoot computes the same numbers from the
+   // name lists so every consumer below reads one shape.
+   nd?: number
+   hdrs?: number
+   mp?: number
 }
 
 interface IShowFeed {

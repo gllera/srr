@@ -35,7 +35,10 @@ export interface SearchDeps {
    // Enter / leave search as ONE history step (app.ts owns the router). A TOKEN
    // LIST, not a token: a scoped query is `q:<query>` plus its lane.
    selectTokens: (tokens: string[]) => Promise<void>
-   persistHash: (hash: string) => void
+   // Write the list hash (URL + the reload-restore key, one act — app.ts owns
+   // the ritual). false = replaceState: per-keystroke queries must not spam
+   // history.
+   commitListHash: (push: boolean) => void
    // The single writer of document.title, and the list's own title text.
    setTitle: (base: string) => void
    listTitle: () => string
@@ -148,9 +151,7 @@ async function applySearchQuery(q: string): Promise<void> {
    // further keystroke into a bar still on screen and focusable.
    if (!d.listVisible() || !nav.isSearchFilter()) return
    nav.applyFilter(searchTokens(q, nav.searchScope()))
-   const h = "#" + nav.tokensSuffix()
-   history.replaceState(null, "", h)
-   d.persistHash(h)
+   d.commitListHash(false)
    d.setTitle(d.listTitle())
    try {
       await list.rerender()
@@ -172,10 +173,11 @@ export function syncSearchBar(): void {
    const on = nav.isSearchFilter()
    // The bar shows while the list pane does (listVisible) — under split that is
    // whatever surface has key focus.
-   document.body.classList.toggle("srr-searching", on && d.listVisible())
+   const searching = on && d.listVisible()
+   document.body.classList.toggle("srr-searching", searching)
    if (!on) {
       el.searchNote.hidden = true
-      syncPaneReserve()
+      syncPaneReserve(searching)
       return
    }
    const q = nav.searchQuery()
@@ -194,7 +196,7 @@ export function syncSearchBar(): void {
    else if (nav.searchTruncated()) note = "Showing the most recent matches — refine to reach older ones."
    el.searchNote.textContent = note
    el.searchNote.hidden = !note
-   syncPaneReserve()
+   syncPaneReserve(searching)
 }
 
 // Under split the bar is FIXED over the pane's top, so the pane reserves its
@@ -203,8 +205,12 @@ export function syncSearchBar(): void {
 // 380px pane, and a hard-coded reserve then leaves the bar sitting on the first
 // rows. Publish the measured height instead; the stylesheet keeps the one-line
 // value as its fallback for the paint before this runs.
-function syncPaneReserve(): void {
+// `searching` is passed in rather than read back off body.srr-searching: the
+// only caller is syncSearchBar, which computed that boolean one line earlier and
+// then wrote it to the DOM — recovering it from the class made an undeclared
+// call-ORDER coupling out of what is just an argument.
+function syncPaneReserve(searching: boolean): void {
    if (!isSplit()) return
-   const h = document.body.classList.contains("srr-searching") ? el.searchbar.offsetHeight : 0
+   const h = searching ? el.searchbar.offsetHeight : 0
    document.documentElement.style.setProperty("--split-searchbar-h", h ? `${h}px` : "")
 }

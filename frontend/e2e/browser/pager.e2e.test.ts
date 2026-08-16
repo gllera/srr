@@ -2,8 +2,8 @@ import { afterAll, beforeAll, describe, expect, inject, it } from "vitest"
 import puppeteer, { type Browser, type Page } from "puppeteer"
 
 import { feedServer, srr, type FeedServer } from "../harness"
-import { nItems, rssFeed } from "../fixtures"
-import { clearDir, waitList, waitReader, waitTitle } from "./helpers"
+import { nItems, rssFeed, wavBytes } from "../fixtures"
+import { clearDir, clickRow, waitList, waitReader, waitTitle } from "./helpers"
 
 // Reader swipe pager (spec 2026-07-27-reader-pager-carousel-design.md) driven
 // with REAL Chrome touch input. The unit layers prove the geometry
@@ -37,33 +37,6 @@ const packsDir = inject("packsDir")
 // build a ghost duplicate of a node currently living in .srr-player-media.
 const PODCAST = "pager title 1"
 const NEIGHBOR = "pager title 2"
-
-// A real, decodable RIFF/WAVE file: 8 kHz mono 8-bit PCM, a quiet 220 Hz tone,
-// long enough (2 min) that no amount of CI slowness lets it END mid-test (which
-// would release the player's claim for legitimate reasons and read as a failure
-// of the thing under test). Byte-for-byte player.e2e.test.ts's synthesiser —
-// duplicated rather than imported because a test file is not a module other
-// suites should reach into, and `e2e/fixtures.ts` (its natural shared home) is
-// outside this change's blast radius. Hoisting it there is the follow-up.
-function wavBytes(seconds: number, rate = 8000): Buffer {
-   const samples = seconds * rate
-   const buf = Buffer.alloc(44 + samples)
-   buf.write("RIFF", 0)
-   buf.writeUInt32LE(36 + samples, 4)
-   buf.write("WAVE", 8)
-   buf.write("fmt ", 12)
-   buf.writeUInt32LE(16, 16) // fmt chunk size
-   buf.writeUInt16LE(1, 20) // PCM
-   buf.writeUInt16LE(1, 22) // mono
-   buf.writeUInt32LE(rate, 24) // sample rate
-   buf.writeUInt32LE(rate, 28) // byte rate (mono, 8-bit ⇒ = sample rate)
-   buf.writeUInt16LE(1, 32) // block align
-   buf.writeUInt16LE(8, 34) // bits per sample
-   buf.write("data", 36)
-   buf.writeUInt32LE(samples, 40)
-   for (let i = 0; i < samples; i++) buf[44 + i] = 128 + Math.round(40 * Math.sin((2 * Math.PI * 220 * i) / rate))
-   return buf
-}
 
 // This suite launches its OWN Chromium rather than helpers.launchBrowser:
 // headless Chrome refuses play() without a user gesture, and the media guard has
@@ -194,14 +167,6 @@ async function openTouchPage(browser: Browser): Promise<[Page, () => Promise<voi
 
 // Open a list row BY TITLE (rows are newest-first, so an index would encode the
 // fixture's ordering into every call site).
-const clickRow = (p: Page, title: string) =>
-   p.evaluate((t) => {
-      const row = [...document.querySelectorAll(".srr-list a.srr-row")].find(
-         (e) => e.querySelector(".srr-row-title")?.textContent === t,
-      )
-      ;(row as HTMLElement | undefined)?.click()
-   }, title)
-
 describe("browser: reader swipe pager", () => {
    let browser: Browser
    let feeds: FeedServer

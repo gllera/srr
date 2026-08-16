@@ -15,26 +15,27 @@ const { Transformer } = require("@parcel/plugin")
 //    registration, silently killing the whole offline/PWA path.
 //
 // Resolution still lives in resolve-cdn-url.js; this only substitutes results.
-const cdnUrl = require("./resolve-cdn-url")()
+const cdnUrl = require("./resolve-cdn-url")
 const nodeEnv = process.env.NODE_ENV || "production"
 // SRR_VERSION → the build's version label (config.ts's status footer). CI sets
 // VERSION to the release tag (release.yml, both build jobs); elsewhere "dev".
 const version = process.env.VERSION || "dev"
 
+// One row per define, substituted in order. `replaceAll` with a STRING pattern
+// is literal, so the dots in process.env.NODE_ENV match themselves.
+const DEFINES = [
+   ["SRR_CDN_URL", cdnUrl],
+   ["SRR_VERSION", version],
+   ["process.env.NODE_ENV", nodeEnv],
+]
+
 module.exports = new Transformer({
    async transform({ asset }) {
       let code = await asset.getCode()
       let changed = false
-      if (code.includes("SRR_CDN_URL")) {
-         code = code.replaceAll("SRR_CDN_URL", JSON.stringify(cdnUrl))
-         changed = true
-      }
-      if (code.includes("SRR_VERSION")) {
-         code = code.replaceAll("SRR_VERSION", JSON.stringify(version))
-         changed = true
-      }
-      if (code.includes("process.env.NODE_ENV")) {
-         code = code.replaceAll("process.env.NODE_ENV", JSON.stringify(nodeEnv))
+      for (const [name, value] of DEFINES) {
+         if (!code.includes(name)) continue
+         code = code.replaceAll(name, JSON.stringify(value))
          changed = true
       }
       if (changed) asset.setCode(code)

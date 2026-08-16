@@ -14,8 +14,9 @@
 import { buildContent, paintMasthead, stampContentHost, type ArticleRefs } from "./article-view"
 import * as data from "./data"
 import { el } from "./els"
-import { srcColorIndex, timeAgo } from "./fmt"
+import { stampSrc, timeAgo } from "./fmt"
 import { setPager, type PagerSide } from "./gestures"
+import { prefersReducedMotion } from "./motion"
 import * as nav from "./nav"
 
 export interface PagerDeps {
@@ -106,10 +107,6 @@ export function setup(deps: PagerDeps): void {
    // `cancel` is settleBack unguarded, unlike engage/move: it leans on gestures
    // calling it only for an ENGAGED drag, never a skipped one.
    setPager(el.article, { engage, move, end, cancel: settleBack })
-}
-
-function reducedMotion(): boolean {
-   return typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches
 }
 
 // Remaining travel ÷ release speed, clamped: "carry on at the pace the finger
@@ -280,7 +277,7 @@ async function fillPage(s: PagerSide): Promise<void> {
       // uncommon path. Today's masthead-only pane is now the degraded state.
       const card = await data.loadMeta(target)
       if (my !== fillTok) return
-      refs.root.dataset.src = String(srcColorIndex(card.f))
+      stampSrc(refs.root, card.f)
       refs.source.textContent = data.feedTitle(card.f)
       refs.date.textContent = timeAgo(card.w)
       refs.title.textContent = card.t ?? ""
@@ -343,7 +340,7 @@ async function commitStep(s: PagerSide): Promise<void> {
    // magnitude, which is also the right answer for a drag that ran past the
    // surface's own width.)
    const dur = settleDuration(el.article.offsetWidth - Math.abs(lastDx), releaseVx)
-   const reduced = reducedMotion()
+   const reduced = prefersReducedMotion()
    if (!reduced) {
       el.article.style.transition = `transform ${dur}ms ${SETTLE_EASE}`
       box.style.transition = `transform ${dur}ms ${SETTLE_EASE}`
@@ -443,7 +440,7 @@ function stalled(): Promise<typeof STALLED> {
 // manipulation), but nothing moves on its own after the lift.
 function settleBack(): void {
    fillTok++
-   if (reducedMotion()) return rest()
+   if (prefersReducedMotion()) return rest()
    // Snapping back, so the remaining travel simply IS the offset the drag
    // reached — the mirror of commitStep's "what is left of a surface width".
    const dur = settleDuration(lastDx, releaseVx)

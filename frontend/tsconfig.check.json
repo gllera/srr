@@ -1,0 +1,32 @@
+// The typecheck GATE (npm run typecheck → make verify-fe).
+//
+// Why it needs a config of its own: nothing else in the pipeline reads types.
+// Parcel strips them without checking, vitest transpiles per file, and ESLint
+// runs the non-type-aware ruleset — so until this existed, a type could rot for
+// releases without one gate noticing. It did: `IDB` was left extending the root
+// POINTER after the manifest cutover moved every field the reader reads onto the
+// manifest, and the whole data layer was checking against a shape nobody builds.
+//
+// The base tsconfig.json has no `include`, so a bare `tsc -p .` pulls in the e2e
+// suites, the test files and node_modules' ambient types and buries the app's own
+// errors in hundreds of irrelevant ones — which is why nobody ran it. This scopes
+// it to exactly the shipped app: src/js + the service worker, no tests.
+{
+   "extends": "./tsconfig.json",
+   "compilerOptions": {
+      "noEmit": true,
+      // The app is ESM (Parcel bundles it and the SW registers with
+      // {type:"module"}); the base config's NodeNext would judge it as CommonJS
+      // output and reject `import.meta`, which app.ts legitimately uses.
+      "module": "esnext",
+      "moduleResolution": "bundler",
+      "skipLibCheck": true,
+      // The runtime surface the app actually has. `types: []` keeps ambient
+      // @types packages (node, and whatever a transitive dep drags in) out — the
+      // app runs in a browser and a worker, not in node.
+      "lib": ["es2022", "dom", "dom.iterable", "webworker"],
+      "types": []
+   },
+   "include": ["src/js/**/*.ts", "src/sw.ts"],
+   "exclude": ["**/*.test.ts"]
+}

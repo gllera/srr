@@ -5,10 +5,19 @@
 
 import { api, apiGet, streamSSE } from "./api"
 import { banner } from "./banner"
-import { el, icon, relTime, srcColorIndex } from "./dom"
+import { el, iconBtn, relTime, srcColorIndex } from "./dom"
 import { renderers, refresh, state } from "./store"
 import { renderPreviewInto } from "./preview"
-import { confirmDelete, dialogRow, makeDialog, overrideChip, saveModal, splitScopes, stepsEditor } from "./ui"
+import {
+   confirmDelete,
+   dataTable,
+   dialogRow,
+   lazyDialog,
+   overrideChip,
+   saveModal,
+   splitScopes,
+   stepsEditor,
+} from "./ui"
 import type { FeedListView, FeedProgress, ResolveResult } from "./types"
 
 const feedsState = { search: "", tag: "", grade: "", sort: "title", dir: 1 }
@@ -201,20 +210,23 @@ const liveArts = (f: FeedListView): number => f.total_art - (f.expired || 0)
 // focusable error-tooltip trigger and carries the error inline), title, tag /
 // recipe / override chips, last-new, live count, and the row actions.
 function feedRow(f: FeedListView): HTMLElement {
+   const grade = feedGrade(f)
+   // The error body appears twice per failing row — in the dot's hover tip and
+   // again inline under the title — so it is built, not copied. A fresh pair per
+   // call because a node can only live in one place.
+   const errParts = (): HTMLElement[] => [
+      el("span", { class: "streak" }, `fail ×${f.fail_streak}`),
+      el("span", { class: "msg" }, f.error ?? ""),
+   ]
    let statusCell: HTMLElement
    if (f.error) {
-      const tip = el(
-         "span",
-         { class: "tip", "aria-hidden": "true" },
-         el("span", { class: "streak" }, `fail ×${f.fail_streak}`),
-         el("span", { class: "msg" }, f.error),
-      )
+      const tip = el("span", { class: "tip", "aria-hidden": "true" }, ...errParts())
       const wrap = el(
          "span",
          {
             class: "dotwrap",
             tabindex: "0",
-            "data-grade": feedGrade(f),
+            "data-grade": grade,
             "aria-label": `Fetch error (fail streak ${f.fail_streak}): ${f.error}`,
          },
          healthDot(f),
@@ -230,14 +242,7 @@ function feedRow(f: FeedListView): HTMLElement {
       el("a", { class: "feed-title", href: f.url, target: "_blank", rel: "noopener" }, f.title),
    )
    if (f.error) {
-      titleCell.append(
-         el(
-            "div",
-            { class: "rowerr", "data-grade": feedGrade(f), "aria-hidden": "true" },
-            el("span", { class: "streak" }, `fail ×${f.fail_streak}`),
-            el("span", { class: "msg" }, f.error),
-         ),
-      )
+      titleCell.append(el("div", { class: "rowerr", "data-grade": grade, "aria-hidden": "true" }, ...errParts()))
    }
    return el(
       "tr",
@@ -260,26 +265,9 @@ function feedRow(f: FeedListView): HTMLElement {
       el(
          "td",
          { class: "actions" },
-         el(
-            "button",
-            {
-               class: "btn icon",
-               title: "Fetch this feed",
-               "aria-label": "Fetch this feed",
-               onclick: (e: Event) => fetchOneFeed(f, e.currentTarget as HTMLButtonElement),
-            },
-            icon("fetch"),
-         ),
-         el(
-            "button",
-            { class: "btn icon", title: "Preview", "aria-label": "Preview", onclick: () => openPreviewDialog(f) },
-            icon("preview"),
-         ),
-         el(
-            "button",
-            { class: "btn icon", title: "Edit", "aria-label": "Edit", onclick: () => openFeedModal(f) },
-            icon("edit"),
-         ),
+         iconBtn("fetch", "Fetch this feed", (e: Event) => fetchOneFeed(f, e.currentTarget as HTMLButtonElement)),
+         iconBtn("preview", "Preview", () => openPreviewDialog(f)),
+         iconBtn("edit", "Edit", () => openFeedModal(f)),
       ),
    )
 }
@@ -419,28 +407,18 @@ function drawTable(): void {
    const wrap = document.getElementById("feedTableWrap")!
    const rows = state.snapshot.feeds.filter(feedMatches) // fresh array — the in-place sort never reorders the snapshot
    rows.sort((a, b) => FEED_SORTS[feedsState.sort](a, b) * feedsState.dir)
-   const table = el(
-      "table",
-      {},
-      el(
-         "thead",
-         {},
-         el(
-            "tr",
-            {},
-            el("th", {}, ""),
-            sortableTh("title", "title"),
-            el("th", {}, "tag"),
-            el("th", {}, "recipe"),
-            sortableTh("last new", "last_new"),
-            sortableTh("articles", "articles"),
-            el("th", {}, ""),
-         ),
-      ),
+   const table = dataTable(
+      [
+         "",
+         sortableTh("title", "title"),
+         "tag",
+         "recipe",
+         sortableTh("last new", "last_new"),
+         sortableTh("articles", "articles"),
+         "",
+      ],
+      rows.map(feedRow),
    )
-   const tb = el("tbody", {})
-   for (const f of rows) tb.append(feedRow(f))
-   table.append(tb)
    wrap.replaceChildren(
       el("div", { class: "count" }, `showing ${rows.length} of ${state.snapshot.feeds.length}`),
       table,
@@ -451,13 +429,12 @@ async function deleteFeed(f: FeedListView): Promise<boolean> {
    return confirmDelete(`Delete feed "${f.title}"?`, "/api/feeds/" + f.id, "Deleted " + f.title)
 }
 
-let feedDialog: HTMLDialogElement | undefined
+const feedDialog = lazyDialog({ id: "feedModal" })
 // openFeedModal is both halves of feed CRUD. Add mode is URL-first: paste a site
 // or feed URL and checkURL reads the wire's own label (GET /api/resolve). Edit
 // mode keeps the familiar title-first order; the same probe runs on a repointed URL.
 function openFeedModal(f: FeedListView | null): void {
-   feedDialog ||= makeDialog({ id: "feedModal" })
-   const dlg = feedDialog
+   const dlg = feedDialog()
    const isEdit = !!f
    const v = f || {
       title: "",
@@ -764,12 +741,11 @@ function openFeedModal(f: FeedListView | null): void {
    dlg.showModal()
 }
 
-let previewDialog: HTMLDialogElement | undefined
+const previewDialog = lazyDialog({ class: "preview-dialog" })
 // openPreviewDialog is the Feeds-row action: preview this feed's URL through its
 // effective recipe in place — a dialog over the table, no tab switch.
 function openPreviewDialog(f: FeedListView): void {
-   previewDialog ||= makeDialog({ class: "preview-dialog" })
-   const dlg = previewDialog
+   const dlg = previewDialog()
    const out = el("div", { class: "preview-out" })
    dlg.replaceChildren(
       el(

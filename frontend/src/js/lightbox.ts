@@ -262,16 +262,31 @@ function onTouchStart(e: TouchEvent): void {
       touchMoved = true // a pinch is never a tap
       if (viewImg) viewImg.style.transition = "none" // track the fingers 1:1
    } else if (e.touches.length === 1) {
-      touchMode = "pan"
       touchMoved = false
-      panStartX = e.touches[0].clientX
-      panStartY = e.touches[0].clientY
-      panBaseX = panX
-      panBaseY = panY
+      beginPan(e.touches[0])
       if (viewImg) viewImg.style.transition = "none"
    } else {
       touchMode = "none"
    }
+}
+
+// Seed a one-finger pan from `t`: the finger's origin plus the pan it starts
+// from. Two paths begin one — a fresh single-finger touch, and the handover
+// when a pinch releases one of its two fingers — and they must seed it the same
+// way or the second would jump the picture by the pan already applied.
+function beginPan(t: Touch): void {
+   touchMode = "pan"
+   panStartX = t.clientX
+   panStartY = t.clientY
+   panBaseX = panX
+   panBaseY = panY
+}
+
+// End of touch input: drop the gesture and hand motion back to the stylesheet,
+// so the NEXT tap-zoom eases again instead of snapping.
+function releaseTouch(): void {
+   touchMode = "none"
+   viewImg?.style.removeProperty("transition")
 }
 
 function onTouchMove(e: TouchEvent): void {
@@ -307,27 +322,16 @@ function onTouchEnd(e: TouchEvent): void {
       // A release a hair above fitted reads as "back to normal" — the same
       // indistinguishability call ZOOM_EPS makes for the tap toggle.
       if (zoom <= ZOOM_EPS) setZoom(1)
-      if (e.touches.length === 1) {
-         // One finger stayed down: the gesture continues as a pan from here.
-         touchMode = "pan"
-         panStartX = e.touches[0].clientX
-         panStartY = e.touches[0].clientY
-         panBaseX = panX
-         panBaseY = panY
-      }
+      // One finger stayed down: the gesture continues as a pan from here.
+      if (e.touches.length === 1) beginPan(e.touches[0])
    }
-   if (e.touches.length === 0) {
-      touchMode = "none"
-      // Hand motion back to the stylesheet, so the NEXT tap-zoom eases again.
-      viewImg?.style.removeProperty("transition")
-   }
+   if (e.touches.length === 0) releaseTouch()
 }
 
 function onTouchCancel(e: TouchEvent): void {
    e.stopPropagation()
    if (zoom !== 1 && zoom <= ZOOM_EPS) setZoom(1)
-   touchMode = "none"
-   viewImg?.style.removeProperty("transition")
+   releaseTouch()
 }
 
 // Capture phase + stopPropagation, the dialog discipline dropdown.ts's modal
@@ -346,9 +350,11 @@ function onKey(e: KeyboardEvent): void {
    }
 }
 
-// open shows `img` in the viewer. Exported for tests and any future caller (a
-// gallery affordance); the reader reaches it through handleContentClick.
-export function open(img: HTMLImageElement): void {
+// Show `img` in the viewer — the body behind handleContentClick, kept a
+// separate function so a future gallery affordance has a door that isn't a
+// click event. Not exported: every caller today, tests included, comes through
+// handleContentClick.
+function open(img: HTMLImageElement): void {
    // currentSrc is what the browser actually resolved and painted — srcset is
    // stripped by the sanitizer, but a proxied/pack-relative src has already been
    // rewritten to an absolute URL on the element, so read it off the element

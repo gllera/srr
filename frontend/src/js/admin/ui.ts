@@ -4,7 +4,7 @@
 
 import { api } from "./api"
 import { banner } from "./banner"
-import { el, icon } from "./dom"
+import { el, iconBtn } from "./dom"
 import { refresh } from "./store"
 import type { Recipe } from "./types"
 
@@ -12,6 +12,32 @@ export function makeDialog(attrs: Record<string, unknown>): HTMLDialogElement {
    const d = el("dialog", attrs)
    document.body.append(d)
    return d
+}
+
+// A tab's data table from its header row and its body rows. Every tab wrote the
+// table → thead → tr → tbody nesting out by hand, so a fourth re-typed it and
+// the structure was re-verified three times. A string header becomes a plain
+// <th>; an element (feeds.ts's sortableTh) rides as-is.
+export function dataTable(headers: (string | HTMLElement)[], rows: HTMLElement[]): HTMLTableElement {
+   const table = el(
+      "table",
+      {},
+      el("thead", {}, el("tr", {}, ...headers.map((h) => (typeof h === "string" ? el("th", {}, h) : h)))),
+   )
+   table.append(el("tbody", {}, ...rows))
+   return table
+}
+
+// The console's <dialog>s are built on first open and reused forever after,
+// because makeDialog APPENDS unconditionally — a modal opened without the lazy
+// guard leaks a <dialog> into the body per open. Five call sites each wrote that
+// guard as a module-level `let` plus a `||=`; this is the same thing with the
+// rule inside it, so a sixth modal cannot be written without it. The reader half
+// solved this the same way (dropdown.ts's lazyDialog); admin can't import it,
+// which is what the module boundary here is for.
+export function lazyDialog(attrs: Record<string, unknown>): () => HTMLDialogElement {
+   let d: HTMLDialogElement | undefined
+   return () => (d ??= makeDialog(attrs))
 }
 
 // confirmDialog replaces native window.confirm with a modal in the console's
@@ -135,19 +161,10 @@ export function stepsEditor(steps: string[], opts?: StepsOpts): HTMLElement {
                "div",
                { class: "step" },
                inp,
-               el(
-                  "button",
-                  {
-                     class: "btn icon",
-                     title: "Remove step",
-                     "aria-label": "Remove step",
-                     onclick: () => {
-                        steps.splice(i, 1)
-                        draw()
-                     },
-                  },
-                  icon("delete"),
-               ),
+               iconBtn("delete", "Remove step", () => {
+                  steps.splice(i, 1)
+                  draw()
+               }),
             ),
          )
       })

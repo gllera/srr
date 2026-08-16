@@ -12,9 +12,18 @@
 // rather than importing `el`, which is exactly what makes it reusable for a
 // surface index.html never declared. No controller imports.
 import * as data from "./data"
-import { readerDateline, sanitizeFragment, srcColorIndex } from "./fmt"
+import { readerDateline, sanitizeFragment, stampSrc } from "./fmt"
 import { type IArticleWire } from "./format.gen"
 import { URL_DENY } from "./urlish"
+
+// An article surface's media elements IN ORDER — the positional identity FEB2's
+// harvest/restore (reader.ts), the mini-player's adopt/rehome and the queue
+// chips (player.ts) all pair state on. ONE spelling of the enumeration, because
+// an index pairing computed over two selectors that differ by one element
+// misaligns every saved position after it.
+export function mediaList(root: ParentNode): HTMLMediaElement[] {
+   return [...root.querySelectorAll<HTMLMediaElement>("audio,video")]
+}
 
 // The nodes one article surface owns. The real reader passes its `el` refs; the
 // pager passes the ones it built. Same shape, same classes, same CSS.
@@ -34,7 +43,7 @@ export function paintMasthead(refs: ArticleRefs, article: IArticleWire, feed: IF
    // in for the hidden title's link.
    refs.root.classList.toggle("srr-reader-titleless", !!feed?.nt)
    // Key the masthead to the article's source color (same ramp as the list rails).
-   refs.root.dataset.src = String(srcColorIndex(article.f))
+   stampSrc(refs.root, article.f)
    refs.source.textContent = data.feedTitle(article.f)
    // Desk/section: the feed's tag as a hashtag ("#" is real text so it shares the
    // tag's ink; the "·" separator is CSS). Empty for an untagged feed → the
@@ -113,7 +122,7 @@ export function buildContent(article: IArticleWire, base: URL, opts: { inert: bo
 // pager.ts swaps this surface for the real one, so a stub of the wrong size would
 // reflow everything below it at exactly the moment the design exists to smooth.
 function makeMediaInert(frag: DocumentFragment): void {
-   for (const m of [...frag.querySelectorAll("audio, video")]) {
+   for (const m of mediaList(frag)) {
       const stub = document.createElement("div")
       stub.className = "srr-media-stub"
       stub.setAttribute("aria-hidden", "true")
@@ -133,7 +142,7 @@ function makeMediaInert(frag: DocumentFragment): void {
 // The §9.3 compaction tombstone body: an expired article whose payload `srr
 // compact` reclaimed. A sibling of the "[DELETED]" feed tombstone (feedTitle) —
 // the source · date masthead still renders correctly, only the content is gone.
-export function expiredTombstone(): HTMLElement {
+function expiredTombstone(): HTMLElement {
    const p = document.createElement("p")
    p.className = "srr-expired-note"
    p.textContent = "This article is no longer stored"

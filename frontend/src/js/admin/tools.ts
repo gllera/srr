@@ -9,7 +9,7 @@ import { banner, clearBanner } from "./banner"
 import { el } from "./dom"
 import { applyFeedEvent } from "./feeds"
 import { loadSnapshot, renderers, state } from "./store"
-import { appendRecipeOptions, dialogRow, makeDialog, saveModal } from "./ui"
+import { appendRecipeOptions, dialogRow, lazyDialog, saveModal } from "./ui"
 import type { FeedProgress, ImportDryRun, ImportFeed, InspectResult } from "./types"
 
 // importDryRun POSTs OPML XML to /api/import?dry_run=1: the server walks the
@@ -30,15 +30,14 @@ interface ImportRow {
    el?: HTMLElement
 }
 
-let importDialog: HTMLDialogElement | undefined
+const importDialog = lazyDialog({ class: "import-dialog" })
 // openImportModal is the OPML review sheet: every OPML feed is an editable row —
 // include-checkbox, title, tag, recipe — so the operator prunes and adjusts the
 // set before anything is written. A subscribed URL starts unchecked; an
 // unresolvable one is a row too (a different recipe may resolve it), unchecked
 // with its error inline. Import commits the checked rows via /api/feeds/apply.
 function openImportModal(dry: ImportDryRun): void {
-   importDialog ||= makeDialog({ class: "import-dialog" })
-   const dlg = importDialog
+   const dlg = importDialog()
    const subscribed = new Set(state.snapshot.feeds.map((f) => f.url))
    const err = el("div", { class: "formerr" })
    const counts = el("div", { class: "count" })

@@ -12,6 +12,7 @@ import * as data from "./data"
 import { el } from "./els"
 import { extractAssetKeys } from "./fmt"
 import * as nav from "./nav"
+import { forgetStoreState } from "./mounts"
 import { isPinned, listPins, pinFilter, unpinFilter } from "./pin"
 
 // Offline-pin progress: show a transient "Downloading N / M…" note in the
@@ -194,6 +195,26 @@ export async function syncSavedAssets(chron: number, saved: boolean): Promise<vo
 // cached a production pack. Posting the mounted roots lets it route + cache them.
 // Called on boot, on every mount-table change, and whenever a new SW takes
 // control (a fresh worker starts with no roots and falls back to own-origin).
+// Forget one mount's device state, pinned SW-cache entries included. The order
+// is load-bearing: pinsKey(mid) is the ONLY record of those cached URLs and the
+// PINNED bucket is eviction-exempt, so clearing the registry first leaks the
+// bytes forever with nothing left to find them by. It lives here rather than at
+// the Stores dialog because this module is the page half of the SW message
+// protocol — a second forget path (a device reset, a sync-driven forget, a
+// schema rung dropping a dead mount) must not have to rediscover the rule.
+//
+// `url` is the mount record's own url, which is the same base the pin used
+// (Store.base is new URL(url)), so the SW resolves the identical absolute URLs.
+// Unpin needs no live root — it deletes unconditionally, unlike pin.
+export function forgetMountState(mid: string, url: string): void {
+   const controller = navigator.serviceWorker?.controller
+   if (controller) {
+      const names = [...new Set([...listPins(mid).values()].flatMap((e) => e.names))]
+      if (names.length) controller.postMessage({ type: "unpin", names, base: new URL(url).href })
+   }
+   forgetStoreState(mid)
+}
+
 export function postMounts(): void {
    const controller = navigator.serviceWorker?.controller
    if (!controller) return // dev / harness / insecure context — the SW is inert anyway

@@ -51,6 +51,25 @@ export interface Gestures {
 // that interlock, since it runs in its own mode, but because "how far before
 // the finger has said something" is one judgement, not four.)
 export const AXIS_SLOP = 8 // exported: player.ts's local queue-row swipe locks at the same slop
+
+// The axis lock's veto half, in one place for the same reason AXIS_SLOP is: a
+// gesture that has committed to the VERTICAL axis belongs to the scroll for the
+// rest of its life, and the row swipe (here), the reader pager (here) and the
+// player's own queue-row swipe (its own listeners, because the scrubber guard
+// declines every touch inside .srr-player) all have to answer that identically —
+// three copies of the comparison is one edit away from the overlapping-claim band
+// the shared slop exists to prevent.
+export const verticalDominant = (dx: number, dy: number): boolean =>
+   Math.abs(dy) > AXIS_SLOP && Math.abs(dy) >= Math.abs(dx)
+
+// "This touch began inside a registered surface that is actually on screen" —
+// the gating question all three single-finger machines ask, by the same
+// argument as verticalDominant above: three spellings of one judgement is one
+// edit away from a band of touches two machines both claim (or neither does).
+// Widening it — a `visibility` test, getRootNode for a shadow target — then
+// lands in one place instead of three.
+const inSurface = (surface: HTMLElement | null, target: EventTarget | null): boolean =>
+   !!surface && !surface.hidden && target instanceof Node && surface.contains(target)
 // Downward travel that arms the refresh.
 const PULL_TRIGGER = 72
 // The badge follows at half the finger's distance (the rubber-band feel every
@@ -112,14 +131,7 @@ export function setPullRefresh(surface: HTMLElement, run: () => Promise<unknown>
 }
 
 function pullReady(target: EventTarget | null): boolean {
-   return (
-      !!pullSurface &&
-      !!pullRun &&
-      !pullBusy &&
-      !pullSurface.hidden &&
-      target instanceof Node &&
-      pullSurface.contains(target)
-   )
+   return !!pullRun && !pullBusy && inSurface(pullSurface, target)
 }
 
 function pullStart(target: EventTarget | null, x: number, y: number): void {
@@ -350,8 +362,7 @@ function rowStart(target: EventTarget | null, x: number, y: number): void {
    rowConsumed = false
    rowStartX = x
    rowStartY = y
-   if (!rowSurface || !rowSpec || rowSurface.hidden) return
-   if (!(target instanceof Node) || !rowSurface.contains(target)) return
+   if (!rowSpec || !inSurface(rowSurface, target)) return
    rowNode = rowSpec.row(target)
    rowEligible = !!rowNode
 }
@@ -364,7 +375,7 @@ function rowMove(e: Event, x: number, y: number): void {
       // Axis lock, half one (mirrored): a gesture that commits to the VERTICAL
       // axis belongs to the scroll — or, at the top of the list, to the pull —
       // for the rest of its life. The row can never claim it back mid-drag.
-      if (Math.abs(dy) > AXIS_SLOP && Math.abs(dy) >= Math.abs(dx)) {
+      if (verticalDominant(dx, dy)) {
          rowEligible = false
          rowNode = null
          return
@@ -506,9 +517,7 @@ function pagerStart(target: EventTarget | null, x: number, y: number): void {
       !document.body.classList.contains("srr-split") &&
       !!pagerSpec &&
       !!pagerSurface &&
-      !pagerSurface.hidden &&
-      target instanceof Node &&
-      pagerSurface.contains(target) &&
+      inSurface(pagerSurface, target) &&
       !inHScrollable(target, pagerSurface)
    pagerActive = false
    pagerStartX = x
@@ -522,7 +531,7 @@ function pagerMove(e: Event, x: number, y: number): void {
    if (!pagerActive) {
       // Axis lock, half one: vertical-dominant past the slop = a scroll for the
       // rest of the gesture's life, measured against the ONE shared AXIS_SLOP.
-      if (Math.abs(dy) > AXIS_SLOP && Math.abs(dy) >= Math.abs(dx)) {
+      if (verticalDominant(dx, dy)) {
          pagerEligible = false
          return
       }
@@ -624,8 +633,10 @@ export function setupGestures(deps: GestureDeps): Gestures {
    // gesture, so a machine that preventDefaults before recognition kills native
    // pinch-zoom app-wide — its later "release" frees nothing. A gesture this
    // machine hasn't claimed must therefore never be touched at all.
-   let pinch = false
-   let cycling = false
+   // One axis, three states — an undecided gesture is not "neither of two
+   // booleans", which would also let both be set at once. Same idiom as the
+   // single-finger `mode` below.
+   let twoAxis: "none" | "pinch" | "cycle" = "none"
    // The tracked gesture, if any. The three single-finger machines below are
    // only moved and only settled when the gesture began as a single-finger one
    // ("single"), so a 3+-finger tap/lift ("none") can't drive or commit one.
@@ -641,15 +652,22 @@ export function setupGestures(deps: GestureDeps): Gestures {
    const onScrubber = (target: EventTarget | null): boolean =>
       target instanceof Element && target.closest("audio, video, .srr-player") !== null
 
+   // Retract every single-finger machine — the shared reset behind a declined
+   // scrubber touch, a second finger landing, a 3+-finger touch and touchcancel.
+   // A fourth machine gets added HERE, not at four call sites.
+   const cancelSingleMachines = () => {
+      pullCancel()
+      rowCancel()
+      pagerCancel()
+   }
+
    const trackSingle = (t: Touch, target: EventTarget | null) => {
       // Declining the gesture outright (rather than stopping propagation at one
       // element) is what makes this cover in-content media as well as the bar —
       // see the guard note below.
       if (onScrubber(target)) {
          mode = "none"
-         pullCancel()
-         rowCancel()
-         pagerCancel()
+         cancelSingleMachines()
          return
       }
       mode = "single"
@@ -688,22 +706,17 @@ export function setupGestures(deps: GestureDeps): Gestures {
                e.touches[0].clientY - e.touches[1].clientY,
             )
             twoFingerDy = 0
-            pinch = false
-            cycling = false
+            twoAxis = "none"
             // A second finger landing mid-pull (or mid-row-swipe) hands the
             // gesture to the cycle / pinch guard — retract the affordances rather
             // than leaving one hanging.
-            pullCancel()
-            rowCancel()
-            pagerCancel()
+            cancelSingleMachines()
          } else if (e.touches.length === 1) {
             trackSingle(e.touches[0], e.target)
          } else {
             // 3+ fingers: not a gesture we handle.
             mode = "none"
-            pullCancel()
-            rowCancel()
-            pagerCancel()
+            cancelSingleMachines()
          }
       },
       { passive: true },
@@ -717,7 +730,7 @@ export function setupGestures(deps: GestureDeps): Gestures {
                e.touches[0].clientY - e.touches[1].clientY,
             )
             const dy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - twoFingerStartY
-            if (!pinch && !cycling) {
+            if (twoAxis === "none") {
                // A pinch-zoom is also a two-finger move, but it changes the
                // inter-finger distance; the filter-cycle pan keeps the fingers
                // parallel (distance ~constant) and moves their centroid. The
@@ -728,17 +741,17 @@ export function setupGestures(deps: GestureDeps): Gestures {
                // wrongly-claimed pinch is exactly the app-wide zoom kill this
                // decision replaced).
                const dd = Math.abs(dist - twoFingerStartDist)
-               if (dd > AXIS_SLOP && dd >= Math.abs(dy)) pinch = true
-               else if (Math.abs(dy) > AXIS_SLOP && Math.abs(dy) > dd) cycling = true
+               if (dd > AXIS_SLOP && dd >= Math.abs(dy)) twoAxis = "pinch"
+               else if (Math.abs(dy) > AXIS_SLOP && Math.abs(dy) > dd) twoAxis = "cycle"
             }
-            if (pinch) return
+            if (twoAxis === "pinch") return
             twoFingerDy = dy
             // An unclaimed gesture is left entirely alone: cancelling even one
             // early move suppresses the browser's native scroll/zoom for the
             // whole gesture, which is why the shape this replaced —
             // preventDefault until a pinch is recognized — never actually
             // released a pinch to the zoom.
-            if (!cycling) return
+            if (twoAxis !== "cycle") return
             e.preventDefault()
          } else if (mode === "single" && e.touches.length === 1) {
             // The pull and the row swipe both track (and, once engaged,
@@ -760,11 +773,11 @@ export function setupGestures(deps: GestureDeps): Gestures {
          if (mode === "two") {
             if (e.touches.length === 0) {
                mode = "none"
-               // Only a CLAIMED gesture cycles (cycling, not merely !pinch):
-               // the lock above means an unclaimed dy can never reach 50, and
-               // stating the machine's own flag here keeps that true by
-               // construction rather than by arithmetic.
-               if (cycling && Math.abs(twoFingerDy) >= 50) deps.onCycle(twoFingerDy < 0 ? -1 : 1)
+               // Only a CLAIMED gesture cycles ("cycle", not merely "not
+               // pinch"): the lock above means an unclaimed dy can never reach
+               // 50, and stating the machine's own state here keeps that true
+               // by construction rather than by arithmetic.
+               if (twoAxis === "cycle" && Math.abs(twoFingerDy) >= 50) deps.onCycle(twoFingerDy < 0 ? -1 : 1)
             } else if (e.touches.length === 1) {
                // Fingers lifted one at a time: the two-finger gesture is over.
                // Re-seed the remaining finger as a fresh single-finger swipe
@@ -801,9 +814,7 @@ export function setupGestures(deps: GestureDeps): Gestures {
       "touchcancel",
       () => {
          mode = "none"
-         pullCancel()
-         rowCancel()
-         pagerCancel()
+         cancelSingleMachines()
       },
       { passive: true },
    )
@@ -842,25 +853,35 @@ export function setupGestures(deps: GestureDeps): Gestures {
          const y = window.scrollY
          const goingDown = y > lastScrollY
          lastScrollY = y
-         const scroller = document.scrollingElement ?? document.documentElement
-         const barH = deps.toolbar.offsetHeight || 1
-         const distFromBottom = scroller.scrollHeight - (y + window.innerHeight)
          // Bottom reveal: scrolling down through the last bar-height, the toolbar
          // rises 1:1 with the scroll — like a footer that's part of the page,
          // not a fixed bar popping in. transition:none so it tracks the scroll
          // instead of easing behind it. Scrolling up falls through to the normal
          // show path, so it never slides back down on you near the end.
-         if (goingDown && distFromBottom < barH) {
-            setHidden(false)
-            deps.toolbar.style.transition = "none"
-            deps.toolbar.style.transform = `translateY(${Math.max(0, distFromBottom)}px)`
-            // A scroll that STOPS mid-zone fires no further event, leaving the bar
-            // parked half-sunken below the screen edge. Arm a settle timer (re-armed
-            // by each in-zone scroll) that seats it under the normal transition once
-            // the gesture stops.
-            clearTimeout(bottomSettleTimer)
-            bottomSettleTimer = setTimeout(clearBottomReveal, 150)
-            return
+         //
+         //
+         // Both measurements live INSIDE this branch on purpose: reading
+         // scrollHeight is a document-wide layout flush (on the list that means
+         // resolving every virtualized row's intrinsic size) and offsetHeight is a
+         // second one, while this handler runs at scroll frequency. Hoisted above
+         // the test, an upward fling paid for both forced reflows per event to
+         // compute values it then never looked at.
+         if (goingDown) {
+            const scroller = document.scrollingElement ?? document.documentElement
+            const barH = deps.toolbar.offsetHeight || 1
+            const distFromBottom = scroller.scrollHeight - (y + window.innerHeight)
+            if (distFromBottom < barH) {
+               setHidden(false)
+               deps.toolbar.style.transition = "none"
+               deps.toolbar.style.transform = `translateY(${Math.max(0, distFromBottom)}px)`
+               // A scroll that STOPS mid-zone fires no further event, leaving the bar
+               // parked half-sunken below the screen edge. Arm a settle timer (re-armed
+               // by each in-zone scroll) that seats it under the normal transition once
+               // the gesture stops.
+               clearTimeout(bottomSettleTimer)
+               bottomSettleTimer = setTimeout(clearBottomReveal, 150)
+               return
+            }
          }
          clearBottomReveal()
          setHidden(y > 50 && goingDown)

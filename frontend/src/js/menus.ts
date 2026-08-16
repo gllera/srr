@@ -14,6 +14,7 @@
 // re-derive and everything app-level arrive through MenuDeps.
 import * as data from "./data"
 import {
+   bindPressMenu,
    showBackupDialog,
    showContextMenu,
    showImgProxyDialog,
@@ -24,11 +25,10 @@ import {
 } from "./dropdown"
 import { el } from "./els"
 import * as list from "./list"
-import { addMount, forgetStoreState, removeMount, type MountRecord } from "./mounts"
+import { addMount, removeMount, type MountRecord } from "./mounts"
 import * as nav from "./nav"
 import * as picker from "./picker"
-import { listPins } from "./pin"
-import { pinMenuEntry, postMounts } from "./pin-ui"
+import { forgetMountState, pinMenuEntry, postMounts } from "./pin-ui"
 import { enterSearch } from "./search-ui"
 
 export interface MenuDeps {
@@ -168,52 +168,18 @@ export function markUnreadFromHere(): void {
 // and a second meaning there shadowed the browser's own menu. Saved/search are
 // seen-neutral peek modes — no items, and the gesture falls through to the
 // browser's own menu.
-function frontierMenuItems(): { label: string; action: () => void }[] {
+function frontierMenuItems(): MenuItem[] {
    if (nav.isSavedFilter() || nav.isSearchFilter()) return []
-   const items: { label: string; action: () => void }[] = []
+   const items: MenuItem[] = []
    if (nav.filterFeeds().size > 0) items.push({ label: "Mark all read", action: markAllRead })
    if (nav.currentChron() >= 0) items.push({ label: "Mark unread from here", action: markUnreadFromHere })
    return items
 }
 
-// Wire one frontier-menu anchor. Desktop right-click and Android long-press
-// both arrive as `contextmenu` (so does Shift+F10 / the menu key on a focused
-// anchor — the menu stays keyboard-reachable); iOS Safari never fires
-// contextmenu on non-links, so a touch-held timer covers it there. `held`
-// marks a timer-opened menu so the click that follows the finger lift is
-// swallowed (it would otherwise also navigate) and so
-// a late native contextmenu (Android fires both) doesn't reopen the menu it
-// just opened; any new touch resets it.
+// Wire one frontier-menu anchor — dropdown.bindPressMenu owns the secondary-
+// gesture wiring (right-click / long-press / menu key, and its platform quirks).
 export function bindFrontierMenu(anchor: HTMLElement): void {
-   let hold = 0
-   let held = false
-   const open = (): boolean => {
-      const items = frontierMenuItems()
-      if (items.length > 0) showContextMenu(anchor, items)
-      return items.length > 0
-   }
-   anchor.addEventListener("contextmenu", (e) => {
-      clearTimeout(hold)
-      if (held || open()) e.preventDefault()
-   })
-   anchor.addEventListener("pointerdown", (e) => {
-      if (e.pointerType !== "touch") return
-      held = false
-      clearTimeout(hold)
-      hold = window.setTimeout(() => (held = open()), 500)
-   })
-   for (const ev of ["pointerup", "pointercancel", "pointerleave"])
-      anchor.addEventListener(ev, () => clearTimeout(hold))
-   anchor.addEventListener(
-      "click",
-      (e) => {
-         if (!held) return
-         held = false
-         e.preventDefault()
-         e.stopImmediatePropagation()
-      },
-      true,
-   )
+   bindPressMenu(anchor, frontierMenuItems)
 }
 
 // ── Filter picker & settings menu ─────────────────────────────────────────────
@@ -244,16 +210,6 @@ function settingsMenuItems(): MenuItem[] {
    return items
 }
 
-// The per-mount state chip for the Stores dialog (docs/MULTI-STORE-SPEC.md §8.3),
-// same wording as the picker switcher's mountChip.
-function mountChipText(mid: string): string {
-   const s = data.mountStatus(mid)
-   if (s.state === "ok") return ""
-   if (s.kind === "toonew") return "Too new"
-   if (s.kind === "offline") return navigator.onLine === false ? "Offline" : "Unreachable"
-   return "Error"
-}
-
 // Apply a changed mount table: adopt it in data (boots new mounts, drops gone
 // ones), re-post the roots to the SW (§5.1), and repaint an open picker. The
 // list/reader keep their current lane unless it was unmounted (data falls back
@@ -273,7 +229,16 @@ function openMountsDialog(): void {
          data
             .mountRecords()
             .filter((r) => !r.del)
-            .map((r) => ({ id: r.id, url: r.url, label: r.label, role: r.role, chip: mountChipText(r.id) })),
+            // The chip wording is the picker switcher's mountChip — ONE owner for
+            // the mount-status→text mapping (§8.3), so the two surfaces describing
+            // the same mount cannot drift.
+            .map((r) => ({
+               id: r.id,
+               url: r.url,
+               label: r.label,
+               role: r.role,
+               chip: picker.mountChip(data.mountStatus(r.id)),
+            })),
       add: (url) => {
          const res = addMount(data.mountRecords(), url)
          if (!res) return "Enter a full https:// store URL"
@@ -282,20 +247,8 @@ function openMountsDialog(): void {
       },
       remove: (mid) => afterMountChange(removeMount(data.mountRecords(), mid)),
       forget: (mid) => {
-         // Drop this mount's pinned SW-cache entries BEFORE forgetStoreState
-         // clears pinsKey(mid) — that registry is the only record of those
-         // cached URLs, and the PINNED bucket is eviction-exempt, so a
-         // pinned-then-forgotten peer would otherwise leak its bytes forever.
-         // The mount's own url gives the same base the pin used (Store.base is
-         // new URL(url)), so the SW resolves the identical absolute URLs; unpin
-         // needs no live root (it deletes unconditionally, unlike pin).
-         const controller = navigator.serviceWorker?.controller
          const rec = data.mountRecords().find((r) => r.id === mid)
-         if (controller && rec) {
-            const names = [...new Set([...listPins(mid).values()].flatMap((e) => e.names))]
-            if (names.length) controller.postMessage({ type: "unpin", names, base: new URL(rec.url).href })
-         }
-         forgetStoreState(mid)
+         if (rec) forgetMountState(mid, rec.url)
          afterMountChange(removeMount(data.mountRecords(), mid))
       },
    })

@@ -40,6 +40,7 @@
 // browser without SW support (or an insecure-context LAN deploy) just runs straight
 // off the network, exactly as before. Self-contained: no SRR_CDN_URL, so it works
 // under any cdn-url prefix.
+import { POOL_LIMIT, runPool } from "./js/cache"
 import { type IDBWire, type IManifestWire } from "./js/format.gen"
 import { bootWarmNames, gunzipJson, listedNames, manifestNames, type StoreNames } from "./js/names"
 import { parsePackName, RE_ASSET, RE_DB, RE_SHELL_HASHED } from "./js/sw-grammar"
@@ -68,6 +69,30 @@ const META = "srr-meta-v1"
 // snapshot of write-once names, valid until the page unpins it.
 const PINNED = "srr-pinned-v1"
 const KEEP = new Set([ASSETS, PACKS, SHELL, META, PINNED])
+
+// One memoized handle per bucket. Every store request opens at least two caches
+// (PINNED, then the rolling bucket) and an article with 300+ images pays that per
+// asset, so the un-memoized form costs hundreds of CacheStorage round-trips per
+// render. Safe because the ONLY caches.delete here is the activate sweep of
+// buckets NOT in KEEP — a handle we hand out can never be deleted underneath us.
+const cacheHandles = new Map<string, Promise<Cache>>()
+function openCache(name: string): Promise<Cache> {
+   let p = cacheHandles.get(name)
+   if (!p) {
+      p = caches.open(name)
+      cacheHandles.set(name, p)
+      // A rejected open must not stick: drop the slot so the next call retries.
+      p.catch(() => cacheHandles.delete(name))
+   }
+   return p
+}
+
+// §5.2, stated once: never cache an opaque response. A cross-origin mount
+// without CORS yields status-0 unreadable bytes, and caching one would serve a
+// broken hit forever. `res.ok` is already false for opaque; the explicit `type`
+// half is what documents the multi-store requirement, and dropping it is
+// invisible until someone mounts a peer without CORS.
+const isCacheable = (res: Response): boolean => res.ok && res.type !== "opaque"
 
 // The last-adopted generation + the object-name set it listed persist as
 // synthetic META entries, PER ROOT (§5.4): a peer's generation change must never
@@ -110,12 +135,14 @@ const ROOTS_KEY = "https://srr.invalid/roots"
 // layout the home base equals this, so the posted roots agree; for a
 // cross-origin home the page's "mounts" post (fired early in app boot) replaces
 // it. A cold worker is thus never worse than the single-origin behavior.
-function fallbackHome(): Root {
-   return { mid: "0", base: new URL(SCOPE, sw.location.origin).href, cred: "same-origin", role: "home" }
-}
+// Built once: matchRoot() calls effectiveRoots() per cached entry, so re-parsing
+// the URL and re-allocating the record here cost one pass per prune.
+const FALLBACK_HOME: Root[] = [
+   { mid: "0", base: new URL(SCOPE, sw.location.origin).href, cred: "same-origin", role: "home" },
+]
 
 function effectiveRoots(): Root[] {
-   return roots && roots.length ? roots : [fallbackHome()]
+   return roots && roots.length ? roots : FALLBACK_HOME
 }
 
 // The mounted root a URL belongs to: the LONGEST base that is a prefix of the
@@ -151,7 +178,7 @@ function coerceRoots(raw: unknown): Root[] {
 
 async function persistRoots(rs: Root[]): Promise<void> {
    try {
-      const cache = await caches.open(META)
+      const cache = await openCache(META)
       await cache.put(ROOTS_KEY, new Response(JSON.stringify(rs)))
    } catch {
       // best-effort
@@ -165,7 +192,7 @@ async function persistRoots(rs: Root[]): Promise<void> {
 async function hydrateRoots(): Promise<void> {
    if (roots !== null) return
    try {
-      const cache = await caches.open(META)
+      const cache = await openCache(META)
       const hit = await cache.match(ROOTS_KEY)
       const stored = hit ? coerceRoots(await hit.json()) : []
       if (roots === null) roots = stored
@@ -216,7 +243,7 @@ sw.addEventListener("activate", (event) => {
 // user's offline copies, for no reason.
 async function upgradeMetaKeys(): Promise<void> {
    try {
-      const cache = await caches.open(META)
+      const cache = await openCache(META)
       for (const legacy of [LEGACY_MAN_KEY, LEGACY_NAMES_KEY]) {
          const hit = await cache.match(legacy)
          if (!hit) continue
@@ -277,6 +304,10 @@ sw.addEventListener("message", (event) => {
 
    if (msg.type === "mounts") {
       roots = coerceRoots(msg.roots)
+      // The bound is applied per root, so a changed mount table can make an
+      // already-cached set over-budget with no new put behind it (an unmounted
+      // store's packs fall to the tighter unmatched budget).
+      cachePutSincePrune = true
       event.waitUntil(persistRoots(roots))
       // A page just booted — the cheapest recurring signal that the app may
       // have been INSTALLED since this worker started, which is what makes the
@@ -296,18 +327,29 @@ sw.addEventListener("message", (event) => {
       else event.source?.postMessage(data)
    }
 
+   // Validate every name as a pinnable pack OR asset key — reject anything else.
+   // This filter is what closes the cache-key surface, so it is applied once here
+   // rather than restated per branch ("unpin-all" carries no names at all).
+   const validNames = (Array.isArray(msg.names) ? msg.names : []).filter(isPinnableName)
+   // Any of the three messages can change whether PINNED holds anything, and
+   // this handler is the bucket's only writer — drop the emptiness memo here
+   // rather than at each branch, so a new branch cannot forget it.
+   pinnedEmpty = null
+
    if (msg.type === "pin") {
-      const rawNames = Array.isArray(msg.names) ? msg.names : []
-      // Validate every name as a pinnable pack OR asset key — reject anything else.
-      const validNames = rawNames.filter(isPinnableName)
       const total = validNames.length
       let done = 0
       event.waitUntil(
          (async () => {
             await hydrateRoots()
-            const pinned = await caches.open(PINNED)
+            const pinned = await openCache(PINNED)
             let cached = 0
-            for (const name of validNames) {
+            // A bounded pool, not one fetch at a time: a large pin is thousands
+            // of names, and the pin is a foreground explicit action with a
+            // progress toast — unlike warmRoot's deliberately serial background
+            // warm. The worker catches its own errors, so the pool always
+            // completes; per-name progress replies are unchanged.
+            await runPool(validNames, POOL_LIMIT, async (name) => {
                try {
                   // The exact URL the page will later fetch (name resolved against
                   // the page's pack base). Only pin a URL under a mounted root
@@ -317,7 +359,7 @@ sw.addEventListener("message", (event) => {
                   const hit = matchRoot(url)
                   if (hit) {
                      const res = await fetch(new Request(url.href, { cache: "no-cache", credentials: hit.cred }))
-                     if (res.ok && res.type !== "opaque") {
+                     if (isCacheable(res)) {
                         await pinned.put(new Request(url.href), res)
                         cached++
                      }
@@ -334,7 +376,7 @@ sw.addEventListener("message", (event) => {
                }
                done++
                reply({ type: "pin-progress", done, total, cached })
-            }
+            })
          })(),
       )
       return
@@ -343,7 +385,7 @@ sw.addEventListener("message", (event) => {
    if (msg.type === "unpin-all") {
       event.waitUntil(
          (async () => {
-            const pinned = await caches.open(PINNED)
+            const pinned = await openCache(PINNED)
             await Promise.all((await pinned.keys()).map((k) => pinned.delete(k)))
          })(),
       )
@@ -351,12 +393,9 @@ sw.addEventListener("message", (event) => {
    }
 
    if (msg.type === "unpin") {
-      const rawNames = Array.isArray(msg.names) ? msg.names : []
-      // Validate every name as a pinnable pack OR asset key — reject anything else.
-      const validNames = rawNames.filter(isPinnableName)
       event.waitUntil(
          (async () => {
-            const pinned = await caches.open(PINNED)
+            const pinned = await openCache(PINNED)
             await Promise.all(
                validNames.map(async (name) => {
                   const url = new URL(name, packBase).href
@@ -369,6 +408,22 @@ sw.addEventListener("message", (event) => {
    }
 })
 
+// Is PINNED known to hold nothing? A miss against an empty bucket is still a
+// CacheStorage round-trip, and pinnedCacheFirst runs for EVERY asset and every
+// pack — 300+ on an image-heavy article — while the bucket is populated only by
+// an explicit "Download for offline" that most sessions never make. Resolved
+// once per worker lifetime and dropped by the pin/unpin messages, which are the
+// only writers: the worker is the sole author of this bucket, so the flag
+// cannot go stale behind its back. Errors read as non-empty, i.e. as today.
+let pinnedEmpty: Promise<boolean> | null = null
+function pinnedIsEmpty(): Promise<boolean> {
+   pinnedEmpty ??= openCache(PINNED)
+      .then((c) => c.keys())
+      .then((k) => k.length === 0)
+      .catch(() => false)
+   return pinnedEmpty
+}
+
 // Serve the cached copy if present, else fetch and cache a genuine success.
 //
 // Unconditionally cache-first: the `revalidate` flag this used to carry existed
@@ -376,15 +431,14 @@ sw.addEventListener("message", (event) => {
 // bytes. It cannot any more — a stem is never reused (§4.5) — so a hit can
 // never be stale, for packs exactly as for content-hashed assets and bundles.
 async function cacheFirst(req: Request, name: string): Promise<Response> {
-   const cache = await caches.open(name)
+   const cache = await openCache(name)
    const hit = await cache.match(req)
    if (hit) return hit
    const res = await fetch(req)
-   // Never cache an opaque response (§5.2): a cross-origin mount without CORS
-   // yields status-0 unreadable bytes — caching it would serve a broken hit
-   // forever. `res.ok` is already false for opaque; the explicit guard documents
-   // the multi-store requirement (the page's own fetch surfaces the CORS error).
-   if (res.ok && res.type !== "opaque") cache.put(req, res.clone())
+   if (isCacheable(res)) {
+      cache.put(req, res.clone())
+      cachePutSincePrune = true
+   }
    return res
 }
 
@@ -394,9 +448,11 @@ async function cacheFirst(req: Request, name: string): Promise<Response> {
 // bucket. A PINNED hit survives PACKS/ASSETS eviction and stays readable
 // offline.
 async function pinnedCacheFirst(req: Request, name: string): Promise<Response> {
-   const pinned = await caches.open(PINNED)
-   const pinnedHit = await pinned.match(req)
-   if (pinnedHit) return pinnedHit
+   if (!(await pinnedIsEmpty())) {
+      const pinned = await openCache(PINNED)
+      const pinnedHit = await pinned.match(req)
+      if (pinnedHit) return pinnedHit
+   }
    return cacheFirst(req, name)
 }
 
@@ -410,11 +466,11 @@ async function pinnedCacheFirst(req: Request, name: string): Promise<Response> {
 // full round-trip rather than save one. A preload that rejects (offline) falls
 // through to the same cache path as a failed fetch.
 async function navigationResponse(req: Request, event: FetchEvent): Promise<Response> {
-   const cache = await caches.open(SHELL)
+   const cache = await openCache(SHELL)
    try {
       const preloaded = (await event.preloadResponse) as Response | undefined
       const res = preloaded ?? (await fetch(req))
-      if (res.ok && res.type !== "opaque") cache.put(req, res.clone())
+      if (isCacheable(res)) cache.put(req, res.clone())
       return res
    } catch (err) {
       const hit = await cache.match(req)
@@ -425,26 +481,29 @@ async function navigationResponse(req: Request, event: FetchEvent): Promise<Resp
 
 // Cache-size backstop: the store grows forever, a device shouldn't. Stems are
 // handed out in write order, so a series' higher stems are its newer objects
-// and reading skews to the tail: each article series keeps its PACK_KEEP
+// and reading skews to the tail: each article series keeps its budgeted
 // highest-stem entries and evicts the rest — no access-time bookkeeping.
 // Evicting a pack someone is still reading just costs one CDN refetch on the
 // next miss. Assets are content-hashed (no order in the name), so that bucket
 // prunes oldest-cached-first: Cache.keys() returns insertion order and
 // cacheFirst never re-puts on a hit. Runs only after a successful ONLINE db.gz
 // fetch — an offline reader must never lose a cached object it cannot refetch.
-const PACK_KEEP = 100 // per finalized series: ~20 MB of data packs + ~5 MB of idx packs
-const META_KEEP = 80 // meta shards run ~200 KB each — a tighter bound for the same idea
-const PEER_PACK_KEEP = 40 // peers are browsed less; N mounts otherwise multiply the footprint (§5.3)
-const PEER_META_KEEP = 30
 const ASSET_KEEP = 500 // self-hosted images/files: order of ~100 MB at typical sizes
 
-// Only the ARTICLE series are rolling-window bounded. A series absent from this
-// table is owned by checkManifest instead: `manifest` and `seen` are reconciled
-// against what the adopted generation names (the `seen` sidecar is never
-// fetched by the reader at all — its series exists here only so the route
-// grammar knows it).
-const SERIES_KEEP: Record<string, number> = { idx: PACK_KEEP, data: PACK_KEEP, meta: META_KEEP }
-const PEER_SERIES_KEEP: Record<string, number> = { idx: PEER_PACK_KEEP, data: PEER_PACK_KEEP, meta: PEER_META_KEEP }
+// Only the ARTICLE series are rolling-window bounded, and each carries BOTH its
+// budgets in one row: a series absent from this table is owned by checkManifest
+// instead (`manifest` and `seen` are reconciled against what the adopted
+// generation names — the `seen` sidecar is never fetched by the reader at all,
+// its series exists here only so the route grammar knows it). One table rather
+// than a home one beside a peer one, because two tables must carry identical key
+// sets forever: add a bounded series to one, forget the other, and that role goes
+// unbounded — indistinguishable, at the lookup below, from the deliberate case.
+// Peers are browsed less and N mounts would otherwise multiply the footprint (§5.3).
+const SERIES_KEEP: Record<string, { home: number; peer: number }> = {
+   idx: { home: 100, peer: 40 }, // ~5 MB of idx packs at the home budget
+   data: { home: 100, peer: 40 }, // ~20 MB of data packs
+   meta: { home: 80, peer: 30 }, // shards run ~200 KB each — tighter for the same idea
+}
 
 // Cache keys are absolute URLs so two roots never collide, but the BOUND must be
 // per-root (§5.3): otherwise a peer store's archive walk evicts the home store's
@@ -453,10 +512,23 @@ const PEER_SERIES_KEEP: Record<string, number> = { idx: PEER_PACK_KEEP, data: PE
 // one. Assets stay one global content-hashed bound (shared-by-accident across
 // stores is harmless). Runs only after a successful ONLINE db.gz fetch — an
 // offline reader must never lose a cached object it cannot refetch.
+// Have any BOUNDED entries been added since the last prune? enforceCacheBounds
+// enumerates the whole packs + assets buckets (~800 Request objects, a URL parse
+// and a regex per pack), and it rides the db.gz response — which refresh.ts
+// re-fetches every 5 minutes for as long as a tab is open. On an idle tab that
+// is a full re-walk, every five minutes, to delete nothing. Only a put can push
+// a bucket over its budget, and cacheFirst is the sole writer of both; a mounts
+// change also re-opens the question, because the per-root grouping the budgets
+// are applied within is what changed. Starts true so a fresh worker prunes once
+// (a previous lifetime may have grown the bucket).
+let cachePutSincePrune = true
+
 async function enforceCacheBounds(): Promise<void> {
+   if (!cachePutSincePrune) return
+   cachePutSincePrune = false
    try {
       await hydrateRoots()
-      const packs = await caches.open(PACKS)
+      const packs = await openCache(PACKS)
       // group[mid][series] = entries; keep the role for the budget choice.
       const group = new Map<string, { role: string; series: Record<string, { req: Request; n: number }[]> }>()
       for (const req of await packs.keys()) {
@@ -474,14 +546,13 @@ async function enforceCacheBounds(): Promise<void> {
       }
       const deletes: Promise<boolean>[] = []
       for (const { role, series } of group.values()) {
-         const budget = role === "home" ? SERIES_KEEP : PEER_SERIES_KEEP
          for (const [name, list] of Object.entries(series)) {
-            const keep = budget[name]
+            const keep = SERIES_KEEP[name]?.[role === "home" ? "home" : "peer"]
             if (keep === undefined) continue
             for (const e of list.sort((a, b) => b.n - a.n).slice(keep)) deletes.push(packs.delete(e.req))
          }
       }
-      const assets = await caches.open(ASSETS)
+      const assets = await openCache(ASSETS)
       const assetKeys = await assets.keys()
       for (const req of assetKeys.slice(0, Math.max(0, assetKeys.length - ASSET_KEEP))) deletes.push(assets.delete(req))
       await Promise.all(deletes)
@@ -491,13 +562,13 @@ async function enforceCacheBounds(): Promise<void> {
 }
 
 async function readMetaNumber(key: string): Promise<number> {
-   const cache = await caches.open(META)
+   const cache = await openCache(META)
    const hit = await cache.match(key)
    return hit ? Number(await hit.text()) || 0 : 0
 }
 
 async function readMetaNames(key: string): Promise<string[]> {
-   const cache = await caches.open(META)
+   const cache = await openCache(META)
    const hit = await cache.match(key)
    if (!hit) return []
    try {
@@ -527,7 +598,11 @@ async function readMetaNames(key: string): Promise<string[]> {
 // The fetch path composes them back together immediately below, unchanged.
 interface Adoptable {
    m: number
-   names: StoreNames
+   // Lazy: only the 12-hourly periodic warm resolves this. The fetch path adopts
+   // on every generation change (~5 min with a live tab) and reads `listed`
+   // alone, so expanding the full per-series name table there was thousands of
+   // string allocations on the db.gz response path for nothing.
+   names: () => StoreNames
    listed: string[]
 }
 
@@ -554,13 +629,14 @@ async function readAdoptable(dbRes: Response, root: Root): Promise<Adoptable | n
    const man = await gunzipJson<IManifestWire>(res.clone())
    if (man.m !== m) throw new Error(`manifest ${m}: names itself ${man.m}`)
 
-   const names = manifestNames(man)
    // Every name the generation lists, derived from the names map rather than
    // spelled out per series (see names.ts listedNames): this is the keep-set
    // the eviction below subtracts from, so a series missing here is a series
-   // whose objects get thrown away on every adoption.
-   const listed = [...listedNames(man), `manifest/${m}.gz`].filter(Boolean)
-   return { m, names, listed }
+   // whose objects get thrown away on every adoption. listedNames only ever
+   // pushes non-empty strings, so there is nothing to filter out.
+   const listed = listedNames(man)
+   listed.push(`manifest/${m}.gz`)
+   return { m, names: () => manifestNames(man), listed }
 }
 
 // Write half: evict what the generation does not name, then record it as
@@ -572,7 +648,7 @@ async function adoptManifest(root: Root, a: Adoptable): Promise<void> {
    // set is this generation's alone, or the kept set would only ever grow.
    const keep = new Set<string>([...a.listed, ...(await readMetaNames(metaNamesKey(root.mid)))])
 
-   const packs = await caches.open(PACKS)
+   const packs = await openCache(PACKS)
    await Promise.all(
       (await packs.keys()).map((req) => {
          const reqUrl = new URL(req.url)
@@ -580,18 +656,27 @@ async function adoptManifest(root: Root, a: Adoptable): Promise<void> {
          if (!parsePackName(path)) return undefined
          // Evict only THIS root's objects: a cached pack under a different
          // mounted root must survive this root's generation change (§5.4).
-         if (!reqUrl.href.startsWith(root.base)) return undefined
+         // Attributed through matchRoot, the module's one owner of "which root
+         // does this URL belong to" — and LONGEST-prefix, which a bare
+         // startsWith is not: with a peer mounted under the home root's path
+         // (§5.1 allows it), every one of the peer's packs is also a prefix
+         // match for home, so home's routine generation change emptied the
+         // peer's cache. enforceCacheBounds already attributes them this way.
+         const hit = matchRoot(reqUrl)
+         if (!hit || hit.mid !== root.mid) return undefined
          // Names are store-relative <series>/<stem>.gz; a cached URL carries
-         // whatever prefix the cdn-url adds, so compare on the last two path
-         // segments.
-         if (keep.has(path.split("/").slice(-2).join("/"))) return undefined
+         // whatever prefix the cdn-url adds, so strip the root's own base
+         // (§5.1's rule) rather than assuming a two-segment tail.
+         if (keep.has(reqUrl.href.slice(hit.base.length))) return undefined
          return packs.delete(req)
       }),
    )
 
-   const meta = await caches.open(META)
-   await meta.put(metaManKey(root.mid), new Response(String(a.m)))
-   await meta.put(metaNamesKey(root.mid), new Response(JSON.stringify(a.listed)))
+   const meta = await openCache(META)
+   await Promise.all([
+      meta.put(metaManKey(root.mid), new Response(String(a.m))),
+      meta.put(metaNamesKey(root.mid), new Response(JSON.stringify(a.listed))),
+   ])
 }
 
 async function checkManifest(dbRes: Response, root: Root): Promise<void> {
@@ -620,10 +705,10 @@ function validator(r: Response): string | null {
 }
 
 async function dbNetworkFirst(req: Request, event: FetchEvent, root: Root): Promise<Response> {
-   const cache = await caches.open(PACKS)
+   const cache = await openCache(PACKS)
    try {
       const res = await fetch(req)
-      if (res.ok && res.type !== "opaque") {
+      if (isCacheable(res)) {
          const v = validator(res)
          const prev = v ? await cache.match(req) : undefined
          if (!prev || validator(prev) !== v) {
@@ -745,7 +830,7 @@ async function warmRoot(root: Root): Promise<void> {
    const res = await fetch(req)
    // Same guard the fetch path applies: an opaque (no-CORS) response is
    // unreadable bytes, and caching one would serve a broken hit forever.
-   if (!res.ok || res.type === "opaque") return
+   if (!isCacheable(res)) return
 
    const a = await readAdoptable(res, root)
    if (a) {
@@ -753,7 +838,7 @@ async function warmRoot(root: Root): Promise<void> {
       // request at a time is the politest shape for someone else's radio. The
       // set is a handful of objects (bootWarmNames), and a name already cached
       // costs nothing at all — cacheFirst answers from the bucket.
-      for (const name of bootWarmNames(a.names)) {
+      for (const name of bootWarmNames(a.names())) {
          const hit = await cacheFirst(new Request(new URL(name, root.base).href, { credentials: root.cred }), PACKS)
          // A 404 mid-warm means this generation is already being swept, or the
          // manifest and the store disagree. Either way: abandon the warm with
@@ -764,7 +849,7 @@ async function warmRoot(root: Root): Promise<void> {
    }
    // The root flip, last. `a === null` reaches here too — an empty store, or a
    // generation already adopted, both of which have nothing to publish first.
-   const cache = await caches.open(PACKS)
+   const cache = await openCache(PACKS)
    await cache.put(req, res)
    await enforceCacheBounds()
 }

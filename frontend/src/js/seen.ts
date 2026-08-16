@@ -10,7 +10,18 @@
 // writeSeen so no mutation ships without its per-key ordering stamp.
 import * as data from "./data"
 import { seenKey, seenTsKey } from "./keys"
+import { feedIdOf } from "./route"
+import { stampTsMap } from "./storage"
 import * as sync from "./sync"
+
+// The seen map's key grammar, owned HERE with the shape it indexes: one
+// spelling of "feed:<id>" for this module and every consumer that indexes the
+// returned map (nav, list, picker) — the same single-owner move keys.ts made
+// for the storage key names.
+const FEED_PREFIX = "feed:"
+export function feedKey(id: number): string {
+   return FEED_PREFIX + id
+}
 
 // Per-store keys (docs/MULTI-STORE-SPEC.md §4.2): namespaced by the ACTIVE
 // store's mid, the lane nav is reading. For the home store (mid "0") these
@@ -52,26 +63,19 @@ export function readSeenFor(mid: string): Record<string, number> {
 // so no mutation ships unordered.
 function writeSeen(seen: Record<string, number>, touched: string[]): void {
    localStorage.setItem(seenK(), JSON.stringify(seen))
-   try {
-      const raw = localStorage.getItem(seenTsK())
-      const st: Record<string, number> = raw ? JSON.parse(raw) : {}
-      const now = Math.floor(Date.now() / 1000)
-      for (const k of touched) st[k] = now
-      localStorage.setItem(seenTsK(), JSON.stringify(st))
-   } catch {}
+   stampTsMap(seenTsK(), touched)
 }
 
-// The parsed seen map (feed key → last-viewed chronIdx). Exposed for the
-// list surface's per-row read/unread dot; this module owns the localStorage shape.
-export function getSeenMap(): Record<string, number> {
-   return readSeen()
-}
+// The parsed seen map (feed key → last-viewed chronIdx) under its list-surface
+// name — one function, two exports, so the list's per-row read/unread dot and
+// nav's own reads are visibly the same map.
+export { readSeen as getSeenMap }
 
 // A row is unread when its feed was never seen on this device, or the row's
 // chronIdx is strictly after the feed's seen high-water — the same rule
 // unreadCount/feedUnread count by (never-seen = all unread).
 export function isRowUnread(chronIdx: number, feedId: number, seenMap: Record<string, number>): boolean {
-   const s = seenMap["feed:" + feedId]
+   const s = seenMap[feedKey(feedId)]
    return s === undefined || chronIdx > s
 }
 
@@ -86,12 +90,12 @@ export function isRowUnread(chronIdx: number, feedId: number, seenMap: Record<st
 // (feed) / no member feed seen yet (tag).
 export function getSeen(token: string): number | undefined {
    const seen = readSeen()
-   const n = Number(token)
-   if (Number.isFinite(n)) return seen["feed:" + n]
+   const id = feedIdOf(token)
+   if (id !== null) return seen[feedKey(id)]
    let min: number | undefined
    for (const ch of Object.values(data.db.feeds))
       if (ch.tag === token) {
-         const s = seen["feed:" + ch.id]
+         const s = seen[feedKey(ch.id)]
          if (s !== undefined && (min === undefined || s < min)) min = s
       }
    return min
@@ -151,7 +155,7 @@ export async function tallyWith(
 // maps to its full backlog).
 export function unreadCounts(chs: IFeed[]): Promise<Map<number, number>> {
    const seenMap = readSeen()
-   return tallyWith(chs, (id) => seenMap["feed:" + id])
+   return tallyWith(chs, (id) => seenMap[feedKey(id)])
 }
 
 // The tag-header aggregate the dropdown displays as the tag badge: the sum of
@@ -173,18 +177,18 @@ export function tagUnreadFromCounts(group: IFeed[], counts: Map<number, number>)
 // (resolve → showFeed → pendingRight) can reuse it without re-reading srr-seen in
 // the same tick; undefined when nothing was read (a peek mode or an unknown feed)
 // or the read threw, in which case pendingRight falls back to a fresh read.
-export function recordSeen(article: IArticle, pos: number, scope: FrontierScope): Record<string, number> | undefined {
+// `feedId` is the opened article's own feed — all this needs of the article.
+export function recordSeen(feedId: number, pos: number, scope: FrontierScope): Record<string, number> | undefined {
    // Peek modes never touch the seen frontier. Search (q:) jumps to hits, not a
    // contiguous read-through — advancing here would mark everything up to the
    // hit as seen. ★ Saved is the same shape: re-reading an archived item is not
    // resuming its feed. A saved/search article you peek at stays unread until
    // you actually read it in its feed.
    if (scope.peek) return
-   const ch = data.db.feeds[article.f]
+   const ch = data.db.feeds[feedId]
    if (!ch) return
    try {
       const seen = readSeen()
-      const touched: string[] = []
       // Opening an article marks every OLDER article in the navigation list as
       // seen: for the article's own feed AND each other feed in the active
       // filter (the list you're reading), raise its seen frontier to pos so
@@ -198,17 +202,14 @@ export function recordSeen(article: IArticle, pos: number, scope: FrontierScope)
       // above, so this only fires for feed/tag/[ALL] navigation — the
       // contiguous read-throughs where a "previous = seen" frontier across
       // feeds is meaningful.
-      const before: Record<string, number | undefined> = {}
-      const raise = (feedId: number) => {
-         const key = "feed:" + feedId
-         if (!(key in before)) before[key] = seen[key]
-         writeFrontier(seen, touched, feedId, (prev) => prev === undefined || prev < pos, pos)
-      }
-      raise(article.f)
-      for (const feedId of scope.members) if (feedId !== article.f) raise(feedId)
+      const moved: Record<string, number | undefined> = {}
+      const raise = (id: number) => writeFrontier(seen, moved, id, (prev) => prev === undefined || prev < pos, pos)
+      raise(feedId)
+      for (const id of scope.members) if (id !== feedId) raise(id)
+      const touched = Object.keys(moved)
       if (touched.length > 0) {
          writeSeen(seen, touched)
-         snapshotRaise(before, touched, pos)
+         snapshotRaise(moved, pos)
          sync.pushSoon()
       }
       return seen
@@ -302,10 +303,10 @@ export async function frontierUndoSize(u: FrontierUndo): Promise<number> {
    // number for a move that never happened in this lane.
    if (u.mid !== data.activeStore().mid) return 0
    const chs = Object.keys(u.prev)
-      .map((k) => data.db.feeds[Number(k.slice("feed:".length))])
+      .map((k) => data.db.feeds[Number(k.slice(FEED_PREFIX.length))])
       .filter(Boolean)
    if (chs.length === 0) return 0
-   const before = await tallyWith(chs, (id) => u.prev["feed:" + id])
+   const before = await tallyWith(chs, (id) => u.prev[feedKey(id)])
    const after = await tallyWith(chs, () => u.to)
    let n = 0
    for (const ch of chs) n += Math.max(0, (before.get(ch.id) ?? 0) - (after.get(ch.id) ?? 0))
@@ -375,29 +376,30 @@ export function clearFrontierUndo(): void {
 // The mount is stamped HERE, at the write, rather than read back at the undo —
 // that is the whole point: by the time the snackbar is answered, the active
 // store may be a different one.
-function snapshotRaise(before: Record<string, number | undefined>, touched: string[], to: number): void {
-   const prev: Record<string, number | undefined> = {}
-   for (const key of touched) prev[key] = before[key]
+function snapshotRaise(prev: Record<string, number | undefined>, to: number): void {
    lastRaise = { mid: data.activeStore().mid, prev, to }
    raiseOffered = false
 }
 
-// One feed's seen-frontier write: set seen[key]=value and record the key in
-// `touched` when shouldMove(prev) holds. The shared primitive behind BOTH
-// recordSeen's per-feed raise and the two explicit frontier gestures below, so
-// the seen-write discipline (key shape, touched bookkeeping) lives in one place.
+// One feed's seen-frontier write: set seen[key]=value when shouldMove(prev)
+// holds, recording the key's PRE-MOVE value in `moved`. The shared primitive
+// behind BOTH recordSeen's per-feed raise and the two explicit frontier
+// gestures below, so the seen-write discipline (key shape, undo bookkeeping)
+// lives in one place — and the undo record is written by the only code that
+// knows a move happened, rather than assembled beside it from a parallel map
+// of every key CONSIDERED plus a list of the ones that moved.
 function writeFrontier(
    seen: Record<string, number>,
-   touched: string[],
+   moved: Record<string, number | undefined>,
    feedId: number,
    shouldMove: (prev: number | undefined) => boolean,
    value: number,
 ): void {
-   const key = "feed:" + feedId
+   const key = feedKey(feedId)
    const prev = seen[key]
    if (shouldMove(prev)) {
       seen[key] = value
-      touched.push(key)
+      moved[key] = prev
    }
 }
 
@@ -418,15 +420,12 @@ function moveFrontier(
    if (scope.peek) return false
    try {
       const seen = readSeen()
-      const touched: string[] = []
-      const before: Record<string, number | undefined> = {}
-      for (const feedId of scope.members) {
-         before["feed:" + feedId] = seen["feed:" + feedId]
-         writeFrontier(seen, touched, feedId, shouldMove, value)
-      }
+      const moved: Record<string, number | undefined> = {}
+      for (const feedId of scope.members) writeFrontier(seen, moved, feedId, shouldMove, value)
+      const touched = Object.keys(moved)
       if (touched.length === 0) return false
       writeSeen(seen, touched)
-      if (undoable) snapshotRaise(before, touched, value)
+      if (undoable) snapshotRaise(moved, value)
       sync.pushSoon()
       return true
    } catch {
@@ -470,7 +469,9 @@ export function pruneSeen() {
          // tag: entries are legacy — a tag's position now derives from its
          // member feeds, so any stored tag: key is dead weight. A feed: key
          // for a deleted feed goes too.
-         const stale = key.startsWith("tag:") || (key.startsWith("feed:") && !data.db.feeds[Number(key.slice(5))])
+         const stale =
+            key.startsWith("tag:") ||
+            (key.startsWith(FEED_PREFIX) && !data.db.feeds[Number(key.slice(FEED_PREFIX.length))])
          if (stale) {
             delete seen[key]
             changed = true

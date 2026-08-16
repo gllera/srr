@@ -6,7 +6,7 @@ import type { Browser, Page } from "puppeteer"
 
 import { feedServer, srr, type FeedServer } from "../harness"
 import { nItems, pubDate, rssFeed, type FeedItem } from "../fixtures"
-import { clearDir, launchBrowser, open as openCtx, waitList, waitReader } from "./helpers"
+import { clearDir, clickRow, launchBrowser, open as openCtx, waitList, waitReader } from "./helpers"
 
 // Titleless feeds (Telegram-style: the title duplicates the content lead). A
 // feed flagged `nt` in db.gz makes the reader HIDE the <h1>; the whole masthead
@@ -49,14 +49,6 @@ const $deskVisible = (p: Page) => p.$eval(".srr-desk", (e) => (e as HTMLElement)
 const $deskText = (p: Page) => p.$eval(".srr-desk", (e) => e.textContent)
 
 // Click the list row whose title matches (rows are <a> with intercepted clicks).
-const clickRow = (p: Page, title: string) =>
-   p.evaluate((t) => {
-      const row = [...document.querySelectorAll(".srr-list a.srr-row")].find(
-         (e) => e.querySelector(".srr-row-title")?.textContent === t,
-      )
-      ;(row as HTMLElement | undefined)?.click()
-   }, title)
-
 describe("browser: titleless feeds (reader hides the duplicate heading)", () => {
    let feeds: FeedServer
    let browser: Browser

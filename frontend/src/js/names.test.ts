@@ -195,6 +195,14 @@ describe("bootWarmNames", () => {
       ])
    })
 
+   // The regression this generalization exists for, one level up from
+   // listedNames': "every series' tail" must MEAN every series. Spelled as
+   // [idx, data, meta], a series this build has never heard of is never warmed,
+   // and the next offline launch boots a generation missing it.
+   it("warms the tail of a series it has never heard of", () => {
+      expect(bootWarmNames(names({ watch: { r: [[9, 2]], l: 1 } }))).toContain("watch/10.gz")
+   })
+
    it("leaves the bloom summary out — search is a foreground feature", () => {
       // ssum is 4 KB per finalized shard; a background wake does not spend that.
       expect(bootWarmNames(names())).not.toContain("meta/9.gz")
@@ -250,10 +258,20 @@ describe("legacyNames — the pre-cutover derivation", () => {
    })
 
    it("an empty store names nothing", () => {
+      const idx = { keys: [], tail: -1 }
+      const data = { keys: [""], tail: -1 }
+      const meta = { keys: [], tail: -1 }
       expect(legacyNames({ total_art: 0, seq: 0, next_pid: 1 })).toEqual({
-         idx: { keys: [], tail: -1 },
-         data: { keys: [""], tail: -1 },
-         meta: { keys: [], tail: -1 },
+         // The generic map every "for every series" operation walks; the three
+         // named fields are aliases into it.
+         series: new Map([
+            ["idx", idx],
+            ["data", data],
+            ["meta", meta],
+         ]),
+         idx,
+         data,
+         meta,
          deltas: [],
          hsum: null,
          ssum: null,

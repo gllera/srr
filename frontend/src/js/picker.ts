@@ -20,7 +20,7 @@
 import { VERSION } from "./base"
 import * as data from "./data"
 import { divEl, wrapTabFocus } from "./dropdown"
-import { countBadge, formatBytes, formatDate, isStale, srcColorIndex, timeAgoProse } from "./fmt"
+import { ageSince, countBadge, formatBytes, formatDate, isStale, stampSrc, timeAgoProse } from "./fmt"
 import { favoritesKey } from "./keys"
 import { mountLabel } from "./mounts"
 import * as nav from "./nav"
@@ -33,8 +33,10 @@ import * as refresh from "./refresh"
 // argument urlish.ts makes for its URL regexes.
 import { fold } from "./search"
 // readSeenFor, not nav's active-mount readSeen: the mount switcher's rollup
-// reads a PEER store's namespaced seen map — seen.ts owns that shape.
-import { readSeenFor } from "./seen"
+// reads a PEER store's namespaced seen map — seen.ts owns that shape, and
+// feedKey is its key grammar.
+import { feedKey, readSeenFor } from "./seen"
+import { readIdSet, writeIdSet } from "./storage"
 import * as sync from "./sync"
 import { URL_DENY } from "./urlish"
 
@@ -269,11 +271,15 @@ function applyQuery(): void {
    const q = fold(query)
    const on = q !== ""
    let hits = 0
-   const show = (el: HTMLElement, vis: boolean) => {
+   // Apply the query verdict to one row and report whether it actually SHOWS.
+   // "Shows" is the query verdict AND the mode's own srr-hidden — otherwise a
+   // store whose matches are all fully-read would claim results and show none.
+   // It returns the answer rather than closing over the counter because the
+   // tag-group loop below counts per group before folding into the total, and
+   // re-inlining the rule there is how the two spellings drifted apart.
+   const show = (el: HTMLElement, vis: boolean): boolean => {
       el.classList.toggle("srr-qhidden", !vis)
-      // Only rows the MODE is also showing count as hits — otherwise a store
-      // whose matches are all fully-read would claim results and show none.
-      if (vis && !el.classList.contains("srr-hidden")) hits++
+      return vis && !el.classList.contains("srr-hidden")
    }
 
    // Tag groups: a header that matches shows its whole group; otherwise the
@@ -285,9 +291,7 @@ function applyQuery(): void {
       const whole = !on || (header !== null && rowMatches(header, q))
       let shown = 0
       for (const item of group.querySelectorAll<HTMLElement>(".srr-tag-item")) {
-         const vis = whole || rowMatches(item, q)
-         item.classList.toggle("srr-qhidden", !vis)
-         if (vis && !item.classList.contains("srr-hidden")) shown++
+         if (show(item, whole || rowMatches(item, q))) shown++
       }
       const vis = whole || shown > 0
       group.classList.toggle("srr-qhidden", !vis)
@@ -296,7 +300,7 @@ function applyQuery(): void {
    }
    // Untagged feeds and the two scope chips, each on its own.
    for (const row of filterBox.querySelectorAll<HTMLElement>(":scope > a[data-value], .srr-scope-chip")) {
-      show(row, !on || rowMatches(row, q))
+      if (show(row, !on || rowMatches(row, q))) hits++
    }
    // The tag separator is a rule between two groups of rows; with either side
    // filtered away it would be a stray line.
@@ -317,30 +321,19 @@ function applyQuery(): void {
 // (private mode, disabled by policy) degrades to "no favorites"; the lane is a
 // convenience and must never be able to break the panel.
 function readFavorites(): Set<number> {
-   try {
-      const raw = localStorage.getItem(favoritesKey(data.activeStore().mid))
-      const arr: unknown = raw ? JSON.parse(raw) : []
-      return new Set(Array.isArray(arr) ? arr.filter((v): v is number => typeof v === "number") : [])
-   } catch {
-      return new Set()
-   }
+   return readIdSet(favoritesKey(data.activeStore().mid))
 }
 
 function writeFavorites(ids: Set<number>): void {
-   try {
-      localStorage.setItem(favoritesKey(data.activeStore().mid), JSON.stringify([...ids]))
-   } catch {
-      // Full or disabled storage: the mark applies to this render and is lost
-      // on reload, which is strictly better than throwing out of a row tap.
-   }
+   writeIdSet(favoritesKey(data.activeStore().mid), ids)
 }
 
 // A favorites-mode row tap. Only FEEDS have favorites — a tag is already a lane
 // and the scope chips are meta filters, so both are inert here, the same way
 // ★ Saved is inert in stats mode.
 function toggleFavorite(value: string): void {
-   if (!/^\d+$/.test(value)) return
-   const id = Number(value)
+   const id = nav.feedIdOf(value)
+   if (id === null) return
    const favs = readFavorites()
    if (!favs.delete(id)) favs.add(id)
    writeFavorites(favs)
@@ -355,20 +348,37 @@ function toggleFavorite(value: string): void {
 
 // ── Filter list ──────────────────────────────────────────────────────────────
 
-function link(value: string, text: string, className?: string): HTMLAnchorElement {
-   const a = document.createElement("a")
-   a.href = "#"
-   a.dataset.value = value
-   stampMatch(a, text)
-   // Title rides in its own span so a flex row (scope chip / feed / tag
-   // header — every row is one) ellipsizes it while chips / counts keep
-   // their size.
+// The row's label. It rides in its own span so a flex row (scope chip / feed /
+// tag header / mount row — every row is one) ellipsizes it while chips and
+// counts keep their size.
+function rowTitle(text: string): HTMLSpanElement {
    const title = document.createElement("span")
    title.className = "srr-row-title"
    title.textContent = text
-   a.appendChild(title)
-   if (className) a.className = className
+   return title
+}
+
+// `match` is the type-to-filter haystack, defaulting to the visible text. A feed
+// passes its tag as a second term, and it has to arrive HERE rather than be
+// stamped over afterwards: a second stampMatch call re-folds the row (NFD + a
+// per-rune walk) for every feed on every render, and silently made this one dead.
+function link(value: string, text: string, className: string, ...match: string[]): HTMLAnchorElement {
+   const a = document.createElement("a")
+   a.href = "#"
+   a.dataset.value = value
+   stampMatch(a, ...(match.length ? match : [text]))
+   a.appendChild(rowTitle(text))
+   a.className = className
    return a
+}
+
+// Articles this feed still STORES. `total_art` is all-time by contract (the
+// immutable idx headers are sourced from it), and `xp` is the cumulative
+// expired count, so the visible number is the difference — one spelling, since
+// both info cards read it and the meaning of `xp` should not be re-derived per
+// card.
+function liveArticles(ch: IFeed): number {
+   return ch.total_art - (ch.xp ?? 0)
 }
 
 // Feed-health grade for the row's health tint (ported from dropdown.ts). "" healthy,
@@ -382,7 +392,7 @@ function feedGrade(ch: IFeed): "" | "warn" | "crit" {
    const lastOK = ch.last_ok ?? 0
    if (ferr || streak >= FAIL_STREAK_CRIT) return "crit"
    if (lastOK > 0) {
-      const ageSec = Date.now() / 1000 - lastOK
+      const ageSec = ageSince(lastOK)
       if (ageSec >= STALE_CRIT_SEC) return "crit"
       if (ageSec >= STALE_WARN_SEC) return "warn"
    }
@@ -392,16 +402,15 @@ function feedGrade(ch: IFeed): "" | "warn" | "crit" {
 function srcChip(feedId: number): HTMLSpanElement {
    const s = document.createElement("span")
    s.className = "srr-src-chip"
-   s.dataset.src = String(srcColorIndex(feedId))
+   stampSrc(s, feedId)
    s.setAttribute("aria-hidden", "true")
    return s
 }
 
 function feedLink(ch: IFeed, className: string, fav: boolean): HTMLAnchorElement {
-   const a = link(String(ch.id), ch.title, `${className} srr-feed-row`.trim())
    // A feed is findable by its tag as well as its name: typing a desk shows the
    // feeds filed under it even when the collapsed group header is off screen.
-   stampMatch(a, ch.title, ch.tag ?? "")
+   const a = link(String(ch.id), ch.title, `${className} srr-feed-row`.trim(), ch.title, ch.tag ?? "")
    if (fav) {
       a.dataset.fav = "1"
       const star = document.createElement("span")
@@ -449,11 +458,26 @@ function unreadBadge(n: number): HTMLSpanElement {
 function activeTag(): string {
    const key = nav.getCurrentFilterKey()
    if (key === "" || key === nav.SAVED_TOKEN) return ""
-   if (/^\d+$/.test(key)) return data.db.feeds[Number(key)]?.tag ?? ""
+   const id = nav.feedIdOf(key)
+   if (id !== null) return data.db.feeds[id]?.tag ?? ""
    return key
 }
 
 let fillToken: object | null = null
+
+// A tag group's collapse chevron — one builder for the ★ Favorites lane and the
+// regular tag groups, so the collapse behavior cannot drift between them. It
+// stops its own click so the header's delegated filter-pick never fires.
+function collapseToggle(groupDiv: HTMLElement): HTMLElement {
+   const toggle = document.createElement("span")
+   toggle.className = "srr-tag-toggle"
+   toggle.addEventListener("click", (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      groupDiv.classList.toggle("srr-tag-collapsed")
+   })
+   return toggle
+}
 
 // The rendered row set, as a string: the ordered row tokens plus the view mode
 // that decides which of them are visible. Two opens with the same signature are
@@ -518,72 +542,58 @@ function renderFilterList(): void {
    // am") also has to find the feed inside its tag. A favorite is a shortcut,
    // not a re-filing — so it appears twice, and the one place that would
    // double-count it (the [ALL] total) sums over distinct feeds instead.
+   // One group builder for both lanes below. The append ORDER is load-bearing and
+   // easy to get subtly wrong twice: fillUnread inserts each badge BEFORE the
+   // header's .srr-tag-toggle, so the toggle must already be attached when the
+   // header is pushed onto headerRows.
+   // Build one feed row AND enrol it for its unread badge. The push is the row's
+   // ONLY enrolment — fillUnread walks unreadRows and nothing else — so a third
+   // build site written without it would produce rows that silently never get a
+   // count. One builder means it cannot be forgotten.
+   const feedRow = (ch: IFeed, base: string): HTMLElement => {
+      const item = feedLink(ch, cls(base, String(ch.id)), favs.has(ch.id))
+      unreadRows.push([item, ch])
+      return item
+   }
+
+   const addGroup = (header: HTMLElement, members: IFeed[], groupCls: string): void => {
+      const groupDiv = divEl(groupCls)
+      headerRows.push([header, members])
+      header.appendChild(collapseToggle(groupDiv))
+      groupDiv.appendChild(header)
+      for (const ch of members) groupDiv.appendChild(feedRow(ch, "srr-tag-item"))
+      frag.appendChild(groupDiv)
+   }
+
    const favFeeds = [...sortedTags.flatMap((t) => tagged.get(t)!), ...untagged].filter((ch) => favs.has(ch.id))
    if (favFeeds.length > 0) {
-      const groupDiv = divEl("srr-tag-group srr-fav-group")
       // A plain div, not a link: the lane is a VIEW of feeds you marked, not a
       // filter token nav can resolve, so a tap on it has nothing to select.
       const header = divEl("srr-tag-header srr-fav-header")
-      const title = document.createElement("span")
-      title.className = "srr-row-title"
-      title.textContent = "★ Favorites"
-      header.appendChild(title)
+      header.appendChild(rowTitle("★ Favorites"))
       stampMatch(header, "★ Favorites")
-      headerRows.push([header, favFeeds])
-      const toggle = document.createElement("span")
-      toggle.className = "srr-tag-toggle"
-      toggle.addEventListener("click", (e) => {
-         e.preventDefault()
-         e.stopPropagation()
-         groupDiv.classList.toggle("srr-tag-collapsed")
-      })
-      header.appendChild(toggle)
-      groupDiv.appendChild(header)
-      for (const ch of favFeeds) {
-         const item = feedLink(ch, cls("srr-tag-item", String(ch.id)), true)
-         unreadRows.push([item, ch])
-         groupDiv.appendChild(item)
-      }
-      frag.appendChild(groupDiv)
+      // Every member is a favourite by construction, so feedLink's own
+      // favs.has(ch.id) is the `true` this lane used to pass explicitly.
+      addGroup(header, favFeeds, "srr-tag-group srr-fav-group")
    }
 
    for (const tag of sortedTags) {
       const group = tagged.get(tag)!
       const expanded = tag === currentTag && tag !== current
-      const groupDiv = divEl(expanded ? "srr-tag-group" : "srr-tag-group srr-tag-collapsed")
       const header = link(tag, tag, cls("srr-tag-header", tag))
-      const worst = group.reduce<"" | "warn" | "crit">(
-         (g, ch) => (g === "crit" || feedGrade(ch) === "crit" ? "crit" : feedGrade(ch) || g),
-         "",
-      )
+      const worst = group.reduce<"" | "warn" | "crit">((g, ch) => {
+         const fg = feedGrade(ch)
+         return g === "crit" || fg === "crit" ? "crit" : fg || g
+      }, "")
       if (worst) {
          header.dataset.grade = worst
          header.title = worst === "crit" ? "a feed in this tag may be unavailable" : "a feed in this tag may be stale"
       }
-      headerRows.push([header, group])
-      const toggle = document.createElement("span")
-      toggle.className = "srr-tag-toggle"
-      toggle.addEventListener("click", (e) => {
-         e.preventDefault()
-         e.stopPropagation()
-         groupDiv.classList.toggle("srr-tag-collapsed")
-      })
-      header.appendChild(toggle)
-      groupDiv.appendChild(header)
-      for (const ch of group) {
-         const item = feedLink(ch, cls("srr-tag-item", String(ch.id)), favs.has(ch.id))
-         unreadRows.push([item, ch])
-         groupDiv.appendChild(item)
-      }
-      frag.appendChild(groupDiv)
+      addGroup(header, group, expanded ? "srr-tag-group" : "srr-tag-group srr-tag-collapsed")
    }
 
    if (sortedTags.length > 0 && untagged.length > 0) frag.appendChild(divEl("srr-tag-sep"))
-   for (const ch of untagged) {
-      const item = feedLink(ch, cls("", String(ch.id)), favs.has(ch.id))
-      unreadRows.push([item, ch])
-      frag.appendChild(item)
-   }
+   for (const ch of untagged) frag.appendChild(feedRow(ch, ""))
 
    // The row-search's empty state, built with the rows so applyQuery only has to
    // toggle it. role=status so a narrowing that finds nothing is announced.
@@ -605,8 +615,9 @@ function renderFilterList(): void {
 
 // The per-mount status chip (docs/MULTI-STORE-SPEC.md §8.3). A CORS rejection and
 // a network outage are indistinguishable to fetch, so the chip is honest about
-// that when online rather than claiming a cause.
-function mountChip(status: data.MountStatus): string {
+// that when online rather than claiming a cause. Exported as the ONE owner of
+// the status→text mapping — the Stores dialog (menus.ts) wears the same words.
+export function mountChip(status: data.MountStatus): string {
    if (status.state === "ok") return ""
    if (status.kind === "toonew") return "Too new"
    if (status.kind === "offline") return navigator.onLine === false ? "Offline" : "Unreachable"
@@ -622,7 +633,7 @@ function storeUnread(store: data.Store): number {
       const seen = readSeenFor(store.mid)
       const feeds = Object.values(store.db.feeds) as IFeed[]
       if (feeds.length === 0) return 0
-      const { counts } = data.unreadTally(feeds, (id: number) => seen["feed:" + id], store)
+      const { counts } = data.unreadTally(feeds, (id: number) => seen[feedKey(id)], store)
       let sum = 0
       for (const v of counts.values()) sum += v
       return sum
@@ -646,10 +657,7 @@ function renderMounts(stores: data.Store[]): HTMLElement {
       row.href = "#"
       row.dataset.mount = s.mid
       row.className = "srr-mount-row" + (s.mid === activeMid ? " srr-active" : "")
-      const title = document.createElement("span")
-      title.className = "srr-row-title"
-      title.textContent = labels.get(s.mid) ?? s.mid
-      row.appendChild(title)
+      row.appendChild(rowTitle(labels.get(s.mid) ?? s.mid))
       const chip = mountChip(status)
       if (chip) {
          const c = document.createElement("span")
@@ -659,12 +667,7 @@ function renderMounts(stores: data.Store[]): HTMLElement {
          row.appendChild(c)
       } else {
          const n = storeUnread(s)
-         if (n > 0) {
-            const num = document.createElement("span")
-            num.className = "srr-unread"
-            num.textContent = `×${countBadge(n)}`
-            row.appendChild(num)
-         }
+         if (n > 0) row.appendChild(unreadBadge(n))
       }
       box.appendChild(row)
    }
@@ -731,8 +734,7 @@ async function fillUnread(
 // A flagged status — an amber caution row with a leading dot, matching the
 // graded-health "warn" used by the feed-error dots and the feed info card.
 function statusFlag(text: string): HTMLElement {
-   const row = document.createElement("div")
-   row.className = "srr-status-flag"
+   const row = divEl("srr-status-flag")
    const dot = document.createElement("span")
    dot.className = "srr-status-dot"
    dot.setAttribute("aria-hidden", "true")
@@ -742,8 +744,7 @@ function statusFlag(text: string): HTMLElement {
 
 // A quiet progress note (benign, no caution color).
 function statusNote(text: string): HTMLElement {
-   const row = document.createElement("div")
-   row.className = "srr-status-note"
+   const row = divEl("srr-status-note")
    row.textContent = text
    return row
 }
@@ -762,8 +763,7 @@ export function renderStatus(box: HTMLElement): void {
 
    box.replaceChildren()
    if (fetchedAt > 0) {
-      const fresh = document.createElement("div")
-      fresh.className = "srr-status-fresh"
+      const fresh = divEl("srr-status-fresh")
       fresh.textContent = `Updated ${timeAgoProse(fetchedAt)}`
       box.append(fresh)
       if (isStale(fetchedAt)) box.append(statusFlag("Feed updates may have paused"))
@@ -784,8 +784,7 @@ export function renderStatus(box: HTMLElement): void {
    // The build's version label, always last and always present (even on an
    // empty store — it's exactly what a bug report needs). VERSION is base.ts's
    // build-time define: the release tag in CI builds, "dev" locally.
-   const ver = document.createElement("div")
-   ver.className = "srr-status-version"
+   const ver = divEl("srr-status-version")
    ver.textContent = `srr ${VERSION}`
    box.append(ver)
 }
@@ -806,8 +805,9 @@ export function renderStatus(box: HTMLElement): void {
 function openRowInfo(value: string): void {
    if (value === "") return openStoreInfo()
    if (value === nav.SAVED_TOKEN) return
-   if (/^\d+$/.test(value)) {
-      const ch = data.db.feeds[Number(value)]
+   const id = nav.feedIdOf(value)
+   if (id !== null) {
+      const ch = data.db.feeds[id]
       if (ch) openFeedInfo(ch)
       return
    }
@@ -868,7 +868,7 @@ function buildFeedInfo(ch: IFeed): DocumentFragment {
    frag.appendChild(src.sec)
 
    const content = infoSection("Content")
-   addRow(content.dl, "Articles", String(ch.total_art - (ch.xp ?? 0)))
+   addRow(content.dl, "Articles", String(liveArticles(ch)))
    addRow(content.dl, "Unread", "…", "srr-info-unread")
    // The feed's store footprint, in plain units: cb = the article text it added
    // to the data packs (cumulative — expiration is logical, the bytes stay),
@@ -901,16 +901,10 @@ function buildFeedInfo(ch: IFeed): DocumentFragment {
 
 function openFeedInfo(ch: IFeed): void {
    openInfoDialog(ch.title, buildFeedInfo(ch))
-   void fillFeedUnread(ch)
-}
-
-// Fill the feed's live (idx-derived, async) unread count after the card shows.
-// A single feed's card is the store-wide fill scoped to one feed:
-// tagUnreadFromCounts([ch], counts) reduces to counts.get(ch.id) ?? 0 (clamped
-// ≥ 0), so this is a strict special case of fillStoreUnread — share its
-// token-guarded body rather than duplicate it.
-function fillFeedUnread(ch: IFeed): Promise<void> {
-   return fillStoreUnread([ch])
+   // A single feed's card is the store-wide fill scoped to one feed:
+   // tagUnreadFromCounts([ch], counts) reduces to counts.get(ch.id) ?? 0
+   // (clamped ≥ 0), so it IS fillStoreUnread over a one-feed list.
+   void fillStoreUnread([ch])
 }
 
 // A feed-group rollup card body — the store ([ALL]) and a tag share the shape:
@@ -926,7 +920,7 @@ function buildGroupInfo(feeds: IFeed[], storeWide: boolean): DocumentFragment {
    addRow(content.dl, "Feeds", String(feeds.length))
    if (storeWide) addRow(content.dl, "Tags", String(new Set(feeds.map((ch) => ch.tag).filter(Boolean)).size))
    // Live count, expired excluded — the same semantics as the feed card's row.
-   addRow(content.dl, "Articles", String(feeds.reduce((sum, ch) => sum + ch.total_art - (ch.xp ?? 0), 0)))
+   addRow(content.dl, "Articles", String(feeds.reduce((sum, ch) => sum + liveArticles(ch), 0)))
    addRow(content.dl, "Unread", "…", "srr-info-unread")
    if (storeWide) addRow(content.dl, "Saved", String(nav.savedCount()))
    // Group footprint summed over every member — same rows as the feed card.

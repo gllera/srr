@@ -143,6 +143,13 @@ const nav = vi.hoisted(() => {
       isFilterActive: vi.fn(() => mock.filter.active),
       filterTokens: vi.fn(() => mock.filter.tokens),
       filterFeeds: vi.fn(() => mock.filter.feeds),
+      // The route.ts grammar re-exports — real logic, not spies: app's routing
+      // decisions under test ARE these classifications.
+      isPosInt: (s: string) => /^-?\d+$/.test(s),
+      feedIdOf: (token: string) => (/^\d+$/.test(token) ? Number(token) : null),
+      // The mount-prefix strip: the mock has no mount table, so a bare token
+      // passes through unchanged (the only shape these cases drive).
+      resolveMountToken: vi.fn((token: string) => token),
    }
    return mock
 })
@@ -183,8 +190,13 @@ const list = vi.hoisted(() => ({
    invalidate: vi.fn(),
    onStoreGrown: vi.fn(async () => {}),
    moveSelection: vi.fn(async () => 0),
-   // The shared directed empty-state element; the reader mounts it for placeholders.
-   // The real wording/branches are exercised in list.test.ts — here it's a marker.
+}))
+vi.mock("./list", () => list)
+
+// The shared directed empty-state element lives in its own leaf now (the reader
+// reaches it without importing the list surface). The real wording/branches are
+// exercised in list.test.ts — here it is a marker.
+const emptyState = vi.hoisted(() => ({
    emptyStateEl: vi.fn(() => {
       const e = document.createElement("div")
       e.className = "srr-list-empty"
@@ -192,17 +204,33 @@ const list = vi.hoisted(() => ({
       return e
    }),
 }))
-vi.mock("./list", () => list)
+vi.mock("./empty-state", () => emptyState)
 
-const dropdown = vi.hoisted(() => ({
-   setProfileImportHook: vi.fn(),
-   showImgProxyDialog: vi.fn(),
-   showBackupDialog: vi.fn(),
-   showSyncDialog: vi.fn(),
-   showContextMenu: vi.fn(),
-   showMountsDialog: vi.fn(),
-   showShortcutsDialog: vi.fn(),
-}))
+const dropdown = vi.hoisted(() => {
+   const mock = {
+      setProfileImportHook: vi.fn(),
+      showImgProxyDialog: vi.fn(),
+      showBackupDialog: vi.fn(),
+      showSyncDialog: vi.fn(),
+      showContextMenu: vi.fn(),
+      showMountsDialog: vi.fn(),
+      showShortcutsDialog: vi.fn(),
+      // The real bindPressMenu opens through dropdown's own internal
+      // showContextMenu binding, which the export spy above can't intercept —
+      // so the mock re-wires the one contract these cases drive: contextmenu on
+      // the anchor opens the freshly-derived items through the spy.
+      bindPressMenu: vi.fn((anchor: HTMLElement, items: () => unknown[]) => {
+         anchor.addEventListener("contextmenu", (e) => {
+            const list = items()
+            if (list.length > 0) {
+               mock.showContextMenu(anchor, list)
+               e.preventDefault()
+            }
+         })
+      }),
+   }
+   return mock
+})
 // The dialog openers are stubbed (their modals are dropdown.test.ts's business),
 // but the real wrapTabFocus passes through — the error-popup focus-trap test
 // below exercises it against app.ts's own popup markup.
@@ -252,6 +280,7 @@ vi.mock("./fmt", () => ({
    formatDate: () => "01/01/2020 00:00",
    readerDateline: () => ({ text: "1h ago", title: "01/01/2020 00:00" }),
    srcColorIndex: () => 0,
+   stampSrc: (n: HTMLElement) => (n.dataset.src = "0"),
    timeAgo: () => "1h",
    timeAgoProse: (unix: number) => (unix === 0 ? "just now" : "4 minutes ago"),
    isStale: (unix: number) => unix > 0 && unix < 1000,
@@ -1256,7 +1285,7 @@ describe("reader placeholder — directed empty state (no matching articles)", (
       expect(reader.hasAttribute("hidden")).toBe(false) // reader surface is shown
       // The list's directed empty state is mounted in the content area instead of a
       // bare title + empty body.
-      expect(list.emptyStateEl).toHaveBeenCalled()
+      expect(emptyState.emptyStateEl).toHaveBeenCalled()
       expect(reader.querySelector(".srr-content .srr-list-empty")).not.toBeNull()
       // Chrome hidden (no stray "[DELETED]" source for the synthetic feed 0), and
       // the bare placeholder title is cleared.
@@ -1287,7 +1316,7 @@ describe("reader placeholder — directed empty state (no matching articles)", (
       await flush()
 
       // The empty state names the feed the armed Next opens (startFeed threads through).
-      expect(list.emptyStateEl).toHaveBeenCalledWith({ notStarted: true, startFeed: 3 })
+      expect(emptyState.emptyStateEl).toHaveBeenCalledWith({ notStarted: true, startFeed: 3 })
       const next = document.querySelector(".srr-next") as HTMLButtonElement
       expect(next.disabled).toBe(false)
       expect((document.querySelector(".srr-next-count") as HTMLElement).textContent).toBe("7")
@@ -2638,35 +2667,9 @@ describe("the frontier menu — right-click / long-press on the reader's next pi
       expect(dropdown.showContextMenu).not.toHaveBeenCalled()
    })
 
-   it("opens on a 500ms touch hold (iOS has no contextmenu) and swallows the lift's click", async () => {
-      await boot()
-      hashTo("#2")
-      await flush()
-      nav.isSearchFilter.mockReturnValue(false)
-      nav.filter.feeds = new Map([[1, 0]])
-      nav.currentChron.mockReturnValue(7)
-      const next = document.querySelector(".srr-next") as HTMLButtonElement
-      next.disabled = false
-      vi.useFakeTimers()
-      try {
-         // jsdom has no PointerEvent ctor; a MouseEvent with pointerType grafted
-         // on walks the same listener path.
-         const down = new MouseEvent("pointerdown", { bubbles: true, cancelable: true })
-         Object.defineProperty(down, "pointerType", { value: "touch" })
-         next.dispatchEvent(down)
-         vi.advanceTimersByTime(500)
-         expect(dropdown.showContextMenu).toHaveBeenCalledTimes(1)
-         // The finger lift produces a click on the button — it must not ALSO
-         // step to the next article.
-         next.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))
-         expect(nav.right).not.toHaveBeenCalled()
-         // …and the swallow is one-shot: the next tap navigates again.
-         next.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))
-         expect(nav.right).toHaveBeenCalledTimes(1)
-      } finally {
-         vi.useRealTimers()
-      }
-   })
+   // The 500ms touch-hold open + lift-click swallow moved to dropdown.test.ts
+   // ("press-menu trigger") with the wiring itself — bindPressMenu owns it now,
+   // and this suite's dropdown mock only re-wires the contextmenu path.
 
    it("a touch hold on the lane readout opens no frontier menu; its lift's click stays the plain settings tap", async () => {
       await boot() // list surface — the readout is a tap-to-open-settings button only
@@ -3415,28 +3418,11 @@ describe("offline pin — unpin subtraction & SW purge", () => {
       }
    })
 
-   it("clears the local pin registry when the SW reports pins-purged", async () => {
-      pinFilter("42", ["idx/L1.gz"])
-      expect(listPins().size).toBe(1)
-      let onMessage: ((e: MessageEvent) => void) | undefined
-      Object.defineProperty(navigator, "serviceWorker", {
-         value: {
-            addEventListener: (type: string, h: (e: MessageEvent) => void) => {
-               if (type === "message") onMessage = h
-            },
-            getRegistrations: () => Promise.resolve([]),
-         },
-         configurable: true,
-      })
-      try {
-         await boot()
-         expect(onMessage).toBeDefined() // app wired the SW message listener
-         onMessage!(new MessageEvent("message", { data: { type: "pins-purged" } }))
-         expect(listPins().size).toBe(0) // clearAllPins() emptied the registry
-      } finally {
-         Object.defineProperty(navigator, "serviceWorker", { value: undefined, configurable: true })
-      }
-   })
+   // (A "clears the local pin registry when the SW reports pins-purged" case sat
+   // here. The handler it drove had no sender — `gen` and its PINNED purge were
+   // retired at the manifest cutover — so the test's own MessageEvent was the
+   // only thing in the system that ever produced that message. Both are gone;
+   // pin.test.ts still covers clearAllPins directly.)
 })
 
 // The existing invokePinAction sends {done,total} with NO `cached`; here the SW

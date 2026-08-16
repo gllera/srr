@@ -2,7 +2,9 @@ import * as data from "./data"
 import { UNREAD_ONLY_KEY } from "./keys"
 import { abortPrefetch, prefetchTarget, releasePrefetch, schedulePrefetch } from "./prefetch"
 import {
+   feedIdOf,
    hashPos,
+   isPosInt,
    parseHashMount,
    parseHashTokens,
    tokensSuffix as encodeTokens,
@@ -20,6 +22,7 @@ import {
 } from "./saved"
 import * as search from "./search"
 import {
+   feedKey,
    getSeen,
    markAllRead as raiseFilterRead,
    markUnreadFrom as lowerFilterFrom,
@@ -51,13 +54,25 @@ export {
    pruneSeen,
    undoFrontierMove,
 } from "./seen"
+import { lsGet, lsSet } from "./storage"
 export type { FrontierUndo } from "./seen"
-export { hashPos, isSaved, parseHashMount, parseHashTokens, SAVED_TOKEN, savedCount, tagUnreadFromCounts, unreadCounts }
+export {
+   feedIdOf,
+   hashPos,
+   isPosInt,
+   isSaved,
+   parseHashMount,
+   parseHashTokens,
+   SAVED_TOKEN,
+   savedCount,
+   tagUnreadFromCounts,
+   unreadCounts,
+}
 
 let pos = -1
-// Feed id of the article currently on screen (-1 = none). app.ts reads it via
-// currentFeedId; anchorChron pairs it with pos for the list anchor. Unread
-// counting never consults it — reading is accounted on ENTER (recordSeen).
+// Feed id of the article currently on screen (-1 = none). anchorChron pairs it
+// with pos for the list anchor. Unread counting never consults it — reading is
+// accounted on ENTER (recordSeen).
 let currentFeed = -1
 const next: { left?: Promise<number>; right?: Promise<number> } = {}
 
@@ -66,24 +81,16 @@ const next: { left?: Promise<number>; right?: Promise<number> } = {}
 // feeds you're caught up on. A device-local preference, not part of the
 // shareable #pos!tokens hash. See filter.set / filter.applyUnseen and
 // dropdown.ts's chip.
-let unreadOnly = ((): boolean => {
-   try {
-      return localStorage.getItem(UNREAD_ONLY_KEY) === "1"
-   } catch {
-      return false
-   }
-})()
+let unreadOnly = lsGet(UNREAD_ONLY_KEY) === "1"
 export function isUnreadOnly(): boolean {
    return unreadOnly
 }
 export function setUnreadOnly(on: boolean) {
    unreadOnly = on
-   try {
-      // Persist BOTH states explicitly ("1"/"0"): an absent key means "never
-      // chosen", which app.ts treats as the unread-only default on first run — so
-      // a user who turns it off must store "0", not clear the key, or it'd revert.
-      localStorage.setItem(UNREAD_ONLY_KEY, on ? "1" : "0")
-   } catch {}
+   // Persist BOTH states explicitly ("1"/"0"): an absent key means "never
+   // chosen", which app.ts treats as the unread-only default on first run — so a
+   // user who turns it off must store "0", not clear the key, or it'd revert.
+   lsSet(UNREAD_ONLY_KEY, on ? "1" : "0")
    // Re-apply the current filter so its members immediately pick up (or shed) the
    // raised unseen-only bounds — the caller just flips the mode and rebuilds.
    applyFilter([...filter.tokens])
@@ -109,13 +116,6 @@ export function currentChron(): number {
    return pos
 }
 
-// The feed id of the article currently in the reader (-1 = none). app.ts derives
-// the reader source title and the feed-menu auto-expand tag from this, so it
-// keeps no parallel copy of the current article's feed.
-export function currentFeedId(): number {
-   return currentFeed
-}
-
 // Where the list surface should anchor when (re)built: the article currently in
 // the reader (pos) when it still matches the active filter — so opening the list
 // drops you back at the article you were reading, with newer ("next") articles
@@ -123,7 +123,7 @@ export function currentFeedId(): number {
 // change that left the prior article behind). filter.matches consults the same
 // state navigation does — raised bounds (unseen-only), the explicit set
 // (saved/search) — so the list anchors exactly where the reader sits.
-export function anchorChron(): number {
+function anchorChron(): number {
    // The unseen-only entry anchor counts as a member (it renders as a list row
    // via the feedLeft/feedRight walks), so returning to the list from it lands
    // on it instead of losing the position to the oldest-unread fallback.
@@ -182,7 +182,7 @@ async function oldestUnread(): Promise<number> {
    const seen = readSeen()
    const unread = new Map<number, number>()
    for (const [id, bound] of filter.feeds) {
-      const s = seen["feed:" + id]
+      const s = seen[feedKey(id)]
       unread.set(id, s === undefined ? bound : Math.max(bound, s + 1))
    }
    // Oldest unread: the smallest matching chron under the raised bounds (scan up
@@ -391,10 +391,10 @@ function resolveMembership(tokens: string[]): Map<number, number> {
       return feeds
    }
    for (const token of tokens) {
-      const num = Number(token)
-      if (Number.isFinite(num)) {
-         const ch = data.db.feeds[num]
-         if (ch?.total_art && !feeds.has(num)) feeds.set(num, ch.add_idx ?? 0)
+      const id = feedIdOf(token)
+      if (id !== null) {
+         const ch = data.db.feeds[id]
+         if (ch?.total_art && !feeds.has(id)) feeds.set(id, ch.add_idx ?? 0)
       } else
          for (const ch of Object.values(data.db.feeds))
             if (ch.tag === token && ch.total_art && !feeds.has(ch.id)) feeds.set(ch.id, ch.add_idx ?? 0)
@@ -520,7 +520,7 @@ export const filter = {
    applyUnseen(seenMap: Record<string, number>) {
       if (!unreadOnly) return
       for (const [id, addIdx] of this.feeds) {
-         const seen = seenMap["feed:" + id] ?? -1
+         const seen = seenMap[feedKey(id)] ?? -1
          this.feeds.set(id, Math.max(addIdx, seen + 1))
       }
    },
@@ -605,7 +605,7 @@ export async function onStoreRefreshed(): Promise<void> {
             // join with a seen-raised bound while every member already there
             // kept its natural one, so the same query answered differently
             // depending on when the feed joined the tag.
-            const s = fold ? (seenMap["feed:" + id] ?? -1) : -1
+            const s = fold ? (seenMap[feedKey(id)] ?? -1) : -1
             filter.feeds.set(id, Math.max(addIdx, s + 1))
          }
       }
@@ -697,7 +697,7 @@ async function pendingRight(seenMap?: Record<string, number>, floor = pos): Prom
    // unrecorded landing, probeCurrent, the not-started placeholder).
    const seen = seenMap ?? readSeen()
    const eff = (id: number): number | undefined => {
-      const s = seen["feed:" + id]
+      const s = seen[feedKey(id)]
       if (floor < 0) return s
       return Math.max(s ?? -1, floor)
    }
@@ -774,7 +774,7 @@ async function resolve(target: number, replace = false, record = true): Promise<
    if (prefetchTarget() === target) releasePrefetch()
    else abortPrefetch()
    updateHash(replace)
-   const seen = record ? recordSeen(article, pos, frontierScope()) : undefined
+   const seen = record ? recordSeen(article.f, pos, frontierScope()) : undefined
    return showFeed(article, seen)
 }
 
@@ -938,10 +938,10 @@ export function right(): Promise<IShowFeed> {
 // overflows the JS engine's spread-argument limit and throws on a store
 // approaching FEED_ID_CEILING (~65k feeds) — the same reason data.ts reduces
 // instead of Math.max(...ids). Returns `fallback` for an empty iterable.
-function minOf(values: Iterable<number>, fallback = 0): number {
+function minOf(values: Iterable<number>): number {
    let m = Infinity
    for (const v of values) if (v < m) m = v
-   return m === Infinity ? fallback : m
+   return m === Infinity ? 0 : m
 }
 
 export async function first(record = true): Promise<IShowFeed> {
@@ -988,8 +988,8 @@ async function isValidSeen(idx: number): Promise<boolean> {
 // Used by switchFilter to tell a known-but-empty pick (→ placeholder) from a
 // stale/bogus token (→ [ALL]).
 function isKnownToken(token: string): boolean {
-   const num = Number(token)
-   if (Number.isFinite(num)) return data.db.feeds[num] !== undefined
+   const id = feedIdOf(token)
+   if (id !== null) return data.db.feeds[id] !== undefined
    return Object.values(data.db.feeds).some((ch) => ch.tag === token)
 }
 
@@ -1000,17 +1000,23 @@ function isKnownToken(token: string): boolean {
 // of resuming onto an already-read article: in unread-only mode a caught-up lane
 // has nothing to show. Show-read mode (unseenActive false) returns false — you
 // browse the read articles there, so the resume onto one is correct.
-async function noUnreadLeft(): Promise<boolean> {
-   if (!unseenActive() || filter.feeds.size === 0) return false
-   const start = minOf(filter.feeds.values())
+// The oldest-unread scan, once. `known` distinguishes a genuine -1 (the lane is
+// caught up) from a cold finalized-pack fetch that blipped — the callers must
+// never strand an open on the "All caught up" placeholder over a transient probe
+// failure, so an unknown answer resumes normally (showFeed degrades the neighbor
+// buttons on its own).
+async function probeFirstUnread(): Promise<{ chron: number; known: boolean }> {
+   if (!unseenActive() || filter.feeds.size === 0) return { chron: -1, known: false }
    try {
-      return (await feedRight(start)) === -1
+      return { chron: await feedRight(minOf(filter.feeds.values())), known: true }
    } catch {
-      // A cold finalized-pack fetch can blip. Don't strand the open on the
-      // placeholder over a transient probe failure — assume there's unread and
-      // resume normally (showFeed degrades the neighbor buttons on its own).
-      return false
+      return { chron: -1, known: false }
    }
+}
+
+async function noUnreadLeft(): Promise<boolean> {
+   const { chron, known } = await probeFirstUnread()
+   return known && chron === -1
 }
 
 // Opening a tag/feed resumes at its CURRENT position — the saved seen
@@ -1027,14 +1033,7 @@ async function noUnreadLeft(): Promise<boolean> {
 // visiting a lane cannot decrement its unread count. Reading forward (Right)
 // records normally from there.
 export async function switchFilter(token: string): Promise<IShowFeed> {
-   // A mount-qualified token (a peer lane picked from the picker): `@<mid>` or
-   // `@<mid>:<tok>`. Switch the active lane first, then resolve the bare token
-   // in that store's context (§6.3). A bare token leaves the active mount as-is.
-   if (token.startsWith("@")) {
-      const { mid, tokens } = parseHashMount([token])
-      data.setActive(mid)
-      token = tokens[0] ?? ""
-   }
+   token = resolveMountToken(token)
    if (token === "") {
       filter.clear()
       // [ALL] opens at the oldest unseen article — the start of the global
@@ -1067,23 +1066,12 @@ export async function switchFilter(token: string): Promise<IShowFeed> {
    // saved article — the same landing the list anchors on — and read forward.
    // first() with an empty filter.feeds walks the saved set from chron 0.
    if (filter.saved) return first(false)
-   // Oldest unread under the raised bounds — the ONE feedRight scan, reused for
-   // both the caught-up test here and the not-started startFeed name below (was
-   // two identical scans: noUnreadLeft's probe, then a re-tread for startFeed).
-   // Guarded exactly like noUnreadLeft (fromHash still uses that — it has no probe
-   // to reuse); unreadKnown tells a genuine -1 (caught up) from a cold-pack blip.
-   let firstUnread = -1
-   let unreadKnown = false
-   if (unseenActive() && filter.feeds.size > 0) {
-      try {
-         firstUnread = await feedRight(minOf(filter.feeds.values()))
-         unreadKnown = true
-      } catch {
-         // A cold finalized-pack fetch can blip. Don't strand the open on the
-         // "All caught up" placeholder over a transient probe failure — assume
-         // there's unread and resume normally (showFeed degrades on its own).
-      }
-   }
+   // Oldest unread under the raised bounds — ONE scan, reused for both the
+   // caught-up test here and the not-started startFeed name below (it was two
+   // identical scans: noUnreadLeft's probe, then a re-tread for startFeed).
+   // noUnreadLeft is the same probe read for its boolean alone; fromHash still
+   // uses that, having no second consumer to share this one with.
+   const { chron: firstUnread, known: unreadKnown } = await probeFirstUnread()
    // Unread-only + fully-read feed/tag: nothing unread to resume onto — show the
    // "All caught up" placeholder rather than opening an already-read article.
    if (unreadKnown && firstUnread === -1) return resolveNoMatch()
@@ -1138,8 +1126,12 @@ export async function goTo(idx: number, record = true, replace = false): Promise
 // frontier over articles never shown.
 export async function goToArticle(chron: number): Promise<IShowFeed> {
    if (chron >= 0 && chron < data.db.total_art) {
-      if (!(await isValidSeen(chron))) filter.clear()
-      if (await isValidSeen(chron)) return resolve(chron, false, false)
+      let addressable = await isValidSeen(chron)
+      if (!addressable) {
+         filter.clear()
+         addressable = await isValidSeen(chron)
+      }
+      if (addressable) return resolve(chron, false, false)
    }
    // Out of range, expired below add_idx, or a deleted feed: the exact article
    // is unaddressable — keep goTo's clamp (nearest live match, else last).
@@ -1232,7 +1224,21 @@ export function filterLabel(key: string): string {
       const q = key.slice(SEARCH_PREFIX.length)
       return q ? `Search: ${q}` : "Search"
    }
-   return /^\d+$/.test(key) ? data.feedTitle(Number(key)) : key
+   const id = feedIdOf(key)
+   return id !== null ? data.feedTitle(id) : key
+}
+
+// A mount-qualified token (`@<mid>` / `@<mid>:<tok>`, §6.3): switch the active
+// lane to its mount and return the bare token ("" for a peer [ALL]) to resolve
+// in that store's context. A bare token leaves the active mount as-is and comes
+// back unchanged. The ONE owner of "consume the mount prefix" — switchFilter
+// and app.ts's selectFilter both route through it, so the grammar's read side
+// cannot drift between the two front doors.
+export function resolveMountToken(token: string): string {
+   if (!token.startsWith("@")) return token
+   const { mid, tokens } = parseHashMount([token])
+   data.setActive(mid)
+   return tokens[0] ?? ""
 }
 
 // The cycle "origin": like getCurrentFilterKey, but a single-feed filter on a
@@ -1243,9 +1249,9 @@ export function filterLabel(key: string): string {
 export function cycleOriginKey(): string {
    let current = getCurrentFilterKey()
    if (current !== "" && filter.tokens.length === 1) {
-      const num = Number(current)
-      if (Number.isFinite(num)) {
-         const ch = data.db.feeds[num]
+      const id = feedIdOf(current)
+      if (id !== null) {
+         const ch = data.db.feeds[id]
          if (ch?.tag) current = ch.tag
       }
    }
@@ -1303,6 +1309,6 @@ function updateHash(replace = false) {
 // records, but the URL and the stored restore key must still name what is on
 // screen. Every other writer of the hash is a landing; this one is the landing
 // that already happened.
-export function publishHash(replace = false): void {
-   updateHash(replace)
+export function publishHash(): void {
+   updateHash(false)
 }

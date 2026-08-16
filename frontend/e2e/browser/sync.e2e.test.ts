@@ -3,7 +3,7 @@ import type { Browser, Page } from "puppeteer"
 
 import { feedServer, srr, type FeedServer } from "../harness"
 import { nItems, rssFeed } from "../fixtures"
-import { clearDir, launchBrowser, open as openCtx, waitList, waitReader } from "./helpers"
+import { clearDir, clickRow, launchBrowser, open as openCtx, waitList, waitReader } from "./helpers"
 
 // Cross-device sync end-to-end over a REAL HTTP endpoint (static-serve.ts's
 // in-memory /sync/<name> route — the exact GET-or-404 / PUT contract sync.ts
@@ -24,14 +24,6 @@ interface ProfileBlob {
    seen: Record<string, number>
    st?: Record<string, number>
 }
-
-const clickRow = (p: Page, title: string) =>
-   p.evaluate((t) => {
-      const row = [...document.querySelectorAll(".srr-list a.srr-row")].find(
-         (e) => e.querySelector(".srr-row-title")?.textContent === t,
-      )
-      ;(row as HTMLElement | undefined)?.click()
-   }, title)
 
 // Configure the sync endpoint the way the dialog would (localStorage), then
 // reload so sync.init wires the lifecycle with the URL in place. The caller

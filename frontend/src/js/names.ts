@@ -29,12 +29,19 @@ import {
 
 export type { IManifestWire }
 
-// Gunzip a fetched store object straight to JSON. Store objects are served as
-// raw gzip bytes with no Content-Encoding, so the reader (data.ts) and the
-// service worker both decompress by hand — through this one helper. Callers
-// pass res (or res.clone()) themselves.
-export const gunzipJson = <T>(res: Response): Promise<T> =>
-   new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).json() as Promise<T>
+// Gunzip a fetched store object. Store objects are served as raw gzip bytes with
+// no Content-Encoding, so the reader (data.ts) and the service worker both
+// decompress by hand — through this one helper. Callers pass res (or
+// res.clone()) themselves.
+//
+// The stream form is the primitive because not every consumer wants JSON:
+// data.ts needs the bytes for a binary idx pack and a per-chunk decoder for a
+// multi-MB data pack, and both used to re-spell the pipeThrough by hand,
+// quietly falsifying the "one helper" this comment claims.
+export const gunzipStream = (res: Response): ReadableStream<Uint8Array> =>
+   res.body!.pipeThrough(new DecompressionStream("gzip"))
+
+export const gunzipJson = <T>(res: Response): Promise<T> => new Response(gunzipStream(res)).json() as Promise<T>
 
 // --- resolved names -------------------------------------------------------
 
@@ -57,6 +64,15 @@ export interface SummaryRef {
 }
 
 export interface StoreNames {
+   // EVERY positional series the manifest lists, keyed by its own directory —
+   // including ones this build has no idea about (`watch` today, a merged or
+   // split series tomorrow). §4.6 says series live in a map and nothing may
+   // assume there are three of them; the three fields below are ALIASES into
+   // this map, kept because the reader genuinely addresses those three by their
+   // semantics (idx packs, data lines, meta cards) rather than generically.
+   // What must NOT name them is an operation that means "every series" —
+   // bootWarmNames was exactly that, spelled as a three-element array.
+   series: Map<string, SeriesList>
    idx: SeriesList
    data: SeriesList
    meta: SeriesList
@@ -114,10 +130,22 @@ export function manifestNames(man: IManifestWire): StoreNames {
       return { key: stemKey(row), covers: row.covers ?? 0 }
    }
    const chain = raw.deltas as IDeltaNamesWire | undefined
+   // Expand every POSITIONAL row (an `r` run-length array and no `s` of its own —
+   // the same shape test listedNames applies), so an unknown series is carried
+   // rather than dropped on the floor.
+   const all = new Map<string, SeriesList>()
+   for (const [name, row] of Object.entries(raw)) {
+      if (!row || typeof row !== "object") continue
+      const r = row as Record<string, unknown>
+      if (typeof r["s"] === "string" || !Array.isArray(r["r"])) continue
+      all.set(name, expandSeries(row as ISeriesNamesWire, name))
+   }
+   const known = (name: string): SeriesList => all.get(name) ?? series(name)
    return {
-      idx: series("idx"),
-      data: series("data"),
-      meta: series("meta"),
+      series: all,
+      idx: known("idx"),
+      data: known("data"),
+      meta: known("meta"),
       deltas: (chain?.r ?? []).map((stem) => `${chain!.s}/${stem}.gz`),
       hsum: summary("hsum"),
       ssum: summary("ssum"),
@@ -149,7 +177,11 @@ function stemKey(r: IStemRefWire | ISummaryNameWire): string {
 // (the manifest names it) and simply unused until it catches up.
 export function bootWarmNames(names: StoreNames): string[] {
    const out: string[] = []
-   for (const list of [names.idx, names.data, names.meta]) if (list.tail >= 0) out.push(list.keys[list.tail])
+   // Every series' tail, from the map — NOT [idx, data, meta]. That literal was
+   // the same hard-coded-three-series bug the keep-set comment below describes,
+   // one function up: a series this build has never heard of would simply never
+   // be warmed, and the next offline launch would boot a generation missing it.
+   for (const list of names.series.values()) if (list.tail >= 0) out.push(list.keys[list.tail])
    for (const k of names.deltas) out.push(k)
    if (names.hsum) out.push(names.hsum.key)
    return out
@@ -247,6 +279,13 @@ export function legacyNames(r: LegacyRoot): StoreNames {
    for (let i = 0; i < (r.nd ?? 0); i++) deltas.push(`data/d${tg + 1 + i}.gz`)
 
    return {
+      // A pre-cutover root has exactly these three by construction — the layout
+      // predates the names map entirely — so here the literal IS the truth.
+      series: new Map([
+         ["idx", idx],
+         ["data", data],
+         ["meta", meta],
+      ]),
       idx,
       data,
       meta,

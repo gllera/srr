@@ -86,7 +86,7 @@ export function lowerBound(n: number, isBelow: (i: number) => boolean): number {
 // than the format ceiling. data.ts builds it once per nav call and threads it
 // into the per-pack scans (countLeft/findLeft/findRight), so a multi-pack walk
 // reuses one allocation instead of rebuilding it per pack touched.
-export function makeFeedsLookup(feeds: Map<number, number>, slots: number): Int32Array {
+export function makeFeedsLookup(feeds: ReadonlyMap<number, number>, slots: number): Int32Array {
    const arr = new Int32Array(slots).fill(-1)
    for (const [feedId, addIdx] of feeds) arr[feedId] = addIdx
    return arr
@@ -196,12 +196,11 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          const ownFeedCounts = new Uint32Array(slots)
          pack.ownFeedCounts = ownFeedCounts
 
-         let lastPackId: number
+         // -1 = no bound emitted yet; a pack opening mid-data-pack states one.
+         let lastPackId = -1
          if (packOff > 0) {
             pack.bounds.push({ packId, startChron: baseChron - packOff })
             lastPackId = packId
-         } else {
-            lastPackId = -1
          }
 
          // The entry array and the boundary footer are decoded by the generated

@@ -1,7 +1,6 @@
 const { Optimizer } = require("@parcel/plugin")
 
-const cdnUrl = require("./resolve-cdn-url")()
-const href = (cdnUrl.endsWith("/") ? cdnUrl : cdnUrl + "/") + "db.gz"
+const href = require("./resolve-cdn-url") + "db.gz" // the resolver normalizes the trailing slash
 const crossorigin = /^https?:\/\//.test(href) ? " crossorigin" : ""
 const tag = `<link rel="preload" href="${href}" as="fetch"${crossorigin}>`
 

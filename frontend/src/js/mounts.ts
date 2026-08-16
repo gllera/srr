@@ -19,6 +19,7 @@
 
 import { HOME } from "./base"
 import { HOME_MID, MOUNTS_KEY, PER_STORE_KEYS } from "./keys"
+import { lsSet } from "./storage"
 
 // One mount record (§3.1). Carries NO secret — `cred` is a boolean, not a token
 // (§7.3, MS9). Presentation fields (label, ord, cred) plus a single LWW clock
@@ -88,7 +89,7 @@ export function homeUrl(): string {
 
 // The synthesized home record — exactly today's single-store behavior when
 // srr-mounts is absent (§3.3).
-export function homeRecord(): MountRecord {
+function homeRecord(): MountRecord {
    return {
       id: HOME_MID,
       url: homeUrl(),
@@ -323,11 +324,7 @@ export function renameStoreState(from: string, to: string): void {
 // this store's reading history" action (§3.4). Ordinary unmount does NOT call
 // this; only the explicit forget path does.
 export function forgetStoreState(mid: string): void {
-   for (const k of storeStateKeys(mid)) {
-      try {
-         localStorage.removeItem(k)
-      } catch {}
-   }
+   for (const k of storeStateKeys(mid)) lsSet(k, null)
 }
 
 // --- local mutations (each stamps ts = now on the touched record, §3.4.5) --

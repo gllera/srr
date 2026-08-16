@@ -51,12 +51,15 @@
 
 import { SYNC_URL_KEY } from "./keys"
 import {
+   cleanTsMap,
+   coerceNumMap,
    exportProfile,
    hasPeerState,
    importProfile,
    localSavedTs,
    localSeen,
    localSeenTs,
+   posInt,
    profileTs,
    touchProfile,
 } from "./profile"
@@ -76,10 +79,28 @@ let inflight = false
 let lastPullAt = 0 // ms; attempt-based, so a dead endpoint isn't hammered
 let lastOkAt = 0 // unix SECONDS of the last completed cycle (fmt.timeAgoProse scale)
 let lastError = ""
-let lastRemoteTs = -1 // ts of the last successfully pulled remote (-1 = never pulled)
-let lastRemoteSeen: Record<string, number> | null = null // its seen map, for flush()'s stale-tab guard
-let lastRemoteSt: Record<string, number> = {} // its per-key seen timestamps, paired with lastRemoteSeen
-let lastRemoteSd: Record<string, number> = {} // its per-key SAVED timestamps, for flush()'s saved-axis trigger
+// What the endpoint held at the last successful pull (or what we last PUT), for
+// flush()'s stale-tab guard and its behind-test. ONE nullable record rather than
+// four vars written as a block at every site: they were always assigned together,
+// so `seen === null` and `ts === -1` were two sentinels for the same fact — and
+// flush() tested them separately, as if they could disagree.
+interface RemoteSnapshot {
+   ts: number
+   seen: Record<string, number>
+   st: Record<string, number> // per-key seen timestamps, paired with `seen`
+   sd: Record<string, number> // per-key SAVED timestamps, for the saved-axis trigger
+}
+let lastRemote: RemoteSnapshot | null = null // null = never pulled
+
+// "Is the endpoint behind local on any axis?" — the one push trigger, asked of a
+// freshly-pulled blob by syncNow and of the remembered snapshot by flush(). It
+// was spelled twice over two sets of names; RemoteBlob is structurally a superset
+// of RemoteSnapshot, which is the proof the two sites were the same test.
+function endpointBehind(r: RemoteSnapshot): boolean {
+   return (
+      seenBehind(localSeen(), localSeenTs(), r.seen, r.st) || savedBehind(localSavedTs(), r.sd) || profileTs() > r.ts
+   )
+}
 
 export function getSyncUrl(): string {
    try {
@@ -100,10 +121,7 @@ export function setSyncUrl(value: string): void {
    lastOkAt = 0
    lastError = ""
    lastPullAt = 0
-   lastRemoteTs = -1
-   lastRemoteSeen = null
-   lastRemoteSt = {}
-   lastRemoteSd = {}
+   lastRemote = null
 }
 
 export function enabled(): boolean {
@@ -217,30 +235,20 @@ async function pullRemote(url: string): Promise<RemoteBlob | null> {
    if (typeof obj !== "object" || obj === null) throw new Error("invalid profile")
    const v = obj["v"] === 2 ? 2 : obj["v"] === 1 ? 1 : 0
    if (v === 0) throw new Error(`unsupported profile version: ${obj["v"]}`)
+   // Every field below is decoded through profile.ts's own coercers. This is
+   // tighter than de-duplication: the behind-check these values feed and the
+   // merge importProfile runs must agree bit for bit on what counts as a stamp,
+   // or a stamp one side sees and the other ignores re-fires the push every
+   // cycle. The `typeof` guard keeps posInt's string tolerance off the wire.
    const tsRaw = obj["ts"]
-   const ts = typeof tsRaw === "number" && Number.isFinite(tsRaw) && tsRaw > 0 ? Math.floor(tsRaw) : 0
-   const seen: Record<string, number> = {}
-   const seenRaw = obj["seen"]
-   if (seenRaw !== null && typeof seenRaw === "object" && !Array.isArray(seenRaw))
-      for (const [k, val] of Object.entries(seenRaw as Record<string, unknown>))
-         if (typeof val === "number" && Number.isFinite(val)) seen[k] = val
+   const ts = typeof tsRaw === "number" ? posInt(tsRaw) : 0
+   const seen = coerceNumMap(obj["seen"])
    // The two per-key stamp maps — seen (`st`) and saved (`sd`). Absent on v1 /
    // pre-upgrade v2 blobs → {}, and every comparison then degrades to its
    // legacy rule (progress-only for seen, blob-level `ts` for saved).
-   const st = numberMap(obj["st"])
-   const sd = numberMap(obj["sd"])
+   const st = cleanTsMap(obj["st"])
+   const sd = cleanTsMap(obj["sd"])
    return { v: v as 1 | 2, ts, seen, st, sd, hasMnt: Array.isArray(obj["mnt"]), raw }
-}
-
-// A blob's `st`/`sd` side map, cleaned to positive integer stamps; anything
-// malformed (or absent) degrades to {}, i.e. "no ordering info", which every
-// comparison already handles by falling back to its legacy rule.
-function numberMap(raw: unknown): Record<string, number> {
-   const out: Record<string, number> = {}
-   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return out
-   for (const [k, val] of Object.entries(raw as Record<string, unknown>))
-      if (typeof val === "number" && Number.isFinite(val) && val > 0) out[k] = Math.floor(val)
-   return out
 }
 
 async function put(url: string, keepalive = false): Promise<void> {
@@ -273,10 +281,7 @@ export async function syncNow(opts: { manual?: boolean } = {}): Promise<boolean>
    try {
       const remote = await pullRemote(url)
       if (remote) {
-         lastRemoteTs = remote.ts
-         lastRemoteSeen = remote.seen
-         lastRemoteSt = remote.st
-         lastRemoteSd = remote.sd
+         lastRemote = { ts: remote.ts, seen: remote.seen, st: remote.st, sd: remote.sd }
          const r = importProfile(remote.raw, { prefs: false, mode: remote.v === 1 ? "merge" : "sync" })
          if (!r.ok) throw new Error(r.error ?? "invalid profile")
          changed = r.changed === true
@@ -291,10 +296,7 @@ export async function syncNow(opts: { manual?: boolean } = {}): Promise<boolean>
          // 404 — the endpoint holds nothing NOW (wiped or reset since any
          // earlier pull), so forget flush()'s guard snapshot; the seeding push
          // below has nothing to regress against.
-         lastRemoteTs = -1
-         lastRemoteSeen = null
-         lastRemoteSt = {}
-         lastRemoteSd = {}
+         lastRemote = null
       }
       if (changed) onMerged?.(mountsChanged)
       // Push whenever the endpoint is behind, derived from the pulled blob
@@ -307,19 +309,12 @@ export async function syncNow(opts: { manual?: boolean } = {}): Promise<boolean>
       const wantPush =
          opts.manual ||
          dirty ||
-         (remote
-            ? seenBehind(localSeen(), localSeenTs(), remote.seen, remote.st) ||
-              savedBehind(localSavedTs(), remote.sd) ||
-              profileTs() > remote.ts
-            : profileTs() > 0 || Object.keys(localSeen()).length > 0)
+         (remote ? endpointBehind(remote) : profileTs() > 0 || Object.keys(localSeen()).length > 0)
       if (wantPush) {
          await put(url)
          dirty = false
          clearTimeout(pushTimer)
-         lastRemoteTs = profileTs()
-         lastRemoteSeen = localSeen()
-         lastRemoteSt = localSeenTs()
-         lastRemoteSd = localSavedTs()
+         lastRemote = { ts: profileTs(), seen: localSeen(), st: localSeenTs(), sd: localSavedTs() }
       }
       lastOkAt = Math.floor(Date.now() / 1000)
       lastError = ""
@@ -358,14 +353,14 @@ export function pushSoon(): void {
 // a reload that lost it outright. So also push when local is provably ahead of
 // the last remembered remote — its seen regressive against local, or a newer
 // local ts, or a saved chron it stamped more recently. A tab that never pulled
-// (lastRemoteTs < 0) has no remote to compare and so still needs `dirty` to have
+// (lastRemote === null) has no remote to compare and so still needs `dirty` to have
 // something worth sending; local == remote ⇒ no PUT, so the common quiet
 // tab-switch stays quiet.
 //
 // GUARD — a blind PUT from a stale tab could still LOWER the endpoint: its seen
 // can sit below the endpoint's (nav.pruneSeen legitimately drops a deleted
 // feed's key) and its saved/ts can predate a newer device's blob. So a tab that
-// HAS pulled before (lastRemoteTs set) refuses to publish a blob that regresses
+// HAS pulled before (lastRemote set) refuses to publish a blob that regresses
 // its remembered remote. A skip (or a failed PUT) leaves `dirty` set, so the
 // next full cycle — which pulls first — resolves it. And even if a stale
 // snapshot lets a regressive flush through, the raise-only merge means any
@@ -378,19 +373,11 @@ export function pushSoon(): void {
 export function flush(): void {
    const url = getSyncUrl()
    if (!url) return
-   const seen = localSeen()
-   const seenTs = localSeenTs()
-   if (lastRemoteTs >= 0) {
-      if (profileTs() < lastRemoteTs) return
-      if (lastRemoteSeen && seenBehind(lastRemoteSeen, lastRemoteSt, seen, seenTs)) return
+   if (lastRemote) {
+      if (profileTs() < lastRemote.ts) return
+      if (seenBehind(lastRemote.seen, lastRemote.st, localSeen(), localSeenTs())) return
    }
-   const behind =
-      dirty ||
-      (lastRemoteTs >= 0 &&
-         ((lastRemoteSeen !== null && seenBehind(seen, seenTs, lastRemoteSeen, lastRemoteSt)) ||
-            savedBehind(localSavedTs(), lastRemoteSd) ||
-            profileTs() > lastRemoteTs))
-   if (!behind) return
+   if (!dirty && !(lastRemote && endpointBehind(lastRemote))) return
    clearTimeout(pushTimer)
    dirty = false
    void put(url, true).catch(() => {

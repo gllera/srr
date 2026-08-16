@@ -53,6 +53,14 @@ export function icon(name: string): SVGSVGElement {
    return svg
 }
 
+// The console's icon button: a `.btn.icon` whose tooltip and accessible name are
+// the SAME string. That coupling is the point — six hand-written copies each
+// re-typed the label twice, which is one careless edit away from a button that
+// reads one thing to the eye and another to a screen reader.
+export function iconBtn(name: string, label: string, onclick: (e: Event) => void, cls = "btn icon"): HTMLButtonElement {
+   return el("button", { class: cls, title: label, "aria-label": label, onclick }, icon(name))
+}
+
 // Source-color slot for a feed id. Mirrors the reader's fmt.ts srcColorIndex
 // (feed_id % 8, normalized non-negative) so a feed's rail color in the console
 // matches the color it carries in the reader. Re-implemented rather than

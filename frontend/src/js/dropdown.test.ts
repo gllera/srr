@@ -720,6 +720,71 @@ describe("anchored context menu (showContextMenu)", () => {
 
 // docs/MULTI-STORE-SPEC.md §3, §6.3 — the Stores dialog. Built dynamically (no
 // index.html skeleton), so it needs only the app-provided hooks.
+describe("press-menu trigger (bindPressMenu)", () => {
+   let dropdown: Dropdown
+   const $menu = () => document.querySelector<HTMLElement>(".srr-ctxmenu")
+   const anchor = () => document.querySelector<HTMLButtonElement>(".srr-opener")!
+   const ITEMS = [{ label: "Mark all read", action: vi.fn() }]
+
+   beforeEach(async () => {
+      document.body.innerHTML = SKELETON
+      vi.resetModules()
+      dropdown = await import("./dropdown")
+   })
+   afterEach(() => {
+      if ($menu()) key(document.body, "Escape")
+      vi.useRealTimers()
+   })
+
+   const touchDown = (el: HTMLElement): void => {
+      // jsdom has no PointerEvent ctor; a MouseEvent with pointerType grafted
+      // on walks the same listener path (app.test.ts's idiom).
+      const down = new MouseEvent("pointerdown", { bubbles: true, cancelable: true })
+      Object.defineProperty(down, "pointerType", { value: "touch" })
+      el.dispatchEvent(down)
+   }
+
+   it("contextmenu opens the derived items and claims the event; an empty list falls through", () => {
+      let items: { label: string; action: () => void }[] = []
+      dropdown.bindPressMenu(anchor(), () => items)
+      const miss = new MouseEvent("contextmenu", { bubbles: true, cancelable: true })
+      anchor().dispatchEvent(miss)
+      expect($menu()).toBeNull()
+      expect(miss.defaultPrevented).toBe(false) // the browser's own menu stands
+      items = ITEMS
+      const hit = new MouseEvent("contextmenu", { bubbles: true, cancelable: true })
+      anchor().dispatchEvent(hit)
+      expect($menu()).not.toBeNull()
+      expect(hit.defaultPrevented).toBe(true)
+   })
+
+   it("opens on a 500ms touch hold (iOS has no contextmenu) and swallows the lift's click, one-shot", () => {
+      dropdown.bindPressMenu(anchor(), () => ITEMS)
+      const primary = vi.fn()
+      anchor().addEventListener("click", primary)
+      vi.useFakeTimers()
+      touchDown(anchor())
+      vi.advanceTimersByTime(500)
+      expect($menu()).not.toBeNull()
+      // The finger lift produces a click on the anchor — it must not ALSO run
+      // the anchor's primary action…
+      anchor().dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))
+      expect(primary).not.toHaveBeenCalled()
+      // …and the swallow is one-shot: the next tap acts again.
+      anchor().dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))
+      expect(primary).toHaveBeenCalledTimes(1)
+   })
+
+   it("a lifted finger cancels the pending hold", () => {
+      dropdown.bindPressMenu(anchor(), () => ITEMS)
+      vi.useFakeTimers()
+      touchDown(anchor())
+      anchor().dispatchEvent(new Event("pointerup", { bubbles: true }))
+      vi.advanceTimersByTime(500)
+      expect($menu()).toBeNull()
+   })
+})
+
 describe("mounts (stores) dialog", () => {
    let dropdown: Dropdown
    const $dialog = () => document.querySelector<HTMLElement>(".srr-mounts-dialog")

@@ -2,8 +2,8 @@ import { afterAll, beforeAll, describe, expect, inject, it } from "vitest"
 import puppeteer, { type Browser, type Page } from "puppeteer"
 
 import { feedServer, srr, type FeedServer } from "../harness"
-import { pubDate, rssFeed, type FeedItem } from "../fixtures"
-import { clearDir, open as openCtx, waitList, waitTitle } from "./helpers"
+import { pubDate, rssFeed, wavBytes, type FeedItem } from "../fixtures"
+import { clearDir, clickRow, open as openCtx, waitList, waitTitle } from "./helpers"
 
 // The mini-player's ONE mechanism (RDR16), in a real browser with real decoded
 // audio: RELOCATION, NOT RECONSTRUCTION. Stepping to another article calls
@@ -39,30 +39,6 @@ const SHORT = "short episode"
 // attribute on the element itself, so it travels with the node and cannot be
 // reproduced by any code path that builds a fresh <audio>.
 const PROBE = "audio[data-probe='rdr16']"
-
-// A real, decodable RIFF/WAVE file: 8 kHz mono 8-bit PCM, a quiet 220 Hz tone.
-// Synthesised rather than committed — a binary fixture in the repo would be
-// bytes nobody can review. Long enough (2 min) that no amount of CI slowness
-// lets the episode END mid-test, which would release the claim for real reasons.
-function wavBytes(seconds: number, rate = 8000): Buffer {
-   const samples = seconds * rate
-   const buf = Buffer.alloc(44 + samples)
-   buf.write("RIFF", 0)
-   buf.writeUInt32LE(36 + samples, 4)
-   buf.write("WAVE", 8)
-   buf.write("fmt ", 12)
-   buf.writeUInt32LE(16, 16) // fmt chunk size
-   buf.writeUInt16LE(1, 20) // PCM
-   buf.writeUInt16LE(1, 22) // mono
-   buf.writeUInt32LE(rate, 24) // sample rate
-   buf.writeUInt32LE(rate, 28) // byte rate (mono, 8-bit ⇒ = sample rate)
-   buf.writeUInt16LE(1, 32) // block align
-   buf.writeUInt16LE(8, 34) // bits per sample
-   buf.write("data", 36)
-   buf.writeUInt32LE(samples, 40)
-   for (let i = 0; i < samples; i++) buf[44 + i] = 128 + Math.round(40 * Math.sin((2 * Math.PI * 220 * i) / rate))
-   return buf
-}
 
 // This suite's own browser, deliberately NOT helpers.launchBrowser: headless
 // Chrome refuses play() without a user gesture, and adding the override to the
@@ -144,14 +120,6 @@ const srcDiagnosis = (p: Page, err: string): Promise<string> =>
       )
       return `${e} — src=${a.src} answers ${answer}`
    }, err)
-
-const clickRow = (p: Page, title: string) =>
-   p.evaluate((t) => {
-      const row = [...document.querySelectorAll(".srr-list a.srr-row")].find(
-         (e) => e.querySelector(".srr-row-title")?.textContent === t,
-      )
-      ;(row as HTMLElement | undefined)?.click()
-   }, title)
 
 describe("browser: mini-player relocation keeps real audio playing", () => {
    let browser: Browser

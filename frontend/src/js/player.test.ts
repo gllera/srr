@@ -9,10 +9,41 @@ const data = vi.hoisted(() => ({
    activeStore: () => ({ mid: "0", base: new URL("https://cdn.example/store/") }),
 }))
 vi.mock("./data", () => data)
-vi.mock("./fmt", () => ({ srcColorIndex: () => 3 }))
+vi.mock("./fmt", () => ({
+   srcColorIndex: () => 3,
+   stampSrc: (n: HTMLElement) => (n.dataset.src = "3"),
+}))
 // The chip's long-press menu goes through the shared anchored card; mocking it
-// keeps this suite off dropdown's DOM and lets tests invoke item actions.
-const dropdown = vi.hoisted(() => ({ showContextMenu: vi.fn() }))
+// keeps this suite off dropdown's DOM and lets tests invoke item actions. The
+// bindPressMenu shim keeps only the contract this suite drives — a contextmenu
+// on the anchor opens the freshly-derived items through showContextMenu — while
+// the full trigger wiring (touch-hold, click swallow) is dropdown.ts's own.
+const dropdown = vi.hoisted(() => {
+   const showContextMenu = vi.fn()
+   return {
+      showContextMenu,
+      bindPressMenu: vi.fn((anchor: HTMLElement, items: () => unknown[]) => {
+         anchor.addEventListener("contextmenu", (e) => {
+            const list = items()
+            if (list.length > 0) {
+               showContextMenu(anchor, list)
+               e.preventDefault()
+            }
+         })
+      }),
+      // The real four-line factory: the queue rows this suite drives are BUILT
+      // from it, so a stub that returned nothing would test an empty panel.
+      btn: (className: string, label: string, text: string, onClick: () => void) => {
+         const b = document.createElement("button")
+         b.type = "button"
+         b.className = className
+         b.textContent = text
+         b.setAttribute("aria-label", label)
+         b.addEventListener("click", onClick)
+         return b
+      },
+   }
+})
 vi.mock("./dropdown", () => dropdown)
 
 const SKELETON = `

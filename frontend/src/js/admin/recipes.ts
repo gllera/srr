@@ -3,14 +3,15 @@
 // switches via previewState). Ported from app.js's recipes section.
 
 import { api } from "./api"
-import { el, icon } from "./dom"
+import { el, iconBtn } from "./dom"
 import { renderers, state } from "./store"
 import { previewState, renderPreviewInto } from "./preview"
 import {
    appendRecipeOptions,
    confirmDelete,
+   dataTable,
    dialogRow,
-   makeDialog,
+   lazyDialog,
    pipeTokens,
    saveModal,
    splitScopes,
@@ -30,36 +31,15 @@ function renderRecipes(): void {
       ),
    )
 
-   const table = el(
-      "table",
-      {},
-      el(
-         "thead",
-         {},
-         el(
-            "tr",
-            {},
-            el("th", {}, "name"),
-            el("th", {}, "ingest"),
-            el("th", {}, "pipe"),
-            el("th", {}, "secrets"),
-            el("th", {}, ""),
-         ),
-      ),
-   )
-   const tb = el("tbody", {})
+   const body: HTMLElement[] = []
    for (const name of Object.keys(recipes).sort()) {
       const rcp = recipes[name]
       const actions = el(
          "td",
          { class: "actions" },
-         el(
-            "button",
-            { class: "btn icon", title: "Edit", "aria-label": "Edit", onclick: () => openRecipeModal(name, rcp) },
-            icon("edit"),
-         ),
+         iconBtn("edit", "Edit", () => openRecipeModal(name, rcp)),
       )
-      tb.append(
+      body.push(
          el(
             "tr",
             {},
@@ -75,8 +55,7 @@ function renderRecipes(): void {
          ),
       )
    }
-   table.append(tb)
-   root.append(table)
+   root.append(dataTable(["name", "ingest", "pipe", "secrets", ""], body))
    root.append(previewPanel(recipes))
 }
 
@@ -88,10 +67,9 @@ async function deleteRecipe(name: string): Promise<boolean> {
    )
 }
 
-let recipeDialog: HTMLDialogElement | undefined
+const recipeDialog = lazyDialog({})
 function openRecipeModal(name: string | null, rcp: Recipe | null): void {
-   recipeDialog ||= makeDialog({})
-   const dlg = recipeDialog
+   const dlg = recipeDialog()
    const isEdit = !!name
    const nameIn = el("input", { value: name || "", disabled: isEdit ? "" : null })
    const ingestIn = el("input", { value: (rcp && rcp.ingest) || "", placeholder: "#feed (default)" })

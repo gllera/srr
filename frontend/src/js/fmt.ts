@@ -392,6 +392,10 @@ export function extractPrefetchMedia(html: string, base: URL = PACK_BASE): IPref
          add(images, vid.getAttribute("poster"), true)
          add(videos, vid.getAttribute("src") ?? vid.querySelector("source")?.getAttribute("src") ?? null, false)
       }
+      // The neighbour's whole parsed DOM would otherwise sit in the shared
+      // template until the next parse — and this runs off an idle callback after
+      // every step, over the 300-image articles the prefetch caps exist for.
+      tmpl.innerHTML = ""
    }
    return { images: [...images], videos: [...videos] }
 }
@@ -432,8 +436,16 @@ export function extractAssetKeys(html: string): string[] {
    return [...keys]
 }
 
+// Seconds since `unix`, never negative. The ONE clock basis every age readout
+// shares (timeAgo, timeAgoProse, readerDateline) — the comment on timeAgoProse
+// already asked for that ("the same clock basis as timeAgo so tests can control
+// 'now' uniformly"); this is it, rather than three copies of the expression.
+export function ageSince(unix: number): number {
+   return Math.max(0, Math.floor(Date.now() / 1000) - unix)
+}
+
 export function timeAgo(unix: number): string {
-   const sec = Math.max(0, Math.floor(Date.now() / 1000) - unix)
+   const sec = ageSince(unix)
    if (sec < 60) return `${sec}s`
    if (sec < 3600) return `${Math.floor(sec / 60)}m`
    if (sec < 86400) return `${Math.floor(sec / 3600)}h`
@@ -445,7 +457,7 @@ export function timeAgo(unix: number): string {
 // Prose form of timeAgo: "just now", "1 minute ago", "2 hours ago", etc.
 // Uses the same clock basis as timeAgo so tests can control "now" uniformly.
 export function timeAgoProse(unix: number): string {
-   const sec = Math.max(0, Math.floor(Date.now() / 1000) - unix)
+   const sec = ageSince(unix)
    if (sec < 60) return "just now"
    const n = (count: number, unit: string) => `${count} ${unit}${count === 1 ? "" : "s"} ago`
    if (sec < 3600) return n(Math.floor(sec / 60), "minute")
@@ -464,7 +476,7 @@ const STALE_AFTER_SEC = 3 * 86400
 // nothing honest to report yet.
 export function isStale(unix: number): boolean {
    if (unix <= 0) return false
-   return Math.floor(Date.now() / 1000) - unix >= STALE_AFTER_SEC
+   return ageSince(unix) >= STALE_AFTER_SEC
 }
 
 // Compact article-count readout shared by the config unread badges and the
@@ -516,7 +528,7 @@ const RELATIVE_DATELINE_SEC = 7 * 86400
 // "how long ago". Whichever form isn't shown becomes the hover `title`, so both
 // are always one glance apart. Compact shares the list eyebrow's age vocabulary.
 export function readerDateline(unix: number): { text: string; title: string } {
-   const sec = Math.max(0, Math.floor(Date.now() / 1000) - unix)
+   const sec = ageSince(unix)
    if (sec < RELATIVE_DATELINE_SEC) {
       return { text: sec < 60 ? "just now" : `${timeAgo(unix)} ago`, title: formatDate(unix) }
    }
@@ -533,6 +545,13 @@ export const SRC_COLORS = 8
 // rest of the app). Feed ids are handed out sequentially, so a plain modulo
 // gives every feed a distinct color until a store exceeds SRC_COLORS feeds;
 // the double-modulo keeps a stray negative id in range.
+// Paint an element with a feed's source tint. `[data-src]` + srcColorIndex was
+// spelled out at nine sites across seven modules, every one of them already
+// importing this file.
+export function stampSrc(node: HTMLElement, feedId: number): void {
+   node.dataset.src = String(srcColorIndex(feedId))
+}
+
 export function srcColorIndex(feedId: number): number {
    return ((feedId % SRC_COLORS) + SRC_COLORS) % SRC_COLORS
 }

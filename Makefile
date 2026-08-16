@@ -1,4 +1,4 @@
-.PHONY: verify verify-fe verify-be check-admin-placeholder check-coverage-test fuzz-be lint-fe format-check-fe format-fe test-fe build-fe build-admin smoke-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-race-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design design-shots build-cloud verify-cloud smoke-cloud deploy-cloud build-reader check-reader-config deploy-reader
+.PHONY: verify verify-fe verify-be typecheck-fe check-admin-placeholder check-coverage-test fuzz-be lint-fe format-check-fe format-fe test-fe build-fe build-admin smoke-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-race-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design design-shots build-cloud verify-cloud smoke-cloud deploy-cloud build-reader check-reader-config deploy-reader
 
 SHELL := /bin/bash -e
 
@@ -22,7 +22,7 @@ verify: verify-fe verify-be test-contract
 # smoke-fe runs the built bundle through a fast, Chrome-free boot check — it
 # fails if Parcel dropped a build-time define, the regression that shipped a
 # bundle which threw on boot while every other gate stayed green.
-verify-fe: lint-fe format-check-fe test-fe build-fe smoke-fe
+verify-fe: typecheck-fe lint-fe format-check-fe test-fe build-fe smoke-fe
 # verify-be mirrors verify-fe's gates: vet + gofmt check + lint + build +
 # test + contract freshness.
 verify-be: vet-be format-check-be lint-be build-be test-be generate-check check-admin-placeholder check-coverage-test
@@ -71,7 +71,7 @@ design-shots: frontend/node_modules/.package-lock.json
 frontend/node_modules/.package-lock.json: frontend/package-lock.json
 	cd frontend && npm ci
 
-lint-fe format-check-fe format-fe test-fe smoke-fe dev-fe: frontend/node_modules/.package-lock.json
+typecheck-fe lint-fe format-check-fe format-fe test-fe smoke-fe dev-fe: frontend/node_modules/.package-lock.json
 	cd frontend && npm run $(@:-fe=)
 
 # The npm `build` script wipes ../dist/srrf before running Parcel — Parcel never

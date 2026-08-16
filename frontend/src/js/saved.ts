@@ -17,6 +17,7 @@
 // (vanishingly unlikely) real tag literally named "~saved" is shadowed by it.
 import * as data from "./data"
 import { savedKey, savedTsKey } from "./keys"
+import { readIdSet, stampTsMap, writeIdSet } from "./storage"
 import * as sync from "./sync"
 
 // Per-store key (docs/MULTI-STORE-SPEC.md §4.2): namespaced by the ACTIVE
@@ -32,13 +33,7 @@ export const SAVED_TOKEN = "~saved"
 // user-curated, so the localStorage parse is cheap, and reading fresh stays
 // correct across tabs and keeps tests/`vi.resetModules` free of stale state.
 function readSavedSet(): Set<number> {
-   try {
-      const raw = localStorage.getItem(savedK())
-      const arr = raw ? JSON.parse(raw) : []
-      return new Set(Array.isArray(arr) ? arr.filter((n) => Number.isInteger(n)) : [])
-   } catch {
-      return new Set()
-   }
+   return readIdSet(savedK())
 }
 // Save order (Set iteration == insertion order): the ★ Saved queue read
 // front-to-back. NOT sorted by chronIdx — new saves append to the end.
@@ -96,16 +91,7 @@ export function savedAhead(pos: number): number {
 // Best-effort like every other localStorage write here — a device that cannot
 // stamp degrades to exactly the blob-level ordering it had before.
 function stampSaved(chron: number): void {
-   try {
-      const raw = localStorage.getItem(savedTsK())
-      const parsed: unknown = raw ? JSON.parse(raw) : {}
-      const map =
-         parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-            ? (parsed as Record<string, number>)
-            : {}
-      map[chron] = Math.floor(Date.now() / 1000)
-      localStorage.setItem(savedTsK(), JSON.stringify(map))
-   } catch {}
+   stampTsMap(savedTsK(), [chron])
 }
 
 export function isSaved(chron: number): boolean {
@@ -147,9 +133,7 @@ export function toggleSaved(
    }
    if (nowSaved) set.add(chron)
    else set.delete(chron)
-   try {
-      localStorage.setItem(savedK(), JSON.stringify([...set]))
-   } catch {}
+   writeIdSet(savedK(), set)
    stampSaved(chron)
    sync.pushSoon()
    ctx.onQueueChange()

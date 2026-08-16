@@ -38,12 +38,14 @@ export function available(): boolean {
 // separates words, single-space joined.
 const SEP = /[^\p{L}\p{N}]+/u
 const MARKS = /\p{Mn}+/gu
+// The per-CHARACTER half of the fold, shared with foldTrace below. Both passes
+// must agree code point for code point — foldTrace verifies its own output
+// against fold() and degrades to no highlighting when they disagree — so the
+// transform they share is written once rather than mirrored.
+const foldChars = (s: string): string => s.normalize("NFD").replace(MARKS, "").toLowerCase().replaceAll("ς", "σ")
+
 export function fold(s: string): string {
-   return s
-      .normalize("NFD")
-      .replace(MARKS, "")
-      .toLowerCase()
-      .replaceAll("ς", "σ")
+   return foldChars(s)
       .split(SEP)
       .filter((w) => w.length > 0)
       .join(" ")
@@ -83,7 +85,7 @@ function foldTrace(raw: string): FoldTrace | null {
    for (const cp of raw) {
       const start = i
       i += cp.length
-      const f = cp.normalize("NFD").replace(MARKS, "").toLowerCase().replaceAll("ς", "σ")
+      const f = foldChars(cp)
       for (const c of f) {
          if (SEP_ONE.test(c)) {
             pendingGap = true
@@ -111,8 +113,10 @@ function foldTrace(raw: string): FoldTrace | null {
    return folded === fold(raw) ? { folded, from, to } : null
 }
 
-// One-slot memo: the list folds the SAME query once per rendered row, and the
-// row fill also re-runs on every refresh().
+// One-slot memo: the list folds the SAME query once per rendered row, the row
+// fill re-runs on every refresh(), shortQuery runs on every keystroke and
+// search() on every debounced query — all four ask the same question of the same
+// string, so it is folded and split once.
 let wordsMemo: { q: string; words: string[] } | null = null
 function queryWords(query: string): string[] {
    if (wordsMemo?.q !== query) {
@@ -283,7 +287,7 @@ function deltaShard(st: SearchState): Shard {
       st.deltaShardCache = {
          arts,
          shard: {
-            entries: arts.map((a) => ({ f: a.f, w: a.p || a.a, t: a.t })),
+            entries: arts.map(data.metaCardOf),
             folded: arts.map((a) => fold(a.t ?? "")),
          },
       }
@@ -337,9 +341,7 @@ function matchShard(shard: Shard, baseChron: number, words: string[], max: numbe
 // such a query can't prune shards, so search() scans only the latest tail
 // (the UI shows a hint instead of silently downloading the whole archive).
 export function shortQuery(q: string): boolean {
-   return !fold(q)
-      .split(" ")
-      .some((w) => [...w].length >= SEARCH_GRAM)
+   return !queryWords(q).some((w) => [...w].length >= SEARCH_GRAM)
 }
 
 // search yields batches of hits, newest shard first (latest tail, then
@@ -354,9 +356,7 @@ export async function* search(
    scope?: SearchScope,
    store: Store = activeStore(),
 ): AsyncGenerator<ISearchHit[], void, void> {
-   const words = fold(q)
-      .split(" ")
-      .filter((w) => w.length > 0)
+   const words = queryWords(q)
    if (words.length === 0) return
    // Self-gate: a boot deep-link (#!q:…) reaches search() via nav.fromHash
    // before the interactive availability check runs. When meta bookkeeping

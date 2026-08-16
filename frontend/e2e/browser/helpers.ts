@@ -19,6 +19,17 @@ export const clearDir = (dir: string) => {
 
 export const $rowTitles = (p: Page) =>
    p.$$eval(".srr-list a.srr-row .srr-row-title", (els) => els.map((e) => e.textContent))
+// Click the list row whose title matches. In-page rather than page.click() so it
+// doesn't depend on the row being scrolled into view — the suites drive lists
+// longer than the viewport. Seven suites had this byte-for-byte.
+export const clickRow = (p: Page, title: string) =>
+   p.evaluate((t) => {
+      const row = [...document.querySelectorAll(".srr-list a.srr-row")].find(
+         (e) => e.querySelector(".srr-row-title")?.textContent === t,
+      )
+      ;(row as HTMLElement | undefined)?.click()
+   }, title)
+
 // Viewport-relative top of the row whose title matches (null if absent) — used
 // to assert where the list put a given article (anchored, centered, or held in
 // place across a prepend).

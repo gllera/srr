@@ -41,7 +41,11 @@ function editorKeys(input: HTMLInputElement, commit: () => void, cancel: () => v
    })
 }
 
-function btn(className: string, label: string, text: string, onClick: () => void): HTMLButtonElement {
+// The chrome-button factory — class + accessible name + glyph + click. Exported
+// because it is the shape every icon/text button in the app is built from, and
+// the surfaces that were re-typing it (player queue rows, the lightbox controls)
+// already import this module.
+export function btn(className: string, label: string, text: string, onClick: () => void): HTMLButtonElement {
    const b = document.createElement("button")
    b.type = "button"
    b.className = className
@@ -245,23 +249,32 @@ export interface MountsDialogHooks {
    forget: (mid: string) => void
 }
 
-let mountsDialog: HTMLElement | null = null
-
-function ensureMountsDialog(): HTMLElement {
-   if (mountsDialog) return mountsDialog
-   const d = divEl("srr-mounts-dialog")
-   d.setAttribute("role", "dialog")
-   d.setAttribute("aria-modal", "true")
-   const card = divEl("srr-mounts-card")
-   const h = document.createElement("h2")
-   h.className = "srr-mounts-title"
-   h.textContent = "Stores"
-   card.append(h, divEl("srr-mounts-body"))
-   d.append(card)
-   document.body.appendChild(d)
-   mountsDialog = d
-   return d
+// The lazily-built modal skeleton both JS-only dialogs (Stores, Keyboard
+// shortcuts) share — built on first open so index.html/design.html need no markup
+// for them, then memoized in the returned closure. `label` is the accessible name
+// where it differs from the visible title; passing undefined keeps the element
+// without one, which is what the Stores dialog has always shipped.
+function lazyDialog(cls: string, title: string, label?: string): () => HTMLElement {
+   let dialog: HTMLElement | null = null
+   return () => {
+      if (dialog) return dialog
+      const d = divEl(`srr-${cls}-dialog`)
+      d.setAttribute("role", "dialog")
+      d.setAttribute("aria-modal", "true")
+      if (label) d.setAttribute("aria-label", label)
+      const card = divEl(`srr-${cls}-card`)
+      const h = document.createElement("h2")
+      h.className = `srr-${cls}-title`
+      h.textContent = title
+      card.append(h, divEl(`srr-${cls}-body`))
+      d.append(card)
+      document.body.appendChild(d)
+      dialog = d
+      return d
+   }
 }
+
+const ensureMountsDialog = lazyDialog("mounts", "Stores")
 
 function mountsContent(close: () => void, hooks: MountsDialogHooks, rerender: () => void): DocumentFragment {
    const frag = document.createDocumentFragment()
@@ -395,26 +408,9 @@ const SHORTCUT_GROUPS: ReadonlyArray<{ title: string; rows: ReadonlyArray<[strin
    },
 ]
 
-let shortcutsDialog: HTMLElement | null = null
-
-function ensureShortcutsDialog(): HTMLElement {
-   if (shortcutsDialog) return shortcutsDialog
-   const d = divEl("srr-keys-dialog")
-   d.setAttribute("role", "dialog")
-   d.setAttribute("aria-modal", "true")
-   // The <h2> is the card's visible title AND its accessible name — a role=dialog
-   // without one announces as an unnamed group.
-   d.setAttribute("aria-label", "Keyboard shortcuts")
-   const card = divEl("srr-keys-card")
-   const h = document.createElement("h2")
-   h.className = "srr-keys-title"
-   h.textContent = "Keyboard shortcuts"
-   card.append(h, divEl("srr-keys-body"))
-   d.append(card)
-   document.body.appendChild(d)
-   shortcutsDialog = d
-   return d
-}
+// The <h2> is the card's visible title AND its accessible name — a role=dialog
+// without one announces as an unnamed group.
+const ensureShortcutsDialog = lazyDialog("keys", "Keyboard shortcuts", "Keyboard shortcuts")
 
 function shortcutsContent(close: () => void): DocumentFragment {
    const frag = document.createDocumentFragment()
@@ -486,6 +482,49 @@ export function showShortcutsDialog(): void {
 // menu's status readout), set off by a rule (CSS .srr-ctxmenu-footer).
 export type MenuItem = { label: string; action: () => void; checked?: boolean; disabled?: boolean }
 
+// Wire an anchor to open a context menu on the SECONDARY gesture, cross-platform.
+// The menu's owner owns how a menu is summoned — the wiring encodes three
+// platform facts that must not be re-discovered per anchor: desktop right-click,
+// Android long-press AND Shift+F10 / the menu key on a focused anchor all arrive
+// as `contextmenu`; iOS Safari fires none of them on non-links, so a 500ms
+// touch-hold timer covers it there; and `held` marks a timer-opened menu so the
+// click that follows the finger lift is swallowed (it would otherwise also run
+// the anchor's primary action) and a late native contextmenu (Android fires
+// both) doesn't reopen the menu it just opened — any new touch resets it.
+// `items` derives fresh per open; an empty list falls through to the browser's
+// own menu. Consumers: menus.ts's frontier menu, player.ts's queue-chip menu.
+export function bindPressMenu(anchor: HTMLElement, items: () => MenuItem[]): void {
+   let hold = 0
+   let held = false
+   const open = (): boolean => {
+      const list = items()
+      if (list.length > 0) showContextMenu(anchor, list)
+      return list.length > 0
+   }
+   anchor.addEventListener("contextmenu", (e) => {
+      clearTimeout(hold)
+      if (held || open()) e.preventDefault()
+   })
+   anchor.addEventListener("pointerdown", (e) => {
+      if (e.pointerType !== "touch") return
+      held = false
+      clearTimeout(hold)
+      hold = window.setTimeout(() => (held = open()), 500)
+   })
+   for (const ev of ["pointerup", "pointercancel", "pointerleave"])
+      anchor.addEventListener(ev, () => clearTimeout(hold))
+   anchor.addEventListener(
+      "click",
+      (e) => {
+         if (!held) return
+         held = false
+         e.preventDefault()
+         e.stopImmediatePropagation()
+      },
+      true,
+   )
+}
+
 export function showContextMenu(anchor: HTMLElement, items: MenuItem[], opts?: { footer?: HTMLElement }): void {
    if (activeClose) activeClose() // never stack two opens
    if (items.length === 0) return
@@ -535,25 +574,29 @@ export function showContextMenu(anchor: HTMLElement, items: MenuItem[], opts?: {
          f[next]?.focus()
       }
    }
-   // pointerdown (not click) so the press that dismisses never also activates
-   // whatever sits under the menu; a press inside the menu proceeds to its item.
-   const onDown = (e: Event) => {
-      if (!menu.contains(e.target as Node)) close()
-   }
-   // Capture phase (scroll doesn't bubble). A scroll of the surface UNDER the menu
-   // displaces its anchor — dismiss. But the menu is height-capped + overflow-y:auto
-   // (below), and its OWN overflow scroll reaches this same capture listener
-   // (capture fires for a non-bubbling scroll targeted at a descendant), so ignore
-   // scrolls that originate inside it — otherwise scrolling to the clipped rows
-   // self-closes the menu, defeating the max-height cap.
-   const onScroll = (e: Event) => {
+   // Both dismissals are the same test — "did this happen OUTSIDE the menu?" — so
+   // they are one function registered twice, for two reasons:
+   //
+   //   pointerdown (not click) so the press that dismisses never also activates
+   //   whatever sits under the menu; a press inside the menu proceeds to its item.
+   //
+   //   scroll, capture phase (scroll doesn't bubble). A scroll of the surface UNDER
+   //   the menu displaces its anchor — dismiss. But the menu is height-capped +
+   //   overflow-y:auto (below) and its OWN overflow scroll reaches that same capture
+   //   listener (capture fires for a non-bubbling scroll targeted at a descendant),
+   //   so a scroll originating inside it must be ignored — otherwise scrolling to
+   //   the clipped rows self-closes the menu, defeating the max-height cap.
+   //
+   // removeEventListener matches on (target, type, capture, reference), and the two
+   // registrations differ in the first two, so sharing the reference is exact.
+   const dismissOutside = (e: Event) => {
       if (!menu.contains(e.target as Node)) close()
    }
    const close = () => {
       menu.remove()
       document.removeEventListener("keydown", onKey, true)
-      document.removeEventListener("pointerdown", onDown, true)
-      window.removeEventListener("scroll", onScroll, true)
+      document.removeEventListener("pointerdown", dismissOutside, true)
+      window.removeEventListener("scroll", dismissOutside, true)
       activeClose = null
       anchor.focus()
    }
@@ -580,11 +623,11 @@ export function showContextMenu(anchor: HTMLElement, items: MenuItem[], opts?: {
       menu.style.maxHeight = `${Math.max(0, below)}px`
    }
    document.addEventListener("keydown", onKey, true)
-   document.addEventListener("pointerdown", onDown, true)
+   document.addEventListener("pointerdown", dismissOutside, true)
    // A scroll under the open menu displaces its context — dismiss (capture: the
    // list surface scrolls the window, but a scrollable article body may not bubble;
    // onScroll ignores the menu's own overflow scroll so the height cap stays usable).
-   window.addEventListener("scroll", onScroll, true)
+   window.addEventListener("scroll", dismissOutside, true)
    // Focus the container, not the first item — a pointer-opened menu must not
    // paint an item pre-selected (:focus-visible fires on programmatic focus);
    // the arrows (above) enter the items, so Shift+F10 keyboard flows still work.

@@ -34,6 +34,8 @@
 // desktop session — which is why the 0px override is scoped under body.srr-split.
 // Every pre-existing split rule already reads --split-pane-w and stays untouched.
 import { PANE_HIDDEN_KEY, PANE_WIDTH_KEY } from "./keys"
+// Private mode / quota: the layout still applies, it just will not survive a reload.
+import { lsGet, lsSet } from "./storage"
 
 export const PANE_DEFAULT_W = 380
 export const PANE_MIN_W = 280
@@ -79,23 +81,6 @@ const HIDDEN_CLASS = "srr-pane-hidden"
 // mounts panes without a toolbar, so the sync no-ops instead of the callers
 // having to remember a guard.
 let toggleBtn: HTMLButtonElement | null = null
-
-function lsSet(key: string, value: string | null): void {
-   try {
-      if (value === null) localStorage.removeItem(key)
-      else localStorage.setItem(key, value)
-   } catch {
-      // private mode / quota — the layout still applies, it just won't survive a reload
-   }
-}
-
-function lsGet(key: string): string {
-   try {
-      return localStorage.getItem(key) ?? ""
-   } catch {
-      return ""
-   }
-}
 
 // The ceiling never drops below the floor: on a viewport so narrow that half of
 // it is under PANE_MIN_W, clamp() would otherwise invert and return the max.
@@ -235,8 +220,16 @@ function appliedPaneW(): number {
    return Number.isFinite(raw) && raw > 0 ? raw : storedPaneW()
 }
 
+// The widest this screen allows right now — the ceiling clampPaneW derives from
+// the viewport. It is announced (aria-valuemax) and navigated to (the End key),
+// and those two must name the same number, so the MAX_SAFE_INTEGER "clamp me to
+// the top" idiom is spelled once instead of at both.
+function maxPaneW(): number {
+   return clampPaneW(Number.MAX_SAFE_INTEGER, window.innerWidth)
+}
+
 function publish(grip: HTMLElement): void {
-   const max = clampPaneW(Number.MAX_SAFE_INTEGER, window.innerWidth)
+   const max = maxPaneW()
    grip.setAttribute("aria-valuemin", String(PANE_MIN_W))
    grip.setAttribute("aria-valuemax", String(max))
    grip.setAttribute("aria-valuenow", String(Math.round(appliedPaneW())))
@@ -324,7 +317,7 @@ export function initPane(d: PaneDeps): void {
       if (e.key === "ArrowLeft") next = cur - step
       else if (e.key === "ArrowRight") next = cur + step
       else if (e.key === "Home") next = PANE_MIN_W
-      else if (e.key === "End") next = clampPaneW(Number.MAX_SAFE_INTEGER, window.innerWidth)
+      else if (e.key === "End") next = maxPaneW()
       else if (e.key === "Enter" || e.key === " ") {
          e.preventDefault()
          togglePane()
