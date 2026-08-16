@@ -76,9 +76,12 @@ ${Array.from(
 </channel></rss>`
 
 // Mint the worker's own session (src/session.ts) from outside it: HS256 JWT,
-// `srrsess+jwt`, issuer `srr-reader`. Kept byte-compatible by the suite in
-// test/session.test.ts — this file cannot import the module (it runs in node,
-// against a wrangler dev server) so the shape is spelled out once here.
+// `srrsess+jwt`, issuer `srr-reader`. This file cannot import the module (it
+// runs in node, against a wrangler dev server) so the shape is spelled out once
+// here — and `mints the exact header and claim set the outside minter rebuilds`
+// in test/session.test.ts is what holds the two together. That case decodes a
+// minted token and asserts these literals; a round-trip test could not, because
+// mint and verify move together.
 //
 // `__Host-` is a BROWSER rule about setting a cookie, not about the name: this
 // sends a literal header, so a plain-HTTP dev server accepts it unchanged.
@@ -131,10 +134,16 @@ feedSrv.close()
 
 // 2. Seed the local R2 simulation under the owner's prefix (fresh state each run).
 rmSync(join(WORKER, ".wrangler/state"), { recursive: true, force: true })
-// The LOCAL binary, not `npx`: this loop pays a process spawn per object (a
-// dozen or so on a 5-article store), and npx re-resolves the package on every
-// one of them for nothing. Same binary the dev server below already spawns
-// directly.
+// The LOCAL binary, not `npx`: this loop pays a process spawn per object (six
+// on a 5-article store — db.gz, config.gz, two manifests, one data pack, one
+// seen sidecar), and npx re-resolves the package on every one of them for
+// nothing. Same binary the dev server below spawns.
+//
+// SERIAL on purpose, and it must stay so. Each `wrangler r2 object put --local`
+// is its own workerd process, and miniflare's local R2 is one WAL-mode SQLite
+// file: running these concurrently fails INTERMITTENTLY (measured — 2 of 12
+// objects lost to `r2-rpc statusCode 500` at concurrency 2), which would make
+// the smoke flaky rather than red. The ~12s is the price of that.
 const WRANGLER = join(WORKER, "node_modules/.bin/wrangler")
 for (const f of walk(store)) {
    if (f.startsWith(".")) continue // .locked etc.
@@ -158,7 +167,7 @@ await new Promise((resolve, reject) => {
 // wrapper leaves wrangler and its workerd children alive (that is how the stale
 // server above survived), while a detached child owns a process group the
 // teardown can signal whole.
-const dev = spawn(join(WORKER, "node_modules/.bin/wrangler"), ["dev", "--port", String(PORT)], {
+const dev = spawn(WRANGLER, ["dev", "--port", String(PORT)], {
    cwd: WORKER,
    stdio: ["ignore", "pipe", "pipe"],
    detached: true,

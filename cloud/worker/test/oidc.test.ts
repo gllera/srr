@@ -29,7 +29,10 @@ let keys: CryptoKeyPair
 let publicJwk: object
 
 const stubDiscovery = () =>
-   fetchMock.get(IDP).intercept({ path: `${ISSUER_PATH}/.well-known/openid-configuration` }).reply(200, DISCOVERY)
+   fetchMock
+      .get(IDP)
+      .intercept({ path: `${ISSUER_PATH}/.well-known/openid-configuration` })
+      .reply(200, DISCOVERY)
 
 const stubJwks = (jwk: object = publicJwk) =>
    fetchMock
@@ -38,7 +41,10 @@ const stubJwks = (jwk: object = publicJwk) =>
       .reply(200, { keys: [jwk] })
 
 const stubToken = (body: object, status = 200) =>
-   fetchMock.get(IDP).intercept({ path: `${ISSUER_PATH}/token`, method: "POST" }).reply(status, body)
+   fetchMock
+      .get(IDP)
+      .intercept({ path: `${ISSUER_PATH}/token`, method: "POST" })
+      .reply(status, body)
 
 async function signIdToken(claims: Record<string, unknown>, header: Record<string, unknown> = {}): Promise<string> {
    const h = b64u(utf8.encode(JSON.stringify({ alg: "EdDSA", typ: "JWT", ...header })))

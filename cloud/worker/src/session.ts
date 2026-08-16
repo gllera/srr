@@ -25,8 +25,15 @@ export const SESSION_COOKIE = "__Host-srrsess"
 // purpose — the hostname is operator config that stays out of this public repo,
 // and the claim's whole job is to stop a token minted by some other service
 // that happens to share the key from verifying here.
-const SESSION_ISS = "srr-reader"
-const SESSION_TYP = "srrsess+jwt"
+// Historical and SHARED by both workers on purpose: a cloud-worker session also
+// says `srr-reader`. What separates the two deployments is their distinct
+// SESSION_HMAC_SECRET, not this claim — renaming it would sign out every live
+// session for a label. The claim's job is to stop a token minted by some other
+// service that happens to share the key from verifying here.
+export const SESSION_ISS = "srr-reader"
+export const SESSION_TYP = "srrsess+jwt"
+// The third wire value, named rather than spelled twice (mint and verify).
+export const SESSION_ALG = "HS256"
 
 // Matches the IdP's own session length.
 const MAX_AGE_S = 30 * 24 * 60 * 60
@@ -49,7 +56,7 @@ const hmacKey = memoAsync((secret: string) =>
 /** Mint this worker's session token for an identity the IdP has just vouched for. */
 export async function mintSession(env: SessionConfig, { sub, email }: { sub: string; email: string }): Promise<string> {
    const now = Math.floor(Date.now() / 1000)
-   const header = b64u(utf8.encode(JSON.stringify({ alg: "HS256", typ: SESSION_TYP })))
+   const header = b64u(utf8.encode(JSON.stringify({ alg: SESSION_ALG, typ: SESSION_TYP })))
    const payload = b64u(
       utf8.encode(
          JSON.stringify({
@@ -110,16 +117,11 @@ export async function getSession(request: Request, env: SessionConfig): Promise<
 
    try {
       // Pinned alg and typ, never the header's claim about itself.
-      const jws = openJws(token, "HS256", SESSION_TYP)
+      const jws = openJws(token, SESSION_ALG, SESSION_TYP)
       if (!jws) return null
 
       // Signature before claims: nothing a forged payload says is worth reading.
-      const ok = await crypto.subtle.verify(
-         "HMAC",
-         await hmacKey(env.SESSION_HMAC_SECRET),
-         jws.sig,
-         utf8.encode(jws.input),
-      )
+      const ok = await crypto.subtle.verify("HMAC", await hmacKey(env.SESSION_HMAC_SECRET), jws.sig, jws.signed)
       if (!ok) return null
 
       const claims: unknown = JSON.parse(utf8decode.decode(unb64u(jws.payload)))

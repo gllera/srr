@@ -16,8 +16,8 @@
 import { beginLogin, handleCallback, logout } from "./oidc"
 import { getSession } from "./session"
 import { rosterUid } from "./roster"
-import { classify, policy, type Route } from "./router"
-import { denyAnonymous, jsonNoStore, notFound, runWorker, serveShellAsset, serveShellIndex } from "./shell"
+import { classify, policy, type Route, type StorePolicy } from "./router"
+import { AUTH_CONFIG, denyAnonymous, jsonNoStore, notFound, runWorker, serveShellAsset, serveShellIndex } from "./shell"
 
 export interface Env {
    ASSETS: Fetcher
@@ -45,8 +45,7 @@ export interface Env {
 //
 // Both are inert for SUBRESOURCE loads (<img>, <audio>, fetch): CSP sandbox is
 // only enforced when the response is a document, so the reader is unaffected.
-// Stamped on the way OUT (dispatch), so a cache hit, a fresh R2 read, a 304 and
-// an error body all carry them without each return site remembering to.
+// WHERE this is stamped, and why there, is at the one call site in dispatch.
 function userContent(res: Response): Response {
    const headers = new Headers(res.headers)
    headers.set("x-content-type-options", "nosniff")
@@ -58,7 +57,7 @@ function userContent(res: Response): Response {
 // both workers share; authenticated but unauthorized → 403, which is this
 // worker's alone because it is the only one with a roster to fail.
 const deny = (request: Request, url: URL, authenticated: boolean): Response =>
-   authenticated ? jsonNoStore(403, "forbidden") : denyAnonymous(request, url, "auth required")
+   authenticated ? jsonNoStore(403, "forbidden") : denyAnonymous(request, url)
 
 // Serve a store object from R2 with its stored metadata (the engine stamps
 // Cache-Control/Content-Type at Put — cacheControlForKey). Immutable objects
@@ -101,9 +100,13 @@ async function serveStore(
          // makes it marshal and re-extract four headers that are not there.
          onlyIf: conditional ? request.headers : undefined,
       })
-   } catch {
-      // R2 throws on an unsatisfiable range.
-      return ranged ? new Response("range not satisfiable", { status: 416 }) : jsonNoStore(500, "store error")
+   } catch (e) {
+      // R2 throws on an unsatisfiable range — that one is this handler's to
+      // answer. Anything else is the origin having failed, which the envelope
+      // already owns: rethrowing gets it a logged 503 with a retry-after
+      // instead of a silent 500 nobody sees.
+      if (!ranged) throw e
+      return new Response("range not satisfiable", { status: 416 })
    }
    if (!obj) return notFound()
 
@@ -201,6 +204,10 @@ export default {
          request,
          url,
          env,
+         // The sign-in four PLUS this worker's own: without ROSTER an otherwise
+         // perfect deployment mints valid sessions and then forbids every one
+         // of them, because parseRoster(undefined) authorizes nobody silently.
+         needed: [...AUTH_CONFIG, "ROSTER"],
          methods: p.methods,
          dispatch: () => dispatch(request, env, ctx, route, url, p),
       })
@@ -213,7 +220,7 @@ async function dispatch(
    ctx: ExecutionContext,
    route: Route,
    url: URL,
-   p: ReturnType<typeof policy>,
+   p: StorePolicy,
 ): Promise<Response> {
    // AUTHORIZATION, enforced once. A gated route needs an active roster row, and
    // one that names a tenant needs THAT row. Nothing below re-asks.
@@ -221,19 +228,22 @@ async function dispatch(
    // The session is read only when the policy needs it — the shell's assets and
    // every 404 are public, and they are the bulk of a cold load, so verifying an
    // HMAC for a result nobody reads was work done on the wrong requests.
-   let tenant: string | null = null
    if (p.gate !== "public") {
       const session = await getSession(request, env)
       // A session with no email claim is authorized for NOTHING: this roster
       // keys on the address, so there is no row such an identity could match.
       // handleCallback refuses a token without one, so this is a guard on the
       // type rather than a reachable state — and it fails closed either way.
-      tenant = session?.email ? rosterUid(env.ROSTER, session.email) : null
+      const tenant = session?.email ? rosterUid(env.ROSTER, session.email) : null
       if (tenant === null) return deny(request, url, session !== null)
       if ("uid" in route && route.uid !== tenant) return deny(request, url, true)
+      // Answered HERE, where the gate has just proven `tenant` is a string.
+      // Below it would be `tenant!` — an assertion resting on this block, which
+      // a policy edit could falsify without the compiler noticing.
+      if (route.kind === "root") return Response.redirect(new URL(`/u/${tenant}/`, url).toString(), 302)
    }
 
-   const res = await handle(request, env, ctx, route, url, tenant)
+   const res = await handle(request, env, ctx, route, url)
    // Stamped on the way OUT, once — so a cache hit, a fresh R2 read, a 304 and
    // an error body all carry the guards without each return site remembering to,
    // and a future user-byte route inherits them by answering policy() rather
@@ -241,14 +251,7 @@ async function dispatch(
    return p.userBytes ? userContent(res) : res
 }
 
-async function handle(
-   request: Request,
-   env: Env,
-   ctx: ExecutionContext,
-   route: Route,
-   url: URL,
-   tenant: string | null,
-): Promise<Response> {
+async function handle(request: Request, env: Env, ctx: ExecutionContext, route: Route, url: URL): Promise<Response> {
    switch (route.kind) {
       case "login":
          return beginLogin(request, env)
@@ -256,9 +259,12 @@ async function handle(
          return handleCallback(request, env)
       case "logout":
          return logout(request, env)
+      // Answered in dispatch, inside the gate that computes the tenant it
+      // redirects to. Unreachable while `root` is gated; answered as a miss
+      // rather than shared with the case below, whose `${pathname}/` would
+      // turn "/" into the protocol-relative "//".
       case "root":
-         // policy() gates this route on `tenant`, so it is non-null here.
-         return Response.redirect(new URL(`/u/${tenant!}/`, url).toString(), 302)
+         return notFound()
       case "redirect-slash":
          return Response.redirect(new URL(`${url.pathname}/`, url).toString(), 301)
       case "shell-index":

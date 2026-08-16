@@ -21,8 +21,8 @@
 // exchanges the code server-side once, and then answers from its own cookie.
 import { beginLogin, handleCallback, logout } from "./oidc"
 import { getSession } from "./session"
-import { classifyReader, policyReader, type Gate, type ReaderRoute } from "./router"
-import { denyAnonymous, notFound, runWorker, serveShellAsset, serveShellIndex } from "./shell"
+import { classifyReader, policyReader, type ReaderGate, type ReaderRoute } from "./router"
+import { AUTH_CONFIG, denyAnonymous, notFound, runWorker, serveShellAsset, serveShellIndex } from "./shell"
 
 export interface ReaderEnv {
    ASSETS: Fetcher
@@ -43,6 +43,8 @@ export default {
          request,
          url,
          env,
+         // The sign-in four and nothing else: this worker has no roster.
+         needed: AUTH_CONFIG,
          methods,
          dispatch: () => dispatch(request, env, url, route, gate),
       })
@@ -54,7 +56,7 @@ async function dispatch(
    env: ReaderEnv,
    url: URL,
    route: ReaderRoute,
-   gate: Gate,
+   gate: ReaderGate,
 ): Promise<Response> {
    // Enforced ONCE, from the route's policy rather than from each case
    // remembering to ask. The shell index is the only gated route today; the
@@ -69,7 +71,7 @@ async function dispatch(
    // they are the same published bytes and because the manifest's icons are
    // fetched credential-less too.
    if (gate !== "public" && !(await getSession(request, env))) {
-      return denyAnonymous(request, url, "unauthenticated")
+      return denyAnonymous(request, url)
    }
 
    switch (route.kind) {

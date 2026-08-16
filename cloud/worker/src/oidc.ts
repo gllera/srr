@@ -295,15 +295,14 @@ async function verifyIdToken(
       const candidates = named.length > 0 ? named : all
 
       // Signature before claims: nothing a forged payload says is worth reading.
-      const input = utf8.encode(jws.input)
-      let signed = false
+      let verified = false
       for (const { key } of candidates) {
-         if (await crypto.subtle.verify({ name: "Ed25519" }, key, jws.sig, input)) {
-            signed = true
+         if (await crypto.subtle.verify({ name: "Ed25519" }, key, jws.sig, jws.signed)) {
+            verified = true
             break
          }
       }
-      if (!signed) return null
+      if (!verified) return null
 
       const claims: unknown = JSON.parse(utf8decode.decode(unb64u(jws.payload)))
       if (!isObject(claims)) return null

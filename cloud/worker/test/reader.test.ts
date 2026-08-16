@@ -2,10 +2,10 @@ import { beforeAll, describe, expect, it } from "vitest"
 import { env as poolEnv } from "cloudflare:test"
 import worker, { type ReaderEnv } from "../src/reader"
 import { classifyReader } from "../src/router"
-import { CSP } from "../src/shell"
+import { AUTH_CONFIG, CSP } from "../src/shell"
 import { SESSION_COOKIE, mintSession } from "../src/session"
 import { TEST_OIDC } from "./fixture-env"
-import { api, nav, sessCookie } from "./helpers"
+import { api, bundleJs, nav, sessCookie, shellRefs } from "./helpers"
 
 const BASE = "https://reader.example.com"
 
@@ -95,10 +95,7 @@ describe("the gate", () => {
       // hardcoding a hash the next build changes.
       const idx = await call("/index.html", nav(signedIn))
       const html = await idx.text()
-      const js = html.match(/frontend\.[0-9a-f]+\.js/)?.[0]
-      expect(js).toBeTruthy()
-
-      const res = await call(`/${js}`, api())
+      const res = await call(`/${bundleJs(html)}`, api())
       expect(res.status).toBe(200)
       expect(res.headers.get("cache-control")).toContain("immutable")
       // nosniff BLOCKS a script that is not served as a JS MIME type, so the
@@ -106,9 +103,9 @@ describe("the gate", () => {
       expect(res.headers.get("x-content-type-options")).toBe("nosniff")
       expect(res.headers.get("content-type")).toMatch(/javascript/)
 
-      const sw = html.match(/sw\.[0-9a-f]+\.js/)?.[0]
-      if (sw) expect((await call(`/${sw}`, api())).status).toBe(200)
-
+      // The SW's own reachability is covered unconditionally by the inventory
+      // sweep below; what would be an `if (sw)` here silently passes when the
+      // name stops matching, which is the failure mode, not the control.
       const mf = await call("/manifest.webmanifest", api())
       expect(mf.status).toBe(200)
       expect(mf.headers.get("cache-control")).toBe("no-cache")
@@ -130,19 +127,14 @@ describe("the gate", () => {
       // name shapes, so a Parcel version that emits a chunk under a shape it
       // does not list would be classified `none` and 404 — a reader that boots
       // to a blank page with every gate still green. Ask the shell what it
-      // loads instead of trusting the list.
+      // loads instead of trusting the list. (shellRefs also covers the
+      // importmap, which is the only place the service worker is named.)
       const html = await (await call("/index.html", nav(signedIn))).text()
-      const refs = new Set(
-         [...html.matchAll(/(?:href|src)="\.?\/?([A-Za-z0-9._-]+\.(?:js|css|png|svg|webmanifest))"/g)].map((m) => m[1]),
-      )
-      // The manifest's icons are a second reference list, fetched by the
-      // browser's install UI rather than by the document.
-      const manifest = (await (await call("/manifest.webmanifest", api())).json()) as {
-         icons?: { src: string }[]
-      }
-      for (const i of manifest.icons ?? []) refs.add(i.src.replace(/^\.?\//, ""))
+      const manifest = (await (await call("/manifest.webmanifest", api())).json()) as { icons?: { src: string }[] }
+      const refs = shellRefs(html, manifest)
 
-      expect(refs.size).toBeGreaterThan(0)
+      // Fetched WITHOUT a cookie: every one of these is a sub-resource the
+      // browser may request credential-less, the SW script above all.
       for (const name of refs) {
          expect(`${name} -> ${(await call(`/${name}`, api())).status}`).toBe(`${name} -> 200`)
       }
@@ -185,9 +177,12 @@ describe("method and configuration gates", () => {
    })
 
    it("500s rather than half-works when a deployment value is unset", async () => {
-      for (const k of ["OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "SESSION_HMAC_SECRET"] as const) {
+      // Driven from the source list, not a copy of it: a fifth required value
+      // is then covered the day it is added, rather than leaving this pinning
+      // four of five while reading like it pins all of them.
+      for (const k of AUTH_CONFIG) {
          const res = await call("/", nav(), { [k]: "" })
-         expect(res.status).toBe(500)
+         expect(res.status, k).toBe(500)
       }
    })
 })

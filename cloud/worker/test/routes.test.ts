@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { SELF, env } from "cloudflare:test"
 import { TEST_REVOKED_EMAIL, TEST_T1_EMAIL, TEST_T2_EMAIL } from "./fixture-env"
-import { api, bundleJs, nav, sessCookie } from "./helpers"
+import { api, bundleJs, nav, sessCookie, shellRefs } from "./helpers"
 
 // The roster behind these is bound by vitest.config.ts — see test/fixture-env.ts
 // for why it cannot be declared in this file.
@@ -84,6 +84,26 @@ describe("shell", () => {
       const mf = await SELF.fetch(`${BASE}/u/t1/manifest.webmanifest`, api())
       expect(mf.status).toBe(200)
       expect(mf.headers.get("cache-control")).toBe("no-cache")
+   })
+
+   it("serves every file the shell actually references, under the tenant prefix", async () => {
+      // The cloud worker's stake in this is HIGHER than the reader's: a bundle
+      // name SHELL_ASSET_RE does not list falls through to `store` here rather
+      // than to `none`, so it is looked up in R2 under u/<uid>/<name> — a
+      // different code path, and one that would answer with `sandbox` if a
+      // store ever held that key. It also carries the extra rule the reader has
+      // no need of: a shell asset must be flat (no "/" in the rest).
+      const cookie = await sessCookie(t1email)
+      const html = await (await SELF.fetch(`${BASE}/u/t1/index.html`, nav({ cookie }))).text()
+      const manifest = (await (await SELF.fetch(`${BASE}/u/t1/manifest.webmanifest`, api())).json()) as {
+         icons?: { src: string }[]
+      }
+      for (const name of shellRefs(html, manifest)) {
+         const res = await SELF.fetch(`${BASE}/u/t1/${name}`, api())
+         expect(`${name} -> ${res.status}`).toBe(`${name} -> 200`)
+         // Public bytes, so never the store's egress guards.
+         expect(res.headers.get("content-security-policy"), name).not.toBe("sandbox")
+      }
    })
 
    it("404s unknown top-level paths and bad uids", async () => {
@@ -183,7 +203,7 @@ describe("store objects", () => {
    it("anonymous object fetch 401s (JSON, not a redirect)", async () => {
       const res = await SELF.fetch(`${BASE}/u/t1/db.gz`, api())
       expect(res.status).toBe(401)
-      expect(((await res.json()) as { error: string }).error).toBe("auth required")
+      expect(((await res.json()) as { error: string }).error).toBe("unauthenticated")
    })
 
    it("answers If-None-Match with 304", async () => {

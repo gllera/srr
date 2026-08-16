@@ -2,8 +2,6 @@
 // request envelope around every dispatch, the deny path, and the
 // deployment-config guard. One copy, so a cache rule or a header tweak lands on
 // both origins or on neither.
-import type { OidcConfig } from "./oidc"
-import type { SessionConfig } from "./session"
 import { SHELL_HASHED_RE } from "./router"
 
 export interface ShellEnv {
@@ -14,7 +12,11 @@ export interface ShellEnv {
 // policy as a <meta> fallback, but the header is the real layer here.
 export const CSP = "script-src 'self'; object-src 'none'; base-uri 'none'"
 
-export const notFound = () => new Response("not found", { status: 404 })
+// `no-store` like every other verdict here: 404 and 405 are both on RFC 9110's
+// heuristically-cacheable list, so without it they are the two responses an
+// intermediary may store on its own initiative — and one of them is the answer
+// to a backend-only object class.
+export const notFound = () => new Response("not found", { status: 404, headers: { "cache-control": "no-store" } })
 
 // Internal to denyAnonymous below — the only question either worker ever asked
 // it, now that both deny through one path.
@@ -37,8 +39,10 @@ export const jsonNoStore = (status: number, error: string) =>
 // than the absolute URL a cross-origin login app had to be handed — and oidc.ts
 // validates it again on the way back out (safeNext) instead of trusting the
 // cookie it round-tripped through.
-export function denyAnonymous(request: Request, url: URL, message: string): Response {
-   if (!isNavigation(request)) return jsonNoStore(401, message)
+export function denyAnonymous(request: Request, url: URL): Response {
+   // One verdict, one spelling. The two workers used to answer "auth required"
+   // and "unauthenticated" for the identical condition; nothing reads either.
+   if (!isNavigation(request)) return jsonNoStore(401, "unauthenticated")
    const login = new URL("/auth/login", url.origin)
    login.searchParams.set("next", url.pathname + url.search)
    return new Response(null, {
@@ -51,11 +55,19 @@ export function denyAnonymous(request: Request, url: URL, message: string): Resp
 // put`), so an unset one is a DEPLOYMENT mistake and not a request the user got
 // wrong. Say so with a 500: falling through would send a visitor to a login that
 // cannot complete, and they would meet a redirect loop instead of a cause.
-const NEEDED = ["OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "SESSION_HMAC_SECRET"] as const
+//
+// The CHECK is shared; the LIST is not, and must not be — it belongs to whoever
+// reads the value. These four are the sign-in's, which both workers need. The
+// cloud worker also needs ROSTER, and a shared list could not name it: an env
+// typed for the sign-in cannot see it, so a deploy that forgot it passed this
+// guard, completed the whole handshake, and then answered its own owner
+// `forbidden` forever — the exact half-working deployment the 500 exists for.
+export const AUTH_CONFIG = ["OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "SESSION_HMAC_SECRET"] as const
 
-function missingConfig(env: OidcConfig & SessionConfig): string[] {
-   return NEEDED.filter((k) => !env[k])
-}
+// `object` rather than a keyed type: the two workers' Env shapes differ, and the
+// point of this function is that the LIST is the caller's.
+const missingConfig = (env: object, needed: readonly string[]): string[] =>
+   needed.filter((k) => !(env as Record<string, unknown>)[k])
 
 /**
  * The envelope around every request on both origins: the method gate, the
@@ -70,19 +82,24 @@ export async function runWorker(opts: {
    name: string
    request: Request
    url: URL
-   env: OidcConfig & SessionConfig
+   env: object
+   /** Every deployment value this worker reads — see AUTH_CONFIG above. */
+   needed: readonly string[]
    methods: readonly string[]
    dispatch: () => Promise<Response>
 }): Promise<Response> {
-   const { name, request, url, env, methods, dispatch } = opts
+   const { name, request, url, env, needed, methods, dispatch } = opts
 
    // HEAD is a GET whose body is dropped on the way out, so it is gated as one.
    const method = request.method === "HEAD" ? "GET" : request.method
    if (!methods.includes(method)) {
-      return new Response("method not allowed", { status: 405, headers: { allow: methods.join(", ") } })
+      return new Response("method not allowed", {
+         status: 405,
+         headers: { allow: methods.join(", "), "cache-control": "no-store" },
+      })
    }
 
-   const missing = missingConfig(env)
+   const missing = missingConfig(env, needed)
    if (missing.length > 0) {
       console.log(`${name} is misconfigured — unset: ${missing.join(", ")}`)
       return new Response("misconfigured", { status: 500, headers: { "cache-control": "no-store" } })
@@ -113,6 +130,10 @@ export async function runWorker(opts: {
 // the trap, so the shell sets its own and the store keeps its own.
 export async function serveShellIndex(request: Request, env: ShellEnv): Promise<Response> {
    const res = await env.ASSETS.fetch(new URL("/index.html", request.url))
+   // Our own 404, same as the asset path below: a staged bundle with no
+   // index.html would otherwise hand back the assets layer's raw response with
+   // this function's CSP and cache-control stamped onto it.
+   if (!res.ok) return notFound()
    const headers = new Headers(res.headers)
    headers.set("cache-control", "no-cache")
    headers.set("content-security-policy", CSP)
@@ -129,10 +150,7 @@ export async function serveShellAsset(request: Request, env: ShellEnv, name: str
    const headers = new Headers(res.headers)
    // Which names may be stamped immutable is router.ts's call — it is a fact
    // about the name, and it lives beside the grammar that enumerates them.
-   headers.set(
-      "cache-control",
-      SHELL_HASHED_RE.test(name) ? "public, max-age=31536000, immutable" : "no-cache",
-   )
+   headers.set("cache-control", SHELL_HASHED_RE.test(name) ? "public, max-age=31536000, immutable" : "no-cache")
    // Safe only because these are OUR bundle's bytes under correct types: nosniff
    // BLOCKS a script served as anything but a JS MIME type (and a stylesheet as
    // anything but text/css), so the asset test pins the type alongside it.

@@ -12,6 +12,12 @@
  * Memoize an async result per key for the life of the isolate. A REJECTION
  * evicts itself, so a transient failure does not persist; a resolution is kept
  * forever. `.clear()` exists for tests that need to re-stub the source.
+ *
+ * KEYS MUST BE DEPLOYMENT-DERIVED. The map never evicts a success and has no
+ * bound, so every caller today keys it on env (the issuer, the JWKS URI that
+ * issuer's own document names, the HMAC secret) and holds exactly one entry per
+ * isolate. Keying it on anything a client can vary makes it a memory leak, and
+ * nothing here would fail to compile.
  */
 export function memoAsync<T>(make: (key: string) => Promise<T>) {
    const cache = new Map<string, Promise<T>>()

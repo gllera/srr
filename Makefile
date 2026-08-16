@@ -132,7 +132,18 @@ build-cloud:
 	cp -r dist/srrf/. cloud/worker/public/
 	rm -f cloud/worker/public/_headers
 
+# The two workers share a runtime envelope across two tracked config files, and
+# only ONE of them is ever exercised: the vitest pool loads wrangler.toml (made
+# from the example), never wrangler.reader.toml. So a compatibility_date bump —
+# which the comment beside it ties to the pinned vitest-pool version — or an
+# [assets] change applied to one and not the other ships a reader Worker running
+# semantics no test ever ran. Cheap to state, and it is the drift that survives
+# every other gate here.
+CLOUD_SHARED_TOML := '^(compatibility_date|workers_dev|html_handling|not_found_handling|run_worker_first)'
 verify-cloud: build-cloud cloud/worker/wrangler.toml cloud/worker/node_modules/.package-lock.json
+	@diff <(grep -E $(CLOUD_SHARED_TOML) cloud/worker/wrangler.example.toml) \
+	      <(grep -E $(CLOUD_SHARED_TOML) cloud/worker/wrangler.reader.toml) \
+	  || { echo "wrangler.reader.toml drifted from wrangler.example.toml (runtime pin / assets envelope)"; exit 1; }
 	cd cloud/worker && npm run check && npm run test
 
 # Opt-in end-to-end smoke: real srr store → local R2 → wrangler dev → HTTP

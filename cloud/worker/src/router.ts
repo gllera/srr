@@ -1,8 +1,9 @@
-// The pure path classifier — the product's security boundary. No I/O, no env:
-// index.ts executes these verdicts, tests enumerate them. NOTE: URL pathname
-// normalization (the browser and `new URL` both collapse ../) happens BEFORE
-// this function; the ".." / "//" guards are hygiene on top of R2's flat
-// keyspace, not the actual traversal defense.
+// The pure route table — the product's security boundary, for BOTH workers: two
+// classifiers (path → verdict) and two policies (verdict → gate, methods,
+// egress). No I/O, no env; index.ts and reader.ts execute these verdicts, tests
+// enumerate them. NOTE: URL pathname normalization (the browser and `new URL`
+// both collapse ../) happens BEFORE the classifiers; the ".." / "//" guards are
+// hygiene on top of R2's flat keyspace, not the actual traversal defense.
 export type Route =
    | AuthRoute
    | { kind: "root" }
@@ -92,64 +93,78 @@ export function classify(pathname: string): Route {
 // dispatch remembered to call the authorizer (fail-OPEN by omission — an
 // ungated new route returns 200 with every test still green), methods by an
 // inline boolean per entrypoint, and the guards by wrapping two call sites by
-// hand. One EXHAUSTIVE switch instead: a new route kind is a compile error
-// until all three are answered, and each is then enforced exactly once.
+// hand. One TABLE instead: every route kind answers all three in one place, and
+// each is then enforced exactly once.
+//
+// A TABLE rather than a switch, keyed by `Route["kind"]`, because that makes
+// both directions structural: a missing kind and an unknown kind are each a
+// compile error (a switch only catches the first), and a test can iterate the
+// WHOLE route space instead of re-listing it by hand — which is the same
+// fail-by-omission this table exists to remove, one layer up.
 
 /**
+ * The gate each worker can actually enforce, as its OWN union — one shared
+ * three-value enum would let either worker declare a value its enforcement
+ * point does not implement, and both spell that point `gate !== "public"`.
+ * Concretely: a cloud route marked `session` would be enforced as `tenant` and
+ * 403 exactly the signed-in visitors such a route exists for.
+ *
  * `public` — anyone, including a cookie-less service-worker script fetch.
- * `session` — any authenticated identity.
  * `tenant` — an ACTIVE roster member; on a uid-bearing route, that member.
+ * `session` — any authenticated identity (the reader has no roster to check).
  */
-export type Gate = "public" | "session" | "tenant"
+export type StoreGate = "public" | "tenant"
+export type ReaderGate = "public" | "session"
 
-export interface Policy {
-   gate: Gate
+interface PolicyBase {
    /** The methods this route answers; the 405's `Allow` header reads this array. */
    methods: readonly string[]
 }
 
-const GET = ["GET"] as const
-const GET_POST = ["GET", "POST"] as const
-
-export interface StorePolicy extends Policy {
+export interface StorePolicy extends PolicyBase {
+   gate: StoreGate
    /**
     * Feed-sourced or client-written bytes, served from the app's OWN origin —
-    * index.ts's userContent() guards ride these and only these.
+    * index.ts's userContent() guards ride these and only these. Deliberately
+    * absent from ReaderPolicy: that worker serves no user bytes and has no
+    * userContent(), so the field would be one nothing reads.
     */
    userBytes: boolean
 }
 
-export function policy(route: Route): StorePolicy {
-   switch (route.kind) {
-      case "login":
-      case "callback":
-         return { gate: "public", methods: GET, userBytes: false }
-      case "logout":
-         return { gate: "public", methods: GET_POST, userBytes: false }
-      // Reflects the path it was handed and nothing else, so it needs no
-      // session — and answering it before the gate keeps an anonymous
-      // navigation's redirect chain one hop rather than two.
-      case "redirect-slash":
-         return { gate: "public", methods: GET, userBytes: false }
-      // Deliberately UNAUTHENTICATED: public bytes, and the SW script fetch
-      // carries no cookie (a real hosted-reader outage, 2026-07-29) — gating
-      // it silently breaks SW registration.
-      case "shell-asset":
-         return { gate: "public", methods: GET, userBytes: false }
-      // Backend-only object classes 404 even for the owner (store-visibility
-      // split), so there is nothing here to authorize access TO.
-      case "denied":
-      case "none":
-         return { gate: "public", methods: GET, userBytes: false }
-      case "root":
-      case "shell-index":
-         return { gate: "tenant", methods: GET, userBytes: false }
-      case "sync":
-         return { gate: "tenant", methods: ["GET", "PUT"], userBytes: true }
-      case "store":
-         return { gate: "tenant", methods: GET, userBytes: true }
-   }
+export interface ReaderPolicy extends PolicyBase {
+   gate: ReaderGate
 }
+
+const GET = ["GET"] as const
+const GET_POST = ["GET", "POST"] as const
+const GET_PUT = ["GET", "PUT"] as const
+
+const PUBLIC = { gate: "public", methods: GET, userBytes: false } as const
+
+export const POLICY: Record<Route["kind"], StorePolicy> = {
+   login: PUBLIC,
+   callback: PUBLIC,
+   logout: { gate: "public", methods: GET_POST, userBytes: false },
+   // Reflects the path it was handed and nothing else, so it needs no session —
+   // and answering it before the gate keeps an anonymous navigation's redirect
+   // chain one hop rather than two.
+   "redirect-slash": PUBLIC,
+   // Deliberately UNAUTHENTICATED: public bytes, and the SW script fetch carries
+   // no cookie (a real hosted-reader outage, 2026-07-29) — gating it silently
+   // breaks SW registration.
+   "shell-asset": PUBLIC,
+   // Backend-only object classes 404 even for the owner (store-visibility
+   // split), so there is nothing here to authorize access TO.
+   denied: PUBLIC,
+   none: PUBLIC,
+   root: { gate: "tenant", methods: GET, userBytes: false },
+   "shell-index": { gate: "tenant", methods: GET, userBytes: false },
+   sync: { gate: "tenant", methods: GET_PUT, userBytes: true },
+   store: { gate: "tenant", methods: GET, userBytes: true },
+}
+
+export const policy = (route: Route): StorePolicy => POLICY[route.kind]
 
 // -----------------------------------------------------------------------------
 // The reader worker's classifier (src/reader.ts) — a much smaller surface than
@@ -171,20 +186,18 @@ export function classifyReader(pathname: string): ReaderRoute {
    return { kind: "none" }
 }
 
-export function policyReader(route: ReaderRoute): Policy {
-   switch (route.kind) {
-      case "login":
-      case "callback":
-         return { gate: "public", methods: GET }
-      case "logout":
-         return { gate: "public", methods: GET_POST }
-      // Same SW trap as the cloud worker's, and the same answer.
-      case "shell-asset":
-      case "none":
-         return { gate: "public", methods: GET }
-      // Authentication only — there is no roster here, and the packs this shell
-      // fetches live on another origin that is public by the operator's choice.
-      case "shell-index":
-         return { gate: "session", methods: GET }
-   }
+const READER_PUBLIC = { gate: "public", methods: GET } as const
+
+export const READER_POLICY: Record<ReaderRoute["kind"], ReaderPolicy> = {
+   login: READER_PUBLIC,
+   callback: READER_PUBLIC,
+   logout: { gate: "public", methods: GET_POST },
+   // Same SW trap as the cloud worker's, and the same answer.
+   "shell-asset": READER_PUBLIC,
+   none: READER_PUBLIC,
+   // Authentication only — there is no roster here, and the packs this shell
+   // fetches live on another origin that is public by the operator's choice.
+   "shell-index": { gate: "session", methods: GET },
 }
+
+export const policyReader = (route: ReaderRoute): ReaderPolicy => READER_POLICY[route.kind]

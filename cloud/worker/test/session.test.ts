@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest"
-import { SESSION_COOKIE, clearSessionCookie, getSession, mintSession, sessionCookie } from "../src/session"
+import {
+   SESSION_ALG,
+   SESSION_COOKIE,
+   SESSION_ISS,
+   SESSION_TYP,
+   clearSessionCookie,
+   getSession,
+   mintSession,
+   sessionCookie,
+} from "../src/session"
 import { b64u, unb64u, utf8, utf8decode } from "../src/bytes"
 import { byeCookie, clearByeCookie } from "../src/oidc"
 
@@ -106,6 +115,22 @@ describe("session", () => {
       expect(set).toContain("HttpOnly")
       expect(set).toContain("Secure")
       expect(set).toContain("SameSite=Lax")
+   })
+
+   // The WIRE SHAPE, pinned because something outside this package rebuilds it:
+   // cloud/e2e/smoke.mjs mints a session in plain Node (it cannot import this
+   // module) and its comment claims this suite keeps the two byte-compatible.
+   // That was not true of a round-trip test — mint and verify move together, so
+   // every literal could change with the suite still green, and the smoke would
+   // then fail with every check 401ing, the least diagnosable shape there is.
+   it("mints the exact header and claim set the outside minter rebuilds", async () => {
+      const token = await mintSession(env, { sub: "u_1", email: "a@b.c" })
+      const [h, p] = token.split(".")
+      expect(JSON.parse(utf8decode.decode(unb64u(h)))).toEqual({ alg: SESSION_ALG, typ: SESSION_TYP })
+      const claims = JSON.parse(utf8decode.decode(unb64u(p))) as Record<string, unknown>
+      expect(Object.keys(claims).sort()).toEqual(["email", "exp", "iat", "iss", "sub", "t"])
+      expect(claims.iss).toBe(SESSION_ISS)
+      expect(claims.t).toBe("sess")
    })
 
    it("clears by expiring rather than by emptying alone", () => {

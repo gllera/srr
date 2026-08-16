@@ -6,19 +6,22 @@
 // nothing would notice until it mattered. What stays per-verifier is what
 // genuinely differs: the signature algorithm, and the claims that name the
 // audience (`t`/`iss` here, `aud`/`azp`/`nonce` there).
-import { isObject, unb64u, utf8decode } from "./bytes"
+import { isObject, unb64u, utf8, utf8decode } from "./bytes"
 
 /**
  * Split a compact JWS and pin the header. Returns the still-ENCODED payload
- * alongside the signing input and signature — decoding the payload is the
+ * alongside the signed bytes and the signature — decoding the payload is the
  * caller's job, deliberately, so that nothing a forged payload says can be read
  * before the signature has been checked.
+ *
+ * `signed` is the bytes the signature covers, ready to verify: one owner for
+ * "what was actually signed", rather than a string each verifier re-encodes.
  */
 export function openJws(
    token: string,
    alg: string,
    typ?: string,
-): { header: Record<string, unknown>; payload: string; sig: Uint8Array; input: string } | null {
+): { header: Record<string, unknown>; payload: string; sig: Uint8Array; signed: Uint8Array } | null {
    const parts = token.split(".")
    if (parts.length !== 3) return null
    const [h, p, s] = parts
@@ -35,7 +38,7 @@ export function openJws(
    // `header` rides along for the ONE member a caller may legitimately read
    // before verifying: `kid`, which chooses which key to ask and never whether
    // to trust. The payload stays encoded.
-   return { header, payload: p, sig: unb64u(s), input: `${h}.${p}` }
+   return { header, payload: p, sig: unb64u(s), signed: utf8.encode(`${h}.${p}`) }
 }
 
 /**

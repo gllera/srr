@@ -39,3 +39,41 @@ export const bundleJs = (html: string): string => {
    if (!m) throw new Error("no frontend.<hash>.js referenced by index.html")
    return m[0]
 }
+
+/**
+ * Every file the shipped shell actually asks for — the inventory both workers'
+ * asset suites grade `SHELL_ASSET_RE` against.
+ *
+ * Parcel MINIFIES index.html, so attribute values arrive UNQUOTED (`src=x.js`,
+ * not `src="x.js"`). A quoted-only sweep matched nothing at all and the suite
+ * still passed on the webmanifest's icons alone — i.e. the JS bundle, the CSS,
+ * the touch icon and the service worker could each have fallen out of the
+ * grammar with the net still green, which is exactly the blank-page regression
+ * it exists to catch. Quotes are optional here for that reason.
+ *
+ * The service worker is referenced ONLY from the `<script type=importmap>`
+ * values, never an attribute, so it needs its own pass or it is never swept.
+ */
+export function shellRefs(html: string, manifest: { icons?: { src: string }[] }): Set<string> {
+   const strip = (s: string) => s.replace(/^\.?\//, "")
+   const refs = new Set<string>()
+   const ATTR = /(?:href|src)=(?:"([^"]+)"|'([^']+)'|([^\s"'>]+))/g
+   for (const m of html.matchAll(ATTR)) {
+      const v = strip(m[1] ?? m[2] ?? m[3])
+      if (/\.(?:js|css|png|svg|webmanifest)$/.test(v)) refs.add(v)
+   }
+   // The importmap: `{"imports":{"6LsTv":"./sw.<hash>.js"}}`.
+   const imports = html.match(/<script[^>]*type=["']?importmap["']?[^>]*>([^<]*)</i)
+   if (imports) {
+      for (const v of Object.values(JSON.parse(imports[1]).imports as Record<string, string>)) {
+         refs.add(strip(v))
+      }
+   }
+   for (const i of manifest.icons ?? []) refs.add(strip(i.src))
+
+   // A sweep that finds nothing is a sweep that cannot fail. The shell always
+   // loads at least its own JS and its service worker.
+   if (!refs.has(bundleJs(html))) throw new Error(`shellRefs missed the JS bundle: ${[...refs].join(", ")}`)
+   if (![...refs].some((r) => /^sw\./.test(r))) throw new Error(`shellRefs missed the service worker: ${[...refs]}`)
+   return refs
+}

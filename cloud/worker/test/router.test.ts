@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { classify, classifyReader, policy, policyReader, type Route } from "../src/router"
+import { POLICY, READER_POLICY, classify, classifyReader, policy, policyReader } from "../src/router"
 
 describe("classify", () => {
    it("root", () => {
@@ -123,28 +123,51 @@ describe("policy", () => {
       ]
       for (const p of paths) {
          const route = classify(p)
-         const { gate } = policy(route)
-         if ("uid" in route) expect(gate, `${p} carries a uid`).toBe("tenant")
-         else expect(gate, `${p} carries no uid`).not.toBe("session")
+         if ("uid" in route) expect(policy(route).gate, `${p} carries a uid`).toBe("tenant")
       }
+      // …and the converse, over the whole table: nothing is gated that the
+      // classifier cannot hand a tenant. (`root` is the one tenant-gated kind
+      // with no uid of its own — it exists to LOOK one up.)
+      const gated = Object.entries(POLICY)
+         .filter(([, p]) => p.gate !== "public")
+         .map(([kind]) => kind)
+      expect(gated.sort()).toEqual(["root", "shell-index", "store", "sync"])
    })
 
    it("keeps the store and the sync blob the only user-byte routes", () => {
-      const userByte = (p: string) => policy(classify(p)).userBytes
-      expect(userByte("/u/t1/db.gz")).toBe(true)
-      expect(userByte("/u/t1/sync.json")).toBe(true)
+      // Total, not sampled: userBytes is what carries nosniff + sandbox onto
+      // feed-sourced bytes, so "which routes have it" must be the whole list.
+      const userBytes = Object.entries(POLICY)
+         .filter(([, p]) => p.userBytes)
+         .map(([kind]) => kind)
+      expect(userBytes.sort()).toEqual(["store", "sync"])
       // The shell is a published release artifact, not user bytes — stamping
       // index.ts's `sandbox` on it would stop the reader running at all.
-      expect(userByte("/u/t1/")).toBe(false)
-      expect(userByte("/u/t1/frontend.1294b80e.js")).toBe(false)
-      expect(userByte("/u/t1/config.gz")).toBe(false)
+      expect(policy(classify("/u/t1/")).userBytes).toBe(false)
+      expect(policy(classify("/u/t1/frontend.1294b80e.js")).userBytes).toBe(false)
    })
 
-   it("names PUT and POST on exactly one route each", () => {
-      const every = ["/", "/auth/login", "/auth/callback", "/auth/logout", "/u/t1/", "/u/t1/sync.json", "/u/t1/db.gz"]
-      const writable = (m: string) => every.filter((p) => policy(classify(p)).methods.includes(m))
-      expect(writable("PUT")).toEqual(["/u/t1/sync.json"])
-      expect(writable("POST")).toEqual(["/auth/logout"])
+   // Over the WHOLE table rather than a sample of paths: "the ONE write path in
+   // the product" is a claim about every route there is, and a sampled list
+   // could not notice a new one. Iterating POLICY is what makes it total.
+   it("names PUT and POST on exactly one route kind each", () => {
+      const answering = (m: string) =>
+         Object.entries(POLICY)
+            .filter(([, p]) => p.methods.includes(m))
+            .map(([kind]) => kind)
+      expect(answering("PUT")).toEqual(["sync"])
+      expect(answering("POST")).toEqual(["logout"])
+      expect(answering("DELETE")).toEqual([])
+      // Every route answers GET; the 405's Allow header is this same array.
+      expect(Object.values(POLICY).every((p) => p.methods.includes("GET"))).toBe(true)
+   })
+
+   it("keeps the reader's table to public GETs plus its one gated shell", () => {
+      expect(Object.values(READER_POLICY).filter((p) => p.gate !== "public")).toHaveLength(1)
+      expect(READER_POLICY["shell-index"].gate).toBe("session")
+      // No roster here, so no route may demand one — the type forbids it, and
+      // this says so from the outside.
+      expect(Object.values(READER_POLICY).some((p) => (p.gate as string) === "tenant")).toBe(false)
    })
 
    it("leaves the reader's sign-in routes ungated and its shell gated", () => {
@@ -152,26 +175,6 @@ describe("policy", () => {
       expect(policyReader(classifyReader("/index.html")).gate).toBe("session")
       for (const p of ["/auth/login", "/auth/callback", "/auth/logout", "/sw.586aa705.js", "/nope"]) {
          expect(policyReader(classifyReader(p)).gate, p).toBe("public")
-      }
-   })
-
-   it("gives every route kind a policy — the exhaustive switch, from the outside", () => {
-      const kinds: Route["kind"][] = [
-         "login",
-         "callback",
-         "logout",
-         "root",
-         "redirect-slash",
-         "shell-index",
-         "shell-asset",
-         "sync",
-         "denied",
-         "store",
-         "none",
-      ]
-      for (const kind of kinds) {
-         const p = policy({ kind, uid: "t1", name: "x", key: "k" } as unknown as Route)
-         expect(p.methods, kind).toContain("GET")
       }
    })
 })

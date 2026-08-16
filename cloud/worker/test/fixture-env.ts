@@ -11,9 +11,11 @@
 // (.dev.vars / wrangler.toml, both gitignored): a suite asserting against those
 // would pass or fail depending on whose machine ran it.
 //
-// The issuer is never DIALLED by the suites that use this file — they exercise
-// the gate, which answers out of the session cookie alone. It is bound so the
-// worker's missing-config check passes; oidc.test.ts stubs a real one.
+// Not dialled by the GATE suites — they answer out of the session cookie alone,
+// and the issuer is bound only so the worker's missing-config check passes.
+// oidc.test.ts is the exception: it DERIVES its synthetic IdP from this issuer
+// (origin, path and every fetchMock interceptor), so changing this value moves
+// that suite's stubs with it rather than breaking them.
 export const TEST_OIDC = {
    OIDC_ISSUER: "https://idp.example.com/t/tenant",
    OIDC_CLIENT_ID: "srr-cloud",
