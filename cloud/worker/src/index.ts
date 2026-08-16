@@ -15,9 +15,9 @@
 // and this was the last reader of it left anywhere.
 import { beginLogin, handleCallback, logout } from "./oidc"
 import { getSession } from "./session"
-import { rosterLookup, type RosterEntry } from "./roster"
-import { classify, type Route } from "./router"
-import { isNavigation, missingConfig, notFound, serveShellAsset, serveShellIndex } from "./shell"
+import { rosterUid } from "./roster"
+import { classify, policy, type Route } from "./router"
+import { denyAnonymous, jsonNoStore, notFound, runWorker, serveShellAsset, serveShellIndex } from "./shell"
 
 export interface Env {
    ASSETS: Fetcher
@@ -30,14 +30,6 @@ export interface Env {
    // email → {uid, active} as JSON; see roster.ts for why it is config, not code.
    ROSTER: string
 }
-
-// no-store because the 401 branch of deny() is one of these: an auth verdict
-// that a shared cache could hand to the next visitor is not a verdict.
-const json = (status: number, error: string) =>
-   new Response(JSON.stringify({ error }), {
-      status,
-      headers: { "content-type": "application/json", "cache-control": "no-store" },
-   })
 
 // Store and sync bytes are FEED-SOURCED or client-written, and here they are
 // served from the app's OWN origin under the tenant prefix — the one assumption
@@ -62,25 +54,11 @@ function userContent(res: Response): Response {
    return new Response(res.body, { status: res.status, statusText: res.statusText, headers })
 }
 
-// Anonymous → login redirect (navigations) or 401 (fetches); authenticated
-// but unauthorized → 403. The one deny path every gated route shares.
-//
-// The login is THIS origin's own now, so `next` is a same-origin PATH rather
-// than the absolute URL a cross-origin login app had to be handed — and oidc.ts
-// validates it again on the way back out (safeNext) instead of trusting the
-// cookie it round-tripped through.
-function deny(request: Request, url: URL, authenticated: boolean): Response {
-   if (authenticated) return json(403, "forbidden")
-   if (isNavigation(request)) {
-      const login = new URL("/auth/login", url.origin)
-      login.searchParams.set("next", url.pathname + url.search)
-      return new Response(null, {
-         status: 302,
-         headers: { location: login.toString(), "cache-control": "no-store" },
-      })
-   }
-   return json(401, "auth required")
-}
+// Anonymous → login redirect (navigations) or 401 (fetches), which is the half
+// both workers share; authenticated but unauthorized → 403, which is this
+// worker's alone because it is the only one with a roster to fail.
+const deny = (request: Request, url: URL, authenticated: boolean): Response =>
+   authenticated ? jsonNoStore(403, "forbidden") : denyAnonymous(request, url, "auth required")
 
 // Serve a store object from R2 with its stored metadata (the engine stamps
 // Cache-Control/Content-Type at Put — cacheControlForKey). Immutable objects
@@ -118,11 +96,14 @@ async function serveStore(
    try {
       obj = await env.STORE.get(objectKey, {
          range: ranged ? request.headers : undefined,
-         onlyIf: request.headers,
+         // Only when there is one to evaluate: handing R2 the whole header set
+         // on an unconditional GET — the overwhelming majority of pack fetches —
+         // makes it marshal and re-extract four headers that are not there.
+         onlyIf: conditional ? request.headers : undefined,
       })
    } catch {
       // R2 throws on an unsatisfiable range.
-      return ranged ? new Response("range not satisfiable", { status: 416 }) : json(500, "store error")
+      return ranged ? new Response("range not satisfiable", { status: 416 }) : jsonNoStore(500, "store error")
    }
    if (!obj) return notFound()
 
@@ -145,22 +126,15 @@ async function serveStore(
    // Gate on the REQUEST being ranged: some runtimes populate obj.range with
    // the full extent on a plain get, which must stay a 200.
    if (ranged && r) {
-      let start: number
-      let end: number
-      if ("suffix" in r && r.suffix !== undefined) {
-         start = obj.size - r.suffix
-         end = obj.size - 1
-      } else {
-         const rr = r as { offset?: number; length?: number }
-         start = rr.offset ?? 0
-         end = rr.length !== undefined ? start + rr.length - 1 : obj.size - 1
-      }
-      headers.set("content-range", `bytes ${start}-${end}/${obj.size}`)
+      headers.set("content-range", contentRange(r, obj.size))
       status = 206
    }
 
    const res = new Response(obj.body, { status, headers })
-   if (status === 200 && (headers.get("cache-control") || "").includes("immutable")) {
+   // NOT on HEAD: clone() tees the stream, so the cache put would pull the whole
+   // object out of R2 and write it — a full object transfer triggered by a
+   // request whose body is discarded on the way out.
+   if (status === 200 && request.method !== "HEAD" && (headers.get("cache-control") || "").includes("immutable")) {
       try {
          ctx.waitUntil(caches.default.put(request.url, res.clone()))
       } catch {
@@ -170,9 +144,25 @@ async function serveStore(
    return res
 }
 
+// R2 reports a satisfied range in one of two shapes. Pure arithmetic, lifted
+// out of the I/O around it so it can be read — and tested — on its own.
+function contentRange(r: R2Range, size: number): string {
+   if ("suffix" in r && r.suffix !== undefined) return `bytes ${size - r.suffix}-${size - 1}/${size}`
+   const { offset = 0, length } = r as { offset?: number; length?: number }
+   return `bytes ${offset}-${length !== undefined ? offset + length - 1 : size - 1}/${size}`
+}
+
 // The ONE write path in the product: the reader's cross-device sync blob
-// (sync.ts GET-or-404 / PUT contract). Size-capped; stored no-cache.
-const SYNC_MAX_BYTES = 256 * 1024
+// (sync.ts GET-or-404 / PUT contract).
+//
+// Both numbers below MIRROR backend/serve_sync.go, which serves the same
+// contract to the same reader on a self-hosted `srr serve`. They had drifted —
+// a 256 KiB cap here against `maxSyncBody`'s 1 MiB there, so a profile that
+// round-tripped self-hosted 413'd on cloud; and `no-cache` here against the
+// `no-store` that file argues for, which is the one that matters: the blob is
+// mutable device state and a proxy sits between reader and origin in every real
+// deployment, so permitting storage at all is the hole.
+const SYNC_MAX_BYTES = 1 << 20
 
 async function serveSync(request: Request, env: Env, uid: string): Promise<Response> {
    const key = `u/${uid}/sync.json`
@@ -182,11 +172,11 @@ async function serveSync(request: Request, env: Env, uid: string): Promise<Respo
       // Content-Length is a hint, not the authority — absent under chunked
       // encoding and a client may simply lie — so the post-buffer check stays.
       const declared = Number(request.headers.get("content-length"))
-      if (Number.isFinite(declared) && declared > SYNC_MAX_BYTES) return json(413, "sync blob too large")
+      if (Number.isFinite(declared) && declared > SYNC_MAX_BYTES) return jsonNoStore(413, "sync blob too large")
       const body = await request.arrayBuffer()
-      if (body.byteLength > SYNC_MAX_BYTES) return json(413, "sync blob too large")
+      if (body.byteLength > SYNC_MAX_BYTES) return jsonNoStore(413, "sync blob too large")
       await env.STORE.put(key, body, {
-         httpMetadata: { contentType: "application/json", cacheControl: "no-cache" },
+         httpMetadata: { contentType: "application/json", cacheControl: "no-store" },
       })
       return new Response(null, { status: 204 })
    }
@@ -194,7 +184,7 @@ async function serveSync(request: Request, env: Env, uid: string): Promise<Respo
    if (!obj) return notFound()
    const headers = new Headers()
    obj.writeHttpMetadata(headers)
-   headers.set("cache-control", "no-cache")
+   headers.set("cache-control", "no-store")
    return new Response(obj.body, { status: 200, headers })
 }
 
@@ -202,46 +192,18 @@ export default {
    async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
       const url = new URL(request.url)
       const route = classify(url.pathname)
-
-      // Method gate: GET/HEAD everywhere, PUT only on sync, POST only on logout.
-      // Matched by METHOD as well as path, so nothing else can be written to.
-      const method = request.method === "HEAD" ? "GET" : request.method
-      const writable = (method === "PUT" && route.kind === "sync") || (method === "POST" && route.kind === "logout")
-      if (method !== "GET" && !writable) {
-         return new Response("method not allowed", { status: 405 })
-      }
-
-      const missing = missingConfig(env)
-      if (missing.length > 0) {
-         console.log(`cloud worker is misconfigured — unset: ${missing.join(", ")}`)
-         return new Response("misconfigured", { status: 500, headers: { "cache-control": "no-store" } })
-      }
-
-      const session = await getSession(request, env)
-      // A session with no email claim is authorized for NOTHING: this roster
-      // keys on the address, so there is no row such an identity could match.
-      // handleCallback refuses a token without one, so this is a guard on the
-      // type rather than a reachable state — and it fails closed either way.
-      const entry: RosterEntry | null = session?.email ? rosterLookup(env.ROSTER, session.email) : null
-      const authorizedFor = (uid: string) => entry !== null && entry.uid === uid
-
-      // The sign-in legs reach the IdP, so they can fail for reasons that are
-      // nobody's fault and nothing's bug: discovery unreachable, JWKS 503, a
-      // network blip. Unhandled, that is an exception out of the fetch handler —
-      // the runtime's bare 500, no log line, and a visitor who cannot tell it
-      // from a broken deployment. 503 says "try again" and means it.
-      let res: Response
-      try {
-         res = await dispatch(request, env, ctx, route, url, session !== null, entry, authorizedFor)
-      } catch (e) {
-         console.log(`cloud worker: ${url.pathname} failed: ${e instanceof Error ? e.message : String(e)}`)
-         res = new Response("temporarily unavailable", {
-            status: 503,
-            headers: { "cache-control": "no-store", "retry-after": "30" },
-         })
-      }
-      // HEAD: same logic, body stripped (R2/asset bodies are cheap at this scale).
-      return request.method === "HEAD" ? new Response(null, { status: res.status, headers: res.headers }) : res
+      // Access, methods and egress guards all come off the route's policy, so
+      // the method gate and the 405's Allow header read the same array and the
+      // gate below cannot be forgotten for a route added later.
+      const p = policy(route)
+      return runWorker({
+         name: "cloud worker",
+         request,
+         url,
+         env,
+         methods: p.methods,
+         dispatch: () => dispatch(request, env, ctx, route, url, p),
+      })
    },
 } satisfies ExportedHandler<Env>
 
@@ -251,9 +213,41 @@ async function dispatch(
    ctx: ExecutionContext,
    route: Route,
    url: URL,
-   authenticated: boolean,
-   entry: RosterEntry | null,
-   authorizedFor: (uid: string) => boolean,
+   p: ReturnType<typeof policy>,
+): Promise<Response> {
+   // AUTHORIZATION, enforced once. A gated route needs an active roster row, and
+   // one that names a tenant needs THAT row. Nothing below re-asks.
+   //
+   // The session is read only when the policy needs it — the shell's assets and
+   // every 404 are public, and they are the bulk of a cold load, so verifying an
+   // HMAC for a result nobody reads was work done on the wrong requests.
+   let tenant: string | null = null
+   if (p.gate !== "public") {
+      const session = await getSession(request, env)
+      // A session with no email claim is authorized for NOTHING: this roster
+      // keys on the address, so there is no row such an identity could match.
+      // handleCallback refuses a token without one, so this is a guard on the
+      // type rather than a reachable state — and it fails closed either way.
+      tenant = session?.email ? rosterUid(env.ROSTER, session.email) : null
+      if (tenant === null) return deny(request, url, session !== null)
+      if ("uid" in route && route.uid !== tenant) return deny(request, url, true)
+   }
+
+   const res = await handle(request, env, ctx, route, url, tenant)
+   // Stamped on the way OUT, once — so a cache hit, a fresh R2 read, a 304 and
+   // an error body all carry the guards without each return site remembering to,
+   // and a future user-byte route inherits them by answering policy() rather
+   // than by finding this line.
+   return p.userBytes ? userContent(res) : res
+}
+
+async function handle(
+   request: Request,
+   env: Env,
+   ctx: ExecutionContext,
+   route: Route,
+   url: URL,
+   tenant: string | null,
 ): Promise<Response> {
    switch (route.kind) {
       case "login":
@@ -263,27 +257,21 @@ async function dispatch(
       case "logout":
          return logout(request, env)
       case "root":
-         if (entry) return Response.redirect(new URL(`/u/${entry.uid}/`, url).toString(), 302)
-         return deny(request, url, authenticated)
+         // policy() gates this route on `tenant`, so it is non-null here.
+         return Response.redirect(new URL(`/u/${tenant!}/`, url).toString(), 302)
       case "redirect-slash":
          return Response.redirect(new URL(`${url.pathname}/`, url).toString(), 301)
       case "shell-index":
-         if (!authorizedFor(route.uid)) return deny(request, url, authenticated)
          return serveShellIndex(request, env)
       case "shell-asset":
-         // Deliberately UNAUTHENTICATED: public bytes, and the SW script fetch
-         // carries no cookie (a real hosted-reader outage, 2026-07-29) — gating
-         // it silently breaks SW registration.
          return serveShellAsset(request, env, route.name)
       case "sync":
-         if (!authorizedFor(route.uid)) return deny(request, url, authenticated)
-         return userContent(await serveSync(request, env, route.uid))
+         return serveSync(request, env, route.uid)
       case "denied":
          // Backend-only object classes 404 even for the owner (store-visibility split).
          return notFound()
       case "store":
-         if (!authorizedFor(route.uid)) return deny(request, url, authenticated)
-         return userContent(await serveStore(request, env, ctx, route.uid, route.key))
+         return serveStore(request, env, ctx, route.uid, route.key)
       case "none":
          return notFound()
    }

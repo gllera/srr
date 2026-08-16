@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { SELF, env } from "cloudflare:test"
 import { TEST_REVOKED_EMAIL, TEST_T1_EMAIL, TEST_T2_EMAIL } from "./fixture-env"
-import { sessCookie } from "./helpers"
+import { api, bundleJs, nav, sessCookie } from "./helpers"
 
 // The roster behind these is bound by vitest.config.ts — see test/fixture-env.ts
 // for why it cannot be declared in this file.
@@ -9,13 +9,6 @@ const t1email = TEST_T1_EMAIL
 const t2email = TEST_T2_EMAIL
 
 const BASE = "https://cloud.example.com"
-
-// A browser navigation (Sec-Fetch-Mode: navigate) vs a programmatic fetch.
-const nav = (extra: Record<string, string> = {}) => ({
-   headers: { "sec-fetch-mode": "navigate", accept: "text/html", ...extra },
-   redirect: "manual" as const,
-})
-const api = (extra: Record<string, string> = {}) => ({ headers: { ...extra }, redirect: "manual" as const })
 
 describe("GET /", () => {
    it("redirects an authenticated roster member to their tenant root", async () => {
@@ -81,9 +74,7 @@ describe("shell", () => {
    it("serves shell sub-resource assets WITHOUT a cookie (the SW-script trap)", async () => {
       // Discover the real hashed names from the staged bundle via index.html.
       const idx = await SELF.fetch(`${BASE}/u/t1/index.html`, nav({ cookie: await sessCookie(t1email) }))
-      const html = await idx.text()
-      const js = html.match(/frontend\.[0-9a-f]+\.js/)![0]
-      const res = await SELF.fetch(`${BASE}/u/t1/${js}`, api())
+      const res = await SELF.fetch(`${BASE}/u/t1/${bundleJs(await idx.text())}`, api())
       expect(res.status).toBe(200)
       expect(res.headers.get("cache-control")).toContain("immutable")
       // nosniff BLOCKS a script that is not served as a JS MIME type, so the
@@ -141,6 +132,23 @@ describe("method gate", () => {
       ] as const) {
          const res = await SELF.fetch(`${BASE}${path}`, { method, headers: { cookie }, redirect: "manual" })
          expect(res.status, `${method} ${path}`).toBe(405)
+      }
+   })
+
+   it("says which methods it allows (RFC 9110 requires it on a 405)", async () => {
+      // This worker used to omit the header while the reader sent it — the two
+      // handlers were copies and each suite pinned only its own side. They now
+      // share one envelope, and the Allow header reads the same policy array
+      // the gate itself does.
+      const cookie = await sessCookie(t1email)
+      for (const [path, allow] of [
+         ["/u/t1/db.gz", "GET"],
+         ["/u/t1/sync.json", "GET, PUT"],
+         ["/auth/logout", "GET, POST"],
+      ] as const) {
+         const res = await SELF.fetch(`${BASE}${path}`, { method: "DELETE", headers: { cookie }, redirect: "manual" })
+         expect(res.status, path).toBe(405)
+         expect(res.headers.get("allow"), path).toBe(allow)
       }
    })
 })
@@ -248,7 +256,7 @@ describe("sync.json", () => {
       expect(res.status).toBe(404)
    })
 
-   it("PUT then GET round-trips the blob, no-cache", async () => {
+   it("PUT then GET round-trips the blob, no-store", async () => {
       const blob = JSON.stringify({ v: 2, ts: 123, seen: {} })
       const cookie = await sessCookie(t1email)
       const put = await SELF.fetch(`${BASE}/u/t1/sync.json`, {
@@ -259,15 +267,22 @@ describe("sync.json", () => {
       expect(put.status).toBe(204)
       const get = await SELF.fetch(`${BASE}/u/t1/sync.json`, api({ cookie }))
       expect(get.status).toBe(200)
-      expect(get.headers.get("cache-control")).toBe("no-cache")
+      // no-store, not no-cache: the blob is mutable device state and a proxy
+      // sits between reader and origin in every real deployment. Mirrors
+      // backend/serve_sync.go, which serves this same contract self-hosted.
+      expect(get.headers.get("cache-control")).toBe("no-store")
       expect(get.headers.get("content-type")).toBe("application/json")
       expect(await get.text()).toBe(blob)
    })
 
+   // The cap mirrors backend/serve_sync.go's maxSyncBody (1 MiB) so a profile
+   // that round-trips on a self-hosted `srr serve` does not 413 on cloud.
+   const OVER_CAP = (1 << 20) + 1
+
    it("413s a declared oversize Content-Length, before the body is buffered", async () => {
       const res = await SELF.fetch(`${BASE}/u/t1/sync.json`, {
          method: "PUT",
-         headers: { cookie: await sessCookie(t1email), "content-length": String(256 * 1024 + 1) },
+         headers: { cookie: await sessCookie(t1email), "content-length": String(OVER_CAP) },
          body: "{}",
       })
       expect(res.status).toBe(413)
@@ -277,9 +292,22 @@ describe("sync.json", () => {
       const res = await SELF.fetch(`${BASE}/u/t1/sync.json`, {
          method: "PUT",
          headers: { cookie: await sessCookie(t1email) },
-         body: "x".repeat(256 * 1024 + 1),
+         body: "x".repeat(OVER_CAP),
       })
       expect(res.status).toBe(413)
+   })
+
+   it("accepts a blob the self-hosted endpoint would accept", async () => {
+      // The regression the two caps drifting produced: sized between the old
+      // 256 KiB and the shared 1 MiB, this round-tripped self-hosted and 413'd
+      // here.
+      const blob = JSON.stringify({ v: 2, ts: 1, pad: "x".repeat(512 * 1024) })
+      const res = await SELF.fetch(`${BASE}/u/t1/sync.json`, {
+         method: "PUT",
+         headers: { cookie: await sessCookie(t1email) },
+         body: blob,
+      })
+      expect(res.status).toBe(204)
    })
 
    it("requires auth and the right tenant", async () => {

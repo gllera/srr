@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { SESSION_COOKIE, clearSessionCookie, getSession, mintSession, sessionCookie } from "../src/session"
 import { b64u, unb64u, utf8, utf8decode } from "../src/bytes"
+import { byeCookie, clearByeCookie } from "../src/oidc"
 
 const env = { SESSION_HMAC_SECRET: "test-hmac-secret" }
 
@@ -87,15 +88,28 @@ describe("session", () => {
       expect(await getSession(withCookie(token), { SESSION_HMAC_SECRET: "" })).toBeNull()
    })
 
-   it("scopes its cookie host-only and clears it the same way", () => {
-      const set = sessionCookie("tok")
+   // EVERY cookie this product sets, not just the session's. They all run
+   // through session.ts's setCookie now, and this is what that buys: the flow
+   // cookie (whose loss is a sign-in that cannot complete) and the bye marker
+   // (whose loss is a silent re-auth regression) used to spell the attribute
+   // string by hand and were pinned by nothing. A `__Host-` cookie missing
+   // Path=/ or Secure is DROPPED silently — no error, no warning.
+   it.each([
+      ["session", sessionCookie("tok")],
+      ["session cleared", clearSessionCookie()],
+      ["bye", byeCookie()],
+      ["bye cleared", clearByeCookie()],
+   ])("scopes the %s cookie host-only", (_name, set) => {
       expect(set).toContain("__Host-")
-      // `__Host-` is only honoured with Path=/ and no Domain, and a browser
-      // silently ignores the whole Set-Cookie otherwise.
       expect(set).toContain("Path=/")
       expect(set).not.toContain("Domain")
       expect(set).toContain("HttpOnly")
       expect(set).toContain("Secure")
+      expect(set).toContain("SameSite=Lax")
+   })
+
+   it("clears by expiring rather than by emptying alone", () => {
       expect(clearSessionCookie()).toContain("Max-Age=0")
+      expect(clearByeCookie()).toContain("Max-Age=0")
    })
 })

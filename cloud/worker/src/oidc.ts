@@ -16,7 +16,18 @@
 // is pinned, and the token's own header gets no vote.**
 // -----------------------------------------------------------------------------
 import { b64u, isObject, random, unb64u, utf8, utf8decode } from "./bytes"
-import { clearSessionCookie, cookieValue, hasCookie, mintSession, sessionCookie, type SessionConfig } from "./session"
+import { openJws, timeAndSubjectOk } from "./jws"
+import { memoAsync } from "./memo"
+import {
+   clearCookie,
+   clearSessionCookie,
+   cookieValue,
+   hasCookie,
+   mintSession,
+   sessionCookie,
+   setCookie,
+   type SessionConfig,
+} from "./session"
 
 const SCOPE = "openid email"
 
@@ -55,9 +66,9 @@ const FLOW_MAX_AGE_S = 15 * 60
 const BYE_COOKIE = "__Host-srrbye"
 const BYE_MAX_AGE_S = 60 * 60
 
-export const byeCookie = () => `${BYE_COOKIE}=1; Max-Age=${BYE_MAX_AGE_S}; Path=/; HttpOnly; Secure; SameSite=Lax`
+export const byeCookie = () => setCookie(BYE_COOKIE, "1", BYE_MAX_AGE_S)
 
-export const clearByeCookie = () => `${BYE_COOKIE}=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax`
+export const clearByeCookie = () => clearCookie(BYE_COOKIE)
 
 export interface OidcConfig {
    OIDC_ISSUER: string
@@ -82,79 +93,56 @@ const s256 = async (v: string) => b64u(await crypto.subtle.digest("SHA-256", utf
 
 // Cached for the life of the isolate. The document changes about as often as the
 // IdP is redeployed, and a cold isolate paying one fetch on its first login is
-// the entire cost of not hardcoding endpoints. A rejection is evicted so a
-// transient failure does not persist for the life of the isolate.
-const discoveryCache = new Map<string, Promise<Discovery>>()
-const jwksCache = new Map<string, Promise<VerifyKey[]>>()
-
-/** Test-only: drop the isolate-lifetime caches so a suite can re-stub the IdP. */
-export function resetOidcCaches(): void {
-   discoveryCache.clear()
-   jwksCache.clear()
-}
-
-function discover(issuer: string): Promise<Discovery> {
-   let hit = discoveryCache.get(issuer)
-   if (hit === undefined) {
-      hit = (async () => {
-         const r = await fetch(`${issuer}/.well-known/openid-configuration`)
-         if (!r.ok) throw new Error(`discovery ${r.status}`)
-         const doc: unknown = await r.json()
-         if (!isObject(doc) || doc.issuer !== issuer) throw new Error("issuer mismatch")
-         for (const k of ["authorization_endpoint", "token_endpoint", "jwks_uri"]) {
-            if (typeof doc[k] !== "string") throw new Error(`discovery missing ${k}`)
-         }
-         return doc as unknown as Discovery
-      })().catch((e: unknown) => {
-         discoveryCache.delete(issuer)
-         throw e
-      })
-      discoveryCache.set(issuer, hit)
+// the entire cost of not hardcoding endpoints. memoAsync evicts a REJECTION, so
+// a transient failure does not persist for the life of the isolate.
+const discover = memoAsync(async (issuer: string): Promise<Discovery> => {
+   const r = await fetch(`${issuer}/.well-known/openid-configuration`)
+   if (!r.ok) throw new Error(`discovery ${r.status}`)
+   const doc: unknown = await r.json()
+   if (!isObject(doc) || doc.issuer !== issuer) throw new Error("issuer mismatch")
+   for (const k of ["authorization_endpoint", "token_endpoint", "jwks_uri"]) {
+      if (typeof doc[k] !== "string") throw new Error(`discovery missing ${k}`)
    }
-   return hit
-}
+   return doc as unknown as Discovery
+})
 
 // The Ed25519 verification keys the IdP publishes. Rebuilt from only the members
 // that matter, so a stray `alg`/`use`/`key_ops` cannot ride along into the
 // import — and a private JWK is refused rather than quietly making this worker
 // an issuer.
-function verifyKeys(uri: string): Promise<VerifyKey[]> {
-   let hit = jwksCache.get(uri)
-   if (hit === undefined) {
-      hit = (async () => {
-         const r = await fetch(uri)
-         if (!r.ok) throw new Error(`jwks ${r.status}`)
-         const doc: unknown = await r.json()
-         if (!isObject(doc) || !Array.isArray(doc.keys)) throw new Error("jwks shape")
-         const out: VerifyKey[] = []
-         for (const jwk of doc.keys as unknown[]) {
-            if (!isObject(jwk)) continue
-            if (jwk.kty !== "OKP" || jwk.crv !== "Ed25519" || typeof jwk.x !== "string") continue
-            if (jwk.d !== undefined) throw new Error("refusing a private JWK from jwks_uri")
-            try {
-               out.push({
-                  kid: typeof jwk.kid === "string" ? jwk.kid : null,
-                  key: await crypto.subtle.importKey(
-                     "jwk",
-                     { crv: "Ed25519", kty: "OKP", x: jwk.x },
-                     { name: "Ed25519" },
-                     false,
-                     ["verify"],
-                  ),
-               })
-            } catch {
-               // One unusable key must not take the whole key set down.
-            }
-         }
-         if (out.length === 0) throw new Error("no usable EdDSA keys")
-         return out
-      })().catch((e: unknown) => {
-         jwksCache.delete(uri)
-         throw e
-      })
-      jwksCache.set(uri, hit)
+const verifyKeys = memoAsync(async (uri: string): Promise<VerifyKey[]> => {
+   const r = await fetch(uri)
+   if (!r.ok) throw new Error(`jwks ${r.status}`)
+   const doc: unknown = await r.json()
+   if (!isObject(doc) || !Array.isArray(doc.keys)) throw new Error("jwks shape")
+   const out: VerifyKey[] = []
+   for (const jwk of doc.keys as unknown[]) {
+      if (!isObject(jwk)) continue
+      if (jwk.kty !== "OKP" || jwk.crv !== "Ed25519" || typeof jwk.x !== "string") continue
+      if (jwk.d !== undefined) throw new Error("refusing a private JWK from jwks_uri")
+      try {
+         out.push({
+            kid: typeof jwk.kid === "string" ? jwk.kid : null,
+            key: await crypto.subtle.importKey(
+               "jwk",
+               { crv: "Ed25519", kty: "OKP", x: jwk.x },
+               { name: "Ed25519" },
+               false,
+               ["verify"],
+            ),
+         })
+      } catch {
+         // One unusable key must not take the whole key set down.
+      }
    }
-   return hit
+   if (out.length === 0) throw new Error("no usable EdDSA keys")
+   return out
+})
+
+/** Test-only: drop the isolate-lifetime caches so a suite can re-stub the IdP. */
+export function resetOidcCaches(): void {
+   discover.clear()
+   verifyKeys.clear()
 }
 
 // --------------------------------------------------------------- the flow ----
@@ -192,10 +180,9 @@ function readFlow(request: Request): Flow | null {
    return null
 }
 
-const flowCookie = (f: Flow) =>
-   `${FLOW_COOKIE}=${packFlow(f)}; Max-Age=${FLOW_MAX_AGE_S}; Path=/; HttpOnly; Secure; SameSite=Lax`
+const flowCookie = (f: Flow) => setCookie(FLOW_COOKIE, packFlow(f), FLOW_MAX_AGE_S)
 
-const clearFlow = () => `${FLOW_COOKIE}=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax`
+const clearFlow = () => clearCookie(FLOW_COOKIE)
 
 // Where to land afterwards. Caller-controlled and destined for a Location
 // header, so it is validated here rather than trusted later: a same-origin
@@ -295,40 +282,32 @@ async function verifyIdToken(
 ): Promise<Record<string, unknown> | null> {
    try {
       if (typeof idToken !== "string") return null
-      const parts = idToken.split(".")
-      if (parts.length !== 3) return null
-      const [h, p, s] = parts
-
-      const header: unknown = JSON.parse(utf8decode.decode(unb64u(h)))
-      if (!isObject(header)) return null
-      // The pinned algorithm, never the header's claim about it. `alg: none`
-      // matches nothing here, which is the point.
-      if (header.alg !== ALG) return null
-      if ("crit" in header) return null
+      // The pinned algorithm, never the header's claim about it.
+      const jws = openJws(idToken, ALG)
+      if (!jws) return null
 
       const all = await verifyKeys(opts.jwksUri)
       // `kid` chooses WHICH key to ask, never whether to trust — the signature
       // decides that. An unknown kid falls back to trying them all, so a rotation
       // that adds a key is invisible.
-      const named = typeof header.kid === "string" ? all.filter((k) => k.kid === header.kid) : []
+      const kid = jws.header.kid
+      const named = typeof kid === "string" ? all.filter((k) => k.kid === kid) : []
       const candidates = named.length > 0 ? named : all
 
       // Signature before claims: nothing a forged payload says is worth reading.
-      const sig = unb64u(s)
-      const input = utf8.encode(`${h}.${p}`)
+      const input = utf8.encode(jws.input)
       let signed = false
       for (const { key } of candidates) {
-         if (await crypto.subtle.verify({ name: "Ed25519" }, key, sig, input)) {
+         if (await crypto.subtle.verify({ name: "Ed25519" }, key, jws.sig, input)) {
             signed = true
             break
          }
       }
       if (!signed) return null
 
-      const claims: unknown = JSON.parse(utf8decode.decode(unb64u(p)))
+      const claims: unknown = JSON.parse(utf8decode.decode(unb64u(jws.payload)))
       if (!isObject(claims)) return null
 
-      const t = Math.floor(Date.now() / 1000)
       // A signature proves who minted a token, not who it was minted for.
       if (claims.iss !== opts.issuer) return null
       // `aud` may be a string or an array; either way it must name this client
@@ -336,10 +315,7 @@ async function verifyIdToken(
       const aud = Array.isArray(claims.aud) ? (claims.aud as unknown[]) : [claims.aud]
       if (!aud.includes(opts.audience)) return null
       if (aud.length > 1 && claims.azp !== opts.audience) return null
-      if (typeof claims.iat !== "number") return null
-      if (typeof claims.exp !== "number" || t >= claims.exp) return null
-      if ("nbf" in claims && (typeof claims.nbf !== "number" || claims.nbf > t)) return null
-      if (typeof claims.sub !== "string" || claims.sub.length === 0) return null
+      if (!timeAndSubjectOk(claims, Math.floor(Date.now() / 1000))) return null
       // OIDC Core §3.1.3.7 step 11. Without it, a token replayed from another
       // login verifies perfectly.
       if (claims.nonce !== opts.nonce) return null

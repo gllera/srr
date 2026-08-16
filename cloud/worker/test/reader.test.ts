@@ -2,35 +2,30 @@ import { beforeAll, describe, expect, it } from "vitest"
 import { env as poolEnv } from "cloudflare:test"
 import worker, { type ReaderEnv } from "../src/reader"
 import { classifyReader } from "../src/router"
+import { CSP } from "../src/shell"
 import { SESSION_COOKIE, mintSession } from "../src/session"
+import { TEST_OIDC } from "./fixture-env"
+import { api, nav, sessCookie } from "./helpers"
 
 const BASE = "https://reader.example.com"
 
 // The ASSETS binding comes from the pool's wrangler.toml (the cloud worker's
 // staged bundle). It is the same shell either way — what these cases are about
 // is the GATE in front of it, not which cdn-url it was built with.
-const env: ReaderEnv = {
-   ASSETS: poolEnv.ASSETS,
-   OIDC_ISSUER: "https://idp.example.com/t/tenant",
-   OIDC_CLIENT_ID: "srr",
-   OIDC_CLIENT_SECRET: "s3cret",
-   SESSION_HMAC_SECRET: "test-hmac-secret",
-}
+//
+// The OIDC four come from fixture-env, the one place that owns them: the
+// SESSION_HMAC_SECRET agreeing with the pool's is what lets a token minted here
+// verify in the worker at all, and three separate literals made that agreement
+// a coincidence.
+const env: ReaderEnv = { ASSETS: poolEnv.ASSETS, ...TEST_OIDC }
 
 const call = (path: string, init: RequestInit = {}, over: Partial<ReaderEnv> = {}) =>
    worker.fetch(new Request(`${BASE}${path}`, init), { ...env, ...over })
 
-// A browser navigation vs a programmatic fetch.
-const nav = (extra: Record<string, string> = {}) => ({
-   headers: { "sec-fetch-mode": "navigate", accept: "text/html", ...extra },
-})
-const api = (extra: Record<string, string> = {}) => ({ headers: { ...extra } })
-
 let signedIn: Record<string, string>
 
 beforeAll(async () => {
-   const token = await mintSession(env, { sub: "u_01ABC", email: "reader@example.com" })
-   signedIn = { cookie: `${SESSION_COOKIE}=${token}` }
+   signedIn = { cookie: await sessCookie("reader@example.com", env) }
 })
 
 describe("classifyReader", () => {
@@ -151,6 +146,17 @@ describe("the gate", () => {
       for (const name of refs) {
          expect(`${name} -> ${(await call(`/${name}`, api())).status}`).toBe(`${name} -> 200`)
       }
+   })
+
+   it("serves the same CSP the bundle carries as its own <meta> fallback", async () => {
+      // Three hand-kept copies of one policy — shell.ts's CSP constant, the
+      // <meta> in the shell, and frontend/_headers — each with a comment saying
+      // it mirrors the others and nothing checking. A tightening that lands on
+      // one and not the rest is silent, and so is a loosening. This holds the
+      // two the worker can actually see against each other.
+      const html = await (await call("/index.html", nav(signedIn))).text()
+      const meta = html.match(/http-equiv=["']?Content-Security-Policy["']? content="([^"]+)"/i)
+      expect(meta?.[1]).toBe(CSP)
    })
 
    it("404s everything it does not serve", async () => {

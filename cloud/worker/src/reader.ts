@@ -21,8 +21,8 @@
 // exchanges the code server-side once, and then answers from its own cookie.
 import { beginLogin, handleCallback, logout } from "./oidc"
 import { getSession } from "./session"
-import { classifyReader, type ReaderRoute } from "./router"
-import { isNavigation, missingConfig, notFound, serveShellAsset, serveShellIndex } from "./shell"
+import { classifyReader, policyReader, type Gate, type ReaderRoute } from "./router"
+import { denyAnonymous, notFound, runWorker, serveShellAsset, serveShellIndex } from "./shell"
 
 export interface ReaderEnv {
    ASSETS: Fetcher
@@ -33,68 +33,45 @@ export interface ReaderEnv {
    SESSION_HMAC_SECRET: string
 }
 
-// Anonymous → the login (navigations) or a 401 (everything else). The shell
-// index is the only gated route, so the 401 branch answers a programmatic fetch
-// of index.html and nothing a browser does on its own.
-//
-// `next` is a same-origin PATH, validated again on the way back out (oidc.ts's
-// safeNext), never the absolute URL a cross-origin gate would have needed.
-function deny(request: Request, url: URL): Response {
-   if (!isNavigation(request)) {
-      return new Response(JSON.stringify({ error: "unauthenticated" }), {
-         status: 401,
-         headers: { "content-type": "application/json", "cache-control": "no-store" },
-      })
-   }
-   const login = new URL("/auth/login", url.origin)
-   login.searchParams.set("next", url.pathname + url.search)
-   return new Response(null, {
-      status: 302,
-      headers: { location: login.toString(), "cache-control": "no-store" },
-   })
-}
-
 export default {
    async fetch(request: Request, env: ReaderEnv): Promise<Response> {
       const url = new URL(request.url)
       const route = classifyReader(url.pathname)
-
-      // GET/HEAD everywhere; POST only on logout, which is the one route a form
-      // may reach. Matched by METHOD as well as path so nothing else can be
-      // POSTed at.
-      const method = request.method === "HEAD" ? "GET" : request.method
-      if (method !== "GET" && !(method === "POST" && route.kind === "logout")) {
-         const allow = route.kind === "logout" ? "GET, POST" : "GET"
-         return new Response("method not allowed", { status: 405, headers: { allow } })
-      }
-
-      const missing = missingConfig(env)
-      if (missing.length > 0) {
-         console.log(`reader worker is misconfigured — unset: ${missing.join(", ")}`)
-         return new Response("misconfigured", { status: 500, headers: { "cache-control": "no-store" } })
-      }
-
-      // The sign-in legs reach the IdP, so they can fail for reasons that are
-      // nobody's fault and nothing's bug: discovery unreachable, JWKS 503, a
-      // network blip. Unhandled, that is an exception out of the fetch handler —
-      // the runtime's bare 500, no log line, and a visitor who cannot tell it
-      // from a broken deployment. 503 says "try again" and means it.
-      let res: Response
-      try {
-         res = await dispatch(request, env, url, route)
-      } catch (e) {
-         console.log(`reader worker: ${url.pathname} failed: ${e instanceof Error ? e.message : String(e)}`)
-         res = new Response("temporarily unavailable", {
-            status: 503,
-            headers: { "cache-control": "no-store", "retry-after": "30" },
-         })
-      }
-      // HEAD: same logic, body stripped.
-      return request.method === "HEAD" ? new Response(null, { status: res.status, headers: res.headers }) : res
+      const { gate, methods } = policyReader(route)
+      return runWorker({
+         name: "reader worker",
+         request,
+         url,
+         env,
+         methods,
+         dispatch: () => dispatch(request, env, url, route, gate),
+      })
    },
 } satisfies ExportedHandler<ReaderEnv>
 
-async function dispatch(request: Request, env: ReaderEnv, url: URL, route: ReaderRoute): Promise<Response> {
+async function dispatch(
+   request: Request,
+   env: ReaderEnv,
+   url: URL,
+   route: ReaderRoute,
+   gate: Gate,
+): Promise<Response> {
+   // Enforced ONCE, from the route's policy rather than from each case
+   // remembering to ask. The shell index is the only gated route today; the
+   // point is that the next one cannot be added without answering the question.
+   //
+   // Everything else is deliberately UNAUTHENTICATED, and the service worker is
+   // why it has to be: the browser fetches `sw.<hash>.js` WITHOUT the session
+   // cookie, and the SW spec forbids registering a script served behind a
+   // redirect — so gating it does not fail loudly, it silently leaves the reader
+   // running with no service worker at all (a real outage, 2026-07-29). The rest
+   // of the bundle rides the same rule rather than a one-name exception, because
+   // they are the same published bytes and because the manifest's icons are
+   // fetched credential-less too.
+   if (gate !== "public" && !(await getSession(request, env))) {
+      return denyAnonymous(request, url, "unauthenticated")
+   }
+
    switch (route.kind) {
       case "login":
          return beginLogin(request, env)
@@ -103,20 +80,9 @@ async function dispatch(request: Request, env: ReaderEnv, url: URL, route: Reade
       case "logout":
          return logout(request, env)
       case "shell-asset":
-         // Deliberately UNAUTHENTICATED, and the service worker is the reason it
-         // has to be: the browser fetches `sw.<hash>.js` WITHOUT the session
-         // cookie, and the SW spec forbids registering a script served behind a
-         // redirect — so gating it does not fail loudly, it silently leaves the
-         // reader running with no service worker at all (a real outage,
-         // 2026-07-29). The rest of the bundle rides the same rule rather than a
-         // one-name exception, because they are the same published bytes and
-         // because the manifest's icons are fetched credential-less too.
          return serveShellAsset(request, env, route.name)
-      case "shell-index": {
-         const session = await getSession(request, env)
-         if (!session) return deny(request, url)
+      case "shell-index":
          return serveShellIndex(request, env)
-      }
       case "none":
          return notFound()
    }

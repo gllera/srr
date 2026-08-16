@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { classify, classifyReader } from "../src/router"
+import { classify, classifyReader, policy, policyReader, type Route } from "../src/router"
 
 describe("classify", () => {
    it("root", () => {
@@ -27,7 +27,9 @@ describe("classify", () => {
    })
 
    it("bare tenant prefix redirects to the slash form", () => {
-      expect(classify("/u/t1")).toEqual({ kind: "redirect-slash", uid: "t1" })
+      // No uid on the verdict: the redirect reflects the path it was handed and
+      // authorizes nothing, so carrying one would only suggest it does.
+      expect(classify("/u/t1")).toEqual({ kind: "redirect-slash" })
    })
 
    it("shell index — both spellings", () => {
@@ -46,7 +48,7 @@ describe("classify", () => {
          "apple-touch-icon.bcdd2574.png",
          "manifest.webmanifest",
       ]) {
-         expect(classify(`/u/t1/${name}`)).toEqual({ kind: "shell-asset", uid: "t1", name })
+         expect(classify(`/u/t1/${name}`)).toEqual({ kind: "shell-asset", name })
       }
    })
 
@@ -64,9 +66,9 @@ describe("classify", () => {
    })
 
    it("denied backend-only classes", () => {
-      expect(classify("/u/t1/config.gz")).toEqual({ kind: "denied", uid: "t1" })
-      expect(classify("/u/t1/seen/441.gz")).toEqual({ kind: "denied", uid: "t1" })
-      expect(classify("/u/t1/inbox/gw.gz")).toEqual({ kind: "denied", uid: "t1" })
+      expect(classify("/u/t1/config.gz")).toEqual({ kind: "denied" })
+      expect(classify("/u/t1/seen/441.gz")).toEqual({ kind: "denied" })
+      expect(classify("/u/t1/inbox/gw.gz")).toEqual({ kind: "denied" })
       // …but a key merely CONTAINING those words is a normal store key.
       expect(classify("/u/t1/data/seen.gz")).toEqual({ kind: "store", uid: "t1", key: "data/seen.gz" })
    })
@@ -94,5 +96,82 @@ describe("classify", () => {
       expect(classify("/u/t1/a/../b.gz")).toEqual({ kind: "none" })
       expect(classify("/u/t1/a//b.gz")).toEqual({ kind: "none" })
       expect(classify("/u/t1/dir/")).toEqual({ kind: "none" })
+   })
+})
+
+describe("policy", () => {
+   // The invariant the whole split exists for. Gating used to be decided by
+   // whether a `case` in dispatch remembered to authorize, which fails OPEN —
+   // an ungated new route answers 200 with every other test still green. This
+   // says it from the outside: anything carrying a uid is tenant-gated.
+   it("gates every tenant-scoped route, and only public routes are ungated", () => {
+      const paths = [
+         "/",
+         "/auth/login",
+         "/auth/callback",
+         "/auth/logout",
+         "/u/t1",
+         "/u/t1/",
+         "/u/t1/index.html",
+         "/u/t1/frontend.1294b80e.js",
+         "/u/t1/manifest.webmanifest",
+         "/u/t1/sync.json",
+         "/u/t1/config.gz",
+         "/u/t1/db.gz",
+         "/u/t1/assets/ab/0123456789abcdef.webp",
+         "/favicon.ico",
+      ]
+      for (const p of paths) {
+         const route = classify(p)
+         const { gate } = policy(route)
+         if ("uid" in route) expect(gate, `${p} carries a uid`).toBe("tenant")
+         else expect(gate, `${p} carries no uid`).not.toBe("session")
+      }
+   })
+
+   it("keeps the store and the sync blob the only user-byte routes", () => {
+      const userByte = (p: string) => policy(classify(p)).userBytes
+      expect(userByte("/u/t1/db.gz")).toBe(true)
+      expect(userByte("/u/t1/sync.json")).toBe(true)
+      // The shell is a published release artifact, not user bytes — stamping
+      // index.ts's `sandbox` on it would stop the reader running at all.
+      expect(userByte("/u/t1/")).toBe(false)
+      expect(userByte("/u/t1/frontend.1294b80e.js")).toBe(false)
+      expect(userByte("/u/t1/config.gz")).toBe(false)
+   })
+
+   it("names PUT and POST on exactly one route each", () => {
+      const every = ["/", "/auth/login", "/auth/callback", "/auth/logout", "/u/t1/", "/u/t1/sync.json", "/u/t1/db.gz"]
+      const writable = (m: string) => every.filter((p) => policy(classify(p)).methods.includes(m))
+      expect(writable("PUT")).toEqual(["/u/t1/sync.json"])
+      expect(writable("POST")).toEqual(["/auth/logout"])
+   })
+
+   it("leaves the reader's sign-in routes ungated and its shell gated", () => {
+      expect(policyReader(classifyReader("/")).gate).toBe("session")
+      expect(policyReader(classifyReader("/index.html")).gate).toBe("session")
+      for (const p of ["/auth/login", "/auth/callback", "/auth/logout", "/sw.586aa705.js", "/nope"]) {
+         expect(policyReader(classifyReader(p)).gate, p).toBe("public")
+      }
+   })
+
+   it("gives every route kind a policy — the exhaustive switch, from the outside", () => {
+      const kinds: Route["kind"][] = [
+         "login",
+         "callback",
+         "logout",
+         "root",
+         "redirect-slash",
+         "shell-index",
+         "shell-asset",
+         "sync",
+         "denied",
+         "store",
+         "none",
+      ]
+      for (const kind of kinds) {
+         const p = policy({ kind, uid: "t1", name: "x", key: "k" } as unknown as Route)
+         expect(p.methods, kind).toContain("GET")
+      }
    })
 })

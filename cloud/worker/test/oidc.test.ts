@@ -3,17 +3,18 @@ import { fetchMock } from "cloudflare:test"
 import { SESSION_COOKIE, getSession } from "../src/session"
 import { b64u, utf8 } from "../src/bytes"
 import { beginLogin, byeCookie, handleCallback, logout, resetOidcCaches, safeNext } from "../src/oidc"
+import { TEST_OIDC } from "./fixture-env"
 
 const BASE = "https://reader.example.com"
-const IDP = "https://idp.example.com"
-const ISSUER = `${IDP}/t/tenant`
 
-const cfg = {
-   OIDC_ISSUER: ISSUER,
-   OIDC_CLIENT_ID: "srr",
-   OIDC_CLIENT_SECRET: "s3cret",
-   SESSION_HMAC_SECRET: "test-hmac-secret",
-}
+// One owner for the synthetic IdP (test/fixture-env.ts), DERIVED from rather
+// than restated: a second copy of the issuer here made the agreement between
+// this suite's tokens and the pool-bound worker's secret a coincidence of
+// literals rather than a fact.
+const cfg = TEST_OIDC
+const ISSUER = cfg.OIDC_ISSUER
+const IDP = new URL(ISSUER).origin
+const ISSUER_PATH = new URL(ISSUER).pathname
 
 const DISCOVERY = {
    issuer: ISSUER,
@@ -28,16 +29,16 @@ let keys: CryptoKeyPair
 let publicJwk: object
 
 const stubDiscovery = () =>
-   fetchMock.get(IDP).intercept({ path: "/t/tenant/.well-known/openid-configuration" }).reply(200, DISCOVERY)
+   fetchMock.get(IDP).intercept({ path: `${ISSUER_PATH}/.well-known/openid-configuration` }).reply(200, DISCOVERY)
 
 const stubJwks = (jwk: object = publicJwk) =>
    fetchMock
       .get(IDP)
-      .intercept({ path: "/t/tenant/jwks.json" })
+      .intercept({ path: `${ISSUER_PATH}/jwks.json` })
       .reply(200, { keys: [jwk] })
 
 const stubToken = (body: object, status = 200) =>
-   fetchMock.get(IDP).intercept({ path: "/t/tenant/token", method: "POST" }).reply(status, body)
+   fetchMock.get(IDP).intercept({ path: `${ISSUER_PATH}/token`, method: "POST" }).reply(status, body)
 
 async function signIdToken(claims: Record<string, unknown>, header: Record<string, unknown> = {}): Promise<string> {
    const h = b64u(utf8.encode(JSON.stringify({ alg: "EdDSA", typ: "JWT", ...header })))
@@ -122,7 +123,7 @@ describe("beginLogin", () => {
       expect(res.status).toBe(302)
       expect(loc.origin + loc.pathname).toBe(`${ISSUER}/authorize`)
       expect(loc.searchParams.get("response_type")).toBe("code")
-      expect(loc.searchParams.get("client_id")).toBe("srr")
+      expect(loc.searchParams.get("client_id")).toBe(cfg.OIDC_CLIENT_ID)
       expect(loc.searchParams.get("redirect_uri")).toBe(`${BASE}/auth/callback`)
       expect(loc.searchParams.get("scope")).toBe("openid email")
       expect(loc.searchParams.get("code_challenge_method")).toBe("S256")
@@ -228,7 +229,7 @@ describe("handleCallback", () => {
       ["an audience that is not this client", () => goodClaims("", { aud: "another-app" })],
       [
          "a multi-audience token that does not name us as the authorized party",
-         () => goodClaims("", { aud: ["srr", "another-app"], azp: "another-app" }),
+         () => goodClaims("", { aud: [cfg.OIDC_CLIENT_ID, "another-app"], azp: "another-app" }),
       ],
       ["an expired token", () => goodClaims("", { exp: Math.floor(Date.now() / 1000) - 1 })],
       ["a not-yet-valid token", () => goodClaims("", { nbf: Math.floor(Date.now() / 1000) + 300 })],

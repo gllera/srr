@@ -131,13 +131,17 @@ feedSrv.close()
 
 // 2. Seed the local R2 simulation under the owner's prefix (fresh state each run).
 rmSync(join(WORKER, ".wrangler/state"), { recursive: true, force: true })
+// The LOCAL binary, not `npx`: this loop pays a process spawn per object (a
+// dozen or so on a 5-article store), and npx re-resolves the package on every
+// one of them for nothing. Same binary the dev server below already spawns
+// directly.
+const WRANGLER = join(WORKER, "node_modules/.bin/wrangler")
 for (const f of walk(store)) {
    if (f.startsWith(".")) continue // .locked etc.
-   execFileSync(
-      "npx",
-      ["wrangler", "r2", "object", "put", `srr-cloud/u/${UID}/${f}`, "--file", join(store, f), "--local"],
-      { cwd: WORKER, stdio: "ignore" },
-   )
+   execFileSync(WRANGLER, ["r2", "object", "put", `srr-cloud/u/${UID}/${f}`, "--file", join(store, f), "--local"], {
+      cwd: WORKER,
+      stdio: "ignore",
+   })
 }
 
 // 3. wrangler dev against the seeded state.

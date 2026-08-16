@@ -1,8 +1,10 @@
-// The shell-serving pieces both workers share — the reader bundle's response
-// headers, the deployment-config guard, and the request-shape helpers. One
-// copy, so a cache rule or a header tweak lands on both origins or on neither.
+// The pieces both workers share — the reader bundle's response headers, the
+// request envelope around every dispatch, the deny path, and the
+// deployment-config guard. One copy, so a cache rule or a header tweak lands on
+// both origins or on neither.
 import type { OidcConfig } from "./oidc"
 import type { SessionConfig } from "./session"
+import { SHELL_HASHED_RE } from "./router"
 
 export interface ShellEnv {
    ASSETS: Fetcher
@@ -14,16 +16,95 @@ export const CSP = "script-src 'self'; object-src 'none'; base-uri 'none'"
 
 export const notFound = () => new Response("not found", { status: 404 })
 
-export const isNavigation = (request: Request) =>
+// Internal to denyAnonymous below — the only question either worker ever asked
+// it, now that both deny through one path.
+const isNavigation = (request: Request) =>
    request.headers.get("sec-fetch-mode") === "navigate" || (request.headers.get("accept") || "").includes("text/html")
+
+// no-store because the 401/403 branches of deny() are these: an auth verdict a
+// shared cache could hand to the next visitor is not a verdict.
+export const jsonNoStore = (status: number, error: string) =>
+   new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "content-type": "application/json", "cache-control": "no-store" },
+   })
+
+// Anonymous → login redirect (navigations) or 401 (fetches). Both workers deny
+// an anonymous request identically; only the SaaS worker has a second,
+// authenticated-but-unauthorized case, which it adds on top of this.
+//
+// The login is each origin's OWN now, so `next` is a same-origin PATH rather
+// than the absolute URL a cross-origin login app had to be handed — and oidc.ts
+// validates it again on the way back out (safeNext) instead of trusting the
+// cookie it round-tripped through.
+export function denyAnonymous(request: Request, url: URL, message: string): Response {
+   if (!isNavigation(request)) return jsonNoStore(401, message)
+   const login = new URL("/auth/login", url.origin)
+   login.searchParams.set("next", url.pathname + url.search)
+   return new Response(null, {
+      status: 302,
+      headers: { location: login.toString(), "cache-control": "no-store" },
+   })
+}
 
 // Every one of these is operator config supplied out of band (`wrangler secret
 // put`), so an unset one is a DEPLOYMENT mistake and not a request the user got
 // wrong. Say so with a 500: falling through would send a visitor to a login that
 // cannot complete, and they would meet a redirect loop instead of a cause.
-export function missingConfig(env: OidcConfig & SessionConfig): string[] {
-   const need = ["OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "SESSION_HMAC_SECRET"] as const
-   return need.filter((k) => !env[k])
+const NEEDED = ["OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "SESSION_HMAC_SECRET"] as const
+
+function missingConfig(env: OidcConfig & SessionConfig): string[] {
+   return NEEDED.filter((k) => !env[k])
+}
+
+/**
+ * The envelope around every request on both origins: the method gate, the
+ * deployment-config guard, the failure floor, and HEAD.
+ *
+ * It is shared because it had already DRIFTED as two copies — one worker sent
+ * `Allow` with its 405 and the other did not (RFC 9110 §15.5.6 requires it),
+ * and each suite pinned only its own side. `methods` comes from the route's
+ * policy, so the gate and the header now read one array.
+ */
+export async function runWorker(opts: {
+   name: string
+   request: Request
+   url: URL
+   env: OidcConfig & SessionConfig
+   methods: readonly string[]
+   dispatch: () => Promise<Response>
+}): Promise<Response> {
+   const { name, request, url, env, methods, dispatch } = opts
+
+   // HEAD is a GET whose body is dropped on the way out, so it is gated as one.
+   const method = request.method === "HEAD" ? "GET" : request.method
+   if (!methods.includes(method)) {
+      return new Response("method not allowed", { status: 405, headers: { allow: methods.join(", ") } })
+   }
+
+   const missing = missingConfig(env)
+   if (missing.length > 0) {
+      console.log(`${name} is misconfigured — unset: ${missing.join(", ")}`)
+      return new Response("misconfigured", { status: 500, headers: { "cache-control": "no-store" } })
+   }
+
+   // The sign-in legs reach the IdP, so they can fail for reasons that are
+   // nobody's fault and nothing's bug: discovery unreachable, JWKS 503, a
+   // network blip. Unhandled, that is an exception out of the fetch handler —
+   // the runtime's bare 500, no log line, and a visitor who cannot tell it
+   // from a broken deployment. 503 says "try again" and means it.
+   let res: Response
+   try {
+      res = await dispatch()
+   } catch (e) {
+      console.log(`${name}: ${url.pathname} failed: ${e instanceof Error ? e.message : String(e)}`)
+      res = new Response("temporarily unavailable", {
+         status: 503,
+         headers: { "cache-control": "no-store", "retry-after": "30" },
+      })
+   }
+   // HEAD: same logic, body stripped (R2/asset bodies are cheap at this scale).
+   return request.method === "HEAD" ? new Response(null, { status: res.status, headers: res.headers }) : res
 }
 
 // The shell gets nosniff but NEVER index.ts's userContent(): its `sandbox`
@@ -41,10 +122,17 @@ export async function serveShellIndex(request: Request, env: ShellEnv): Promise<
 
 export async function serveShellAsset(request: Request, env: ShellEnv, name: string): Promise<Response> {
    const res = await env.ASSETS.fetch(new URL(`/${name}`, request.url))
-   if (!res.ok) return res
+   // Our own 404, not the assets layer's: every other miss on both origins
+   // answers notFound(), and a passed-through body would carry neither this
+   // worker's shape nor its nosniff.
+   if (!res.ok) return notFound()
    const headers = new Headers(res.headers)
-   // Content-hashed names are immutable; the webmanifest is the one stable name.
-   headers.set("cache-control", name === "manifest.webmanifest" ? "no-cache" : "public, max-age=31536000, immutable")
+   // Which names may be stamped immutable is router.ts's call — it is a fact
+   // about the name, and it lives beside the grammar that enumerates them.
+   headers.set(
+      "cache-control",
+      SHELL_HASHED_RE.test(name) ? "public, max-age=31536000, immutable" : "no-cache",
+   )
    // Safe only because these are OUR bundle's bytes under correct types: nosniff
    // BLOCKS a script served as anything but a JS MIME type (and a stylesheet as
    // anything but text/css), so the asset test pins the type alongside it.

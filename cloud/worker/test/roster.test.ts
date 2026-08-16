@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { parseRoster, rosterLookup } from "../src/roster"
+import { parseRoster, rosterUid } from "../src/roster"
 
 const ROSTER = JSON.stringify({
    "owner@example.com": { uid: "t1", active: true },
@@ -7,24 +7,26 @@ const ROSTER = JSON.stringify({
    "revoked@example.com": { uid: "t9", active: false },
 })
 
-describe("rosterLookup", () => {
+describe("rosterUid", () => {
    it("maps a roster email to its tenant", () => {
-      expect(rosterLookup(ROSTER, "owner@example.com")).toEqual({ uid: "t1", active: true })
+      expect(rosterUid(ROSTER, "owner@example.com")).toBe("t1")
    })
 
    it("is case-insensitive on the email, on both sides", () => {
-      expect(rosterLookup(ROSTER, "OWNER@EXAMPLE.COM")).toEqual({ uid: "t1", active: true })
+      expect(rosterUid(ROSTER, "OWNER@EXAMPLE.COM")).toBe("t1")
       // …including a mixed-case KEY in the roster itself: an operator typing a
       // capital into the config must not create an unreachable tenant.
-      expect(rosterLookup(ROSTER, "second@example.com")).toEqual({ uid: "t2", active: true })
+      expect(rosterUid(ROSTER, "second@example.com")).toBe("t2")
    })
 
    it("returns null for unknown emails", () => {
-      expect(rosterLookup(ROSTER, "nobody@example.com")).toBeNull()
+      expect(rosterUid(ROSTER, "nobody@example.com")).toBeNull()
    })
 
    it("returns null for an inactive entry (revocation)", () => {
-      expect(rosterLookup(ROSTER, "revoked@example.com")).toBeNull()
+      // Spent HERE, so no caller can hold a deactivated row and forget to check
+      // it — a revoked tenant is indistinguishable from an absent one upstream.
+      expect(rosterUid(ROSTER, "revoked@example.com")).toBeNull()
    })
 })
 

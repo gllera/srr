@@ -1,7 +1,11 @@
-// AUTHORIZATION — the SaaS's own half of the auth split. Authentication belongs
-// to the login app (auth.ts verifies its cookie); this roster decides what an
-// authenticated email may reach, and is the per-user revocation lever the
-// never-expiring cookies don't have (deactivate the entry, keep the uid).
+// AUTHORIZATION — the SaaS's own half of the auth split. Authentication is OIDC
+// against the estate's IdP (oidc.ts) plus this worker's own session cookie
+// (session.ts); this roster decides what an authenticated email may reach.
+//
+// It is also the per-user revocation lever — and the ONLY one there is.
+// Verifying a session locally cannot honour a sign-out at the IdP, so nothing
+// but the token's own 30-day `exp` ends it (session.ts, KNOW THE LIMIT).
+// Deactivating an entry here is what takes effect on the next request.
 //
 // It arrives as the ROSTER binding — a JSON object of email → {uid, active} —
 // rather than a literal in this file, for two reasons: a tenant list is
@@ -51,7 +55,14 @@ export function parseRoster(raw: string | undefined): Record<string, RosterEntry
    return out
 }
 
-export function rosterLookup(raw: string | undefined, email: string): RosterEntry | null {
+/**
+ * The tenant an authenticated address owns, or null if it owns none — which is
+ * the whole question a caller has. `active` is spent HERE rather than handed
+ * out: a deactivated row and an absent row authorize exactly the same nothing,
+ * so returning the entry would only give every caller a second chance to forget
+ * the check.
+ */
+export function rosterUid(raw: string | undefined, email: string): string | null {
    const entry = parseRoster(raw)[email.toLowerCase()]
-   return entry && entry.active ? entry : null
+   return entry && entry.active ? entry.uid : null
 }
