@@ -24,6 +24,7 @@ All commands run from the repo root via `make`:
 | `make test-browser` | E2e browser layer: real built SPA in headless Chrome over real packs (Puppeteer; opt-in locally, but a required CI job — `ci.yml` runs it on every push/PR) |
 | `make test-e2e` | Both e2e layers — the writer↔reader contract. Suite lives in `frontend/e2e/` |
 | `make test-stress` | Large-store (>50k) stress/perf layer: real `srr` output → real `idx`/`data`/`nav`/`search`, measuring navigation/filtering/query at scale (jsdom; opt-in, NOT in `verify`; generates or reuses a synthetic store via `genbig_test.go`, tune with `SRR_STRESS_N`/`SRR_STRESS_STORE`). Suite in `frontend/e2e/stress/` |
+| `make typecheck-fe` | `tsc` against the shipped app only (`frontend/tsconfig.check.json` — src/js + sw.ts, no tests); the ONLY gate that reads types, since Parcel strips them, vitest transpiles and ESLint isn't type-aware. Runs inside `verify-fe` |
 | `make lint-fe` | ESLint |
 | `make format-fe` | Prettier write |
 | `make format-check-fe` | Prettier check only |
