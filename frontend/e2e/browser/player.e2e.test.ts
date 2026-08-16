@@ -435,7 +435,14 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
                return {
                   barShown: !bar.hidden,
                   barHeight: bar.offsetHeight,
-                  rows: new Set(keys.map((b) => Math.round(b.getBoundingClientRect().top))).size,
+                  // offsetTop, not getBoundingClientRect().top: the ≡ chip
+                  // PULSES when the queue grows (srr-chip-pop, a 0.22s scale
+                  // keyframe), and a rect read mid-pop sits a pixel high —
+                  // reading as a phantom second row whenever the measurement
+                  // lands inside the animation window (a timing flake). The
+                  // wrap question is about the LAYOUT box, which transforms
+                  // never move.
+                  rows: new Set(keys.map((b) => b.offsetTop)).size,
                   next: getComputedStyle(bar.querySelector(".srr-player-next")!).display !== "none",
                   queue: getComputedStyle(bar.querySelector(".srr-player-queue")!).display !== "none",
                   time: getComputedStyle(bar.querySelector(".srr-player-time")!).display !== "none",
