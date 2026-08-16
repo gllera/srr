@@ -88,6 +88,13 @@ type assetFetcher struct {
 	// fires each time (rewriteItemAssets), only the peek is skipped.
 	corruptSeen sync.Map
 
+	// hashed memoizes resolved cache-file path -> (content hash, size) for this
+	// run, in FRONT of hashSource: seen/corruptSeen key on the hash, so without
+	// it a marker referenced by N articles read and hashed the whole file N
+	// times before either could hit. Sound because a cache file is write-once
+	// (hashSource's contract); concurrent-safe like seen.
+	hashed sync.Map
+
 	// flight coalesces concurrent UploadCacheRef calls for the same source bytes
 	// into a single peek/process/upload. The parallel upload step
 	// (fetchRun.uploadAssets) can hand one asset to several item goroutines at
@@ -274,6 +281,15 @@ func hashSource(full, localname string, statSize int64) (assetPayload, [32]byte,
 	return assetPayload{path: full, size: n}, sum, nil
 }
 
+// hashedSource is the hashed memo's value: a cache file's content hash and
+// size — enough to re-synthesize a streaming assetPayload without re-reading
+// the file (the same form hashSource returns for anything past
+// assetInMemoryMax, so the upload path treats the two identically).
+type hashedSource struct {
+	sum  [32]byte
+	size int64
+}
+
 // capWriter tees at most max bytes into buf and discards the rest, so hashing a
 // large asset costs the hash state and nothing more.
 type capWriter struct {
@@ -359,10 +375,19 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 	// Key on the ORIGINAL file's content hash so an asset already in the store is
 	// recognized before the (possibly expensive) pre-upload processing runs. The
 	// hash is a streaming pass that keeps the bytes only below assetInMemoryMax;
-	// a big asset is re-opened and streamed at upload instead of held.
-	src, sum, err := hashSource(full, localname, fi.Size())
-	if err != nil {
+	// a big asset is re-opened and streamed at upload instead of held. One hash
+	// per path per run (the hashed memo): the memos below key on the hash, so a
+	// marker reused across articles would otherwise re-read the whole file on
+	// every reference before they could hit.
+	var src assetPayload
+	var sum [32]byte
+	if v, ok := a.hashed.Load(full); ok {
+		h := v.(hashedSource)
+		src, sum = assetPayload{path: full, size: h.size}, h.sum
+	} else if src, sum, err = hashSource(full, localname, fi.Size()); err != nil {
 		return "", 0, err
+	} else {
+		a.hashed.Store(full, hashedSource{sum: sum, size: src.size})
 	}
 
 	// Mark the source file as consumed: the post-cycle age sweep

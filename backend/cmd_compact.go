@@ -10,6 +10,8 @@ import (
 	"slices"
 
 	"golang.org/x/sync/errgroup"
+
+	"srr/store"
 )
 
 // Physical compaction — docs/MANIFEST-SPEC.md §9.2, the one operation in the
@@ -249,7 +251,7 @@ func (o *DB) compactDataPack(ctx context.Context, c *DBCore, names *ManifestName
 		}
 	}
 	stem := names.alloc(dataSeries)
-	newKey := fmt.Sprintf("%s/%d.gz", dataSeries, stem)
+	newKey := store.PackKey(dataSeries, stem)
 	if isTail {
 		err = o.savePack(ctx, newKey, p)
 	} else {
@@ -288,7 +290,7 @@ func (o *DB) compactMetaShard(ctx context.Context, c *DBCore, names *ManifestNam
 		return fmt.Errorf("compact: meta shard %d: %w", s, err)
 	}
 	stem := names.alloc(metaSeries)
-	newKey := fmt.Sprintf("%s/%d.gz", metaSeries, stem)
+	newKey := store.PackKey(metaSeries, stem)
 	if isTail {
 		p := newPack()
 		for _, line := range newLines {

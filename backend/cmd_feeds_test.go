@@ -269,7 +269,7 @@ func TestLsCmdEmitsRecipe(t *testing.T) {
 	stdout = &out
 	t.Cleanup(func() { stdout = saved })
 
-	if err := (&LsCmd{Format: "json"}).Run(); err != nil {
+	if err := (&LsCmd{formatFlag: formatFlag{Format: "json"}}).Run(); err != nil {
 		t.Fatalf("LsCmd: %v", err)
 	}
 	if !strings.Contains(out.String(), `"recipe":"read"`) {
@@ -293,7 +293,7 @@ func TestLsCmdFiltersByTag(t *testing.T) {
 	stdout = &out
 	t.Cleanup(func() { stdout = saved })
 
-	if err := (&LsCmd{Format: "json", Tag: strPtr("tech")}).Run(); err != nil {
+	if err := (&LsCmd{Tag: strPtr("tech"), formatFlag: formatFlag{Format: "json"}}).Run(); err != nil {
 		t.Fatalf("LsCmd: %v", err)
 	}
 	body := out.String()
@@ -558,7 +558,7 @@ func TestFeedShowFound(t *testing.T) {
 	stdout = &out
 	t.Cleanup(func() { stdout = saved })
 
-	if err := (&ShowCmd{ID: 0, Format: "json"}).Run(); err != nil {
+	if err := (&ShowCmd{ID: 0, formatFlag: formatFlag{Format: "json"}}).Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	body := out.String()
@@ -575,7 +575,7 @@ func TestFeedShowFound(t *testing.T) {
 
 func TestFeedShowMissing(t *testing.T) {
 	setupFeedsTestDB(t)
-	wantErr(t, (&ShowCmd{ID: 99, Format: "json"}).Run(), "not found")
+	wantErr(t, (&ShowCmd{ID: 99, formatFlag: formatFlag{Format: "json"}}).Run(), "not found")
 }
 
 func TestFeedShowYAML(t *testing.T) {
@@ -585,7 +585,7 @@ func TestFeedShowYAML(t *testing.T) {
 	stdout = &out
 	t.Cleanup(func() { stdout = saved })
 
-	if err := (&ShowCmd{ID: 0, Format: "yaml"}).Run(); err != nil {
+	if err := (&ShowCmd{ID: 0, formatFlag: formatFlag{Format: "yaml"}}).Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	body := out.String()
@@ -613,7 +613,7 @@ func TestFeedShowEmitsRecipe(t *testing.T) {
 	stdout = &out
 	t.Cleanup(func() { stdout = saved })
 
-	if err := (&ShowCmd{ID: ch.id, Format: "json"}).Run(); err != nil {
+	if err := (&ShowCmd{ID: ch.id, formatFlag: formatFlag{Format: "json"}}).Run(); err != nil {
 		t.Fatalf("ShowCmd: %v", err)
 	}
 	if !strings.Contains(out.String(), `"recipe":"read"`) {

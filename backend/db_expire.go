@@ -102,11 +102,8 @@ func (o *DB) ExpireArticles(ctx context.Context, now int64) error {
 	// pre-refcount AssetBytes attribution preserved verbatim for that region.
 	released := map[string]int{}
 	uncovered := map[string]int{}
-	cur := minStart
 	stopChron := c.TotalArticles // walk-exhausted default; entries [minStart, stopChron) were fully processed
-	err := o.walkArticles(ctx, minStart, c.TotalArticles, func(ad *ArticleData) error {
-		chron := cur
-		cur++
+	err := o.walkArticles(ctx, minStart, c.TotalArticles, func(chron int, ad *ArticleData) error {
 		if ad.FetchedAt >= maxCutoff {
 			stopChron = chron
 			return errExpireDone
@@ -260,7 +257,7 @@ func (o *DB) ExpireArticles(ctx context.Context, now int64) error {
 }
 
 // collectAssetRefs adds every self-hosted asset key (assets/…) referenced by
-// content's media/link attributes (the outAssetAttrs set, via the shared
+// content's media/link attributes (mod's assetAttrs set, via the shared
 // visitAssetAttrs walk) to keys. Candidates are validated against the strict
 // assetKeyRe grammar, not a bare prefix — these keys feed Rm, which
 // path-joins on local/SFTP, so adversarial feed content like

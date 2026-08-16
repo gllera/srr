@@ -11,6 +11,8 @@ import (
 	"unicode"
 
 	"golang.org/x/text/unicode/norm"
+
+	"srr/store"
 )
 
 // The meta/ pack series: derived {f,w,t} projection at 5k stride, consumed by
@@ -113,12 +115,14 @@ func bloomHas(bloom []byte, gram string) bool {
 	return true
 }
 
-// walkArticles streams the articles at chron [from, to) in order: the
-// consolidated region ([from, tailCovered)) resolves (packId, offset) through
-// the idx packs, fetching each idx and data pack at most once (chron order
-// keeps data-pack visits monotonic); the delta region (>= tailCovered) serves
-// straight from the parsed chain — no pack ever holds those articles.
-func (o *DB) walkArticles(ctx context.Context, from, to int, fn func(ad *ArticleData) error) error {
+// walkArticles streams the articles at chron [from, to) in order, handing fn
+// each article's chron alongside it (the walk already holds the index, so no
+// caller carries a parallel counter): the consolidated region ([from,
+// tailCovered)) resolves (packId, offset) through the idx packs, fetching each
+// idx and data pack at most once (chron order keeps data-pack visits
+// monotonic); the delta region (>= tailCovered) serves straight from the
+// parsed chain — no pack ever holds those articles.
+func (o *DB) walkArticles(ctx context.Context, from, to int, fn func(chron int, ad *ArticleData) error) error {
 	c := &o.core
 	tc := tailCovered(c)
 	slots := feedSlots(c)
@@ -157,7 +161,7 @@ func (o *DB) walkArticles(ctx context.Context, from, to int, fn func(ad *Article
 			if off >= len(data) {
 				return fmt.Errorf("chron %d: offset %d beyond data pack %d (%d entries)", from, off, packID, len(data))
 			}
-			if err := fn(&data[off]); err != nil {
+			if err := fn(from, &data[off]); err != nil {
 				return err
 			}
 		}
@@ -168,7 +172,7 @@ func (o *DB) walkArticles(ctx context.Context, from, to int, fn func(ad *Article
 			return err
 		}
 		for i := max(from, tc); i < to; i++ {
-			if err := fn(&deltas[i-tc]); err != nil {
+			if err := fn(i, &deltas[i-tc]); err != nil {
 				return err
 			}
 		}
@@ -321,7 +325,7 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 		if len(rawLines) == metaPackSize {
 			pos := start / metaPackSize
 			stem := names.alloc(metaSeries)
-			if err := o.saveMetaShard(ctx, fmt.Sprintf("%s/%d.gz", metaSeries, stem), rawLines); err != nil {
+			if err := o.saveMetaShard(ctx, store.PackKey(metaSeries, stem), rawLines); err != nil {
 				return err
 			}
 			if err := names.putAt(metaSeries, pos, stem); err != nil {
@@ -360,7 +364,7 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 			}
 		}
 		tailStem := names.alloc(metaSeries)
-		tailKey := fmt.Sprintf("%s/%d.gz", metaSeries, tailStem)
+		tailKey := store.PackKey(metaSeries, tailStem)
 		if err := o.savePack(ctx, tailKey, latest); err != nil {
 			return err
 		}
@@ -466,7 +470,7 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 				return salvage(err)
 			}
 		}
-	} else if err := o.walkArticles(ctx, from, target, add); err != nil {
+	} else if err := o.walkArticles(ctx, from, target, func(_ int, ad *ArticleData) error { return add(ad) }); err != nil {
 		return salvage(err)
 	}
 

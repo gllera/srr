@@ -41,7 +41,7 @@
 // off the network, exactly as before. Self-contained: no SRR_CDN_URL, so it works
 // under any cdn-url prefix.
 import { type IDBWire, type IManifestWire } from "./js/format.gen"
-import { bootWarmNames, listedNames, manifestNames, type StoreNames } from "./js/names"
+import { bootWarmNames, gunzipJson, listedNames, manifestNames, type StoreNames } from "./js/names"
 import { parsePackName, RE_ASSET, RE_DB, RE_SHELL_HASHED } from "./js/sw-grammar"
 
 const sw = self as unknown as ServiceWorkerGlobalScope
@@ -540,8 +540,7 @@ interface Adoptable {
 // generation it could not read. Caches the manifest as a side effect — work the
 // page is about to do anyway.
 async function readAdoptable(dbRes: Response, root: Root): Promise<Adoptable | null> {
-   const body = dbRes.clone().body!.pipeThrough(new DecompressionStream("gzip"))
-   const rootDoc = (await new Response(body).json()) as Pick<IDBWire, "m">
+   const rootDoc = await gunzipJson<Pick<IDBWire, "m">>(dbRes.clone())
    const m = rootDoc.m ?? 0
    // Per-root record (§5.4): a peer's generation change must not touch the
    // home store's adopted-generation number or its cached packs.
@@ -552,9 +551,7 @@ async function readAdoptable(dbRes: Response, root: Root): Promise<Adoptable | n
    const url = new URL(`manifest/${m}.gz`, dbRes.url)
    const res = await cacheFirst(new Request(url.href, { credentials: root.cred }), PACKS)
    if (!res.ok) throw new Error(`manifest ${m}: ${res.status}`)
-   const man = (await new Response(
-      res.clone().body!.pipeThrough(new DecompressionStream("gzip")),
-   ).json()) as IManifestWire
+   const man = await gunzipJson<IManifestWire>(res.clone())
    if (man.m !== m) throw new Error(`manifest ${m}: names itself ${man.m}`)
 
    const names = manifestNames(man)
@@ -584,9 +581,10 @@ async function adoptManifest(root: Root, a: Adoptable): Promise<void> {
          // Evict only THIS root's objects: a cached pack under a different
          // mounted root must survive this root's generation change (§5.4).
          if (!reqUrl.href.startsWith(root.base)) return undefined
-         // Names are store-relative; a cached URL carries whatever prefix
-         // the cdn-url adds, so match on the suffix.
-         for (const name of keep) if (path.endsWith("/" + name)) return undefined
+         // Names are store-relative <series>/<stem>.gz; a cached URL carries
+         // whatever prefix the cdn-url adds, so compare on the last two path
+         // segments.
+         if (keep.has(path.split("/").slice(-2).join("/"))) return undefined
          return packs.delete(req)
       }),
    )

@@ -43,7 +43,7 @@ func watchViews(c *DBCore) []watchView {
 
 // WatchLsCmd prints every rule. Same -f contract as `feed ls` / `recipe ls`.
 type WatchLsCmd struct {
-	Format string `short:"f" default:"json" enum:"yaml,json" help:"Output format."`
+	formatFlag
 }
 
 func (o *WatchLsCmd) Run() error {
@@ -54,8 +54,8 @@ func (o *WatchLsCmd) Run() error {
 
 // WatchShowCmd prints one rule; errors if it does not exist.
 type WatchShowCmd struct {
-	Name   string `arg:"" help:"Watch rule name."`
-	Format string `short:"f" default:"json" enum:"yaml,json" help:"Output format."`
+	Name string `arg:"" help:"Watch rule name."`
+	formatFlag
 }
 
 func (o *WatchShowCmd) Run() error {

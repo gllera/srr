@@ -59,7 +59,7 @@ beforeEach(() => {
    nav.undoFrontierMove.mockReturnValue(true)
    nav.isUnreadOnly.mockReturnValue(false)
    menus.setup({
-      view: () => "list",
+      listVisible: () => true,
       showError: vi.fn(),
       showSnackbar,
       hideSnackbar,

@@ -134,7 +134,9 @@ function parseRecords(raw: string | null): MountRecord[] {
 
 // Coerce one untrusted record (localStorage or a synced blob) into a well-formed
 // MountRecord, or null. Tolerant of missing optional fields; strict on id/url.
-function coerceRecord(r: unknown): MountRecord | null {
+// Exported for profile.ts's `mnt` merge — the blob's records are the same
+// untrusted shape, and a second hand-kept coercion would drift field by field.
+export function coerceRecord(r: unknown): MountRecord | null {
    if (typeof r !== "object" || r === null || Array.isArray(r)) return null
    const o = r as Record<string, unknown>
    if (typeof o.id !== "string" || !o.id) return null
@@ -365,51 +367,4 @@ export function addMount(
 export function removeMount(recs: MountRecord[], id: string): MountRecord[] {
    if (id === HOME_MID) return recs
    return recs.map((r) => (r.id === id ? { ...r, del: true, ts: nowSec() } : r))
-}
-
-// Edit a mount's presentation fields (label / ord / cred). Bumps ts.
-export function editMount(
-   recs: MountRecord[],
-   id: string,
-   patch: Partial<Pick<MountRecord, "label" | "ord" | "cred">>,
-): MountRecord[] {
-   return recs.map((r) => (r.id === id ? { ...r, ...patch, ts: nowSec() } : r))
-}
-
-// Re-host migration (§3.5): mounting URL B while mount s<A> exists, keeping the
-// reading history. Writes both records with a fresh ts (s<A> as a rename
-// tombstone → s<B>, s<B> live) and renames the local `…@s<A>` keys to `…@s<B>`.
-export function moveMount(
-   recs: MountRecord[],
-   fromId: string,
-   toInput: string,
-): { records: MountRecord[]; id: string } | null {
-   const url = normalizeStoreUrl(toInput)
-   if (!url) return null
-   const toId = mountId(url)
-   if (toId === fromId) return { records: recs, id: toId }
-   renameStoreState(fromId, toId)
-   const now = nowSec()
-   const from = recs.find((r) => r.id === fromId)
-   const others = recs.filter((r) => r.id !== fromId && r.id !== toId)
-   const tomb: MountRecord = {
-      ...(from ?? homeRecord()),
-      id: fromId,
-      role: "peer",
-      del: true,
-      moved_to: toId,
-      ts: now,
-   }
-   const live: MountRecord = {
-      id: toId,
-      url,
-      label: from?.label ?? "",
-      ord: from?.ord ?? recs.reduce((m, r) => (r.ord > m ? r.ord : m), 0) + 10,
-      role: "peer",
-      cred: from?.cred ?? false,
-      added: now,
-      ts: now,
-      del: false,
-   }
-   return { records: [...others, tomb, live], id: toId }
 }

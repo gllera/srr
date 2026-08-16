@@ -121,7 +121,7 @@ func TestRecipeLsAndShow(t *testing.T) {
 	stdout = &out
 	t.Cleanup(func() { stdout = saved })
 
-	if err := (&RecipeLsCmd{Format: "json"}).Run(); err != nil {
+	if err := (&RecipeLsCmd{formatFlag: formatFlag{Format: "json"}}).Run(); err != nil {
 		t.Fatalf("RecipeLsCmd: %v", err)
 	}
 	if !strings.Contains(out.String(), "read") || !strings.Contains(out.String(), defaultRecipeName) {
@@ -129,14 +129,14 @@ func TestRecipeLsAndShow(t *testing.T) {
 	}
 
 	out.Reset()
-	if err := (&RecipeShowCmd{Name: "read", Format: "json"}).Run(); err != nil {
+	if err := (&RecipeShowCmd{Name: "read", formatFlag: formatFlag{Format: "json"}}).Run(); err != nil {
 		t.Fatalf("RecipeShowCmd: %v", err)
 	}
 	if !strings.Contains(out.String(), "#sanitize") {
 		t.Errorf("show output missing the recipe pipe: %s", out.String())
 	}
 
-	err := (&RecipeShowCmd{Name: "nope", Format: "json"}).Run()
+	err := (&RecipeShowCmd{Name: "nope", formatFlag: formatFlag{Format: "json"}}).Run()
 	if err == nil || !strings.Contains(err.Error(), `recipe "nope" not found`) {
 		t.Errorf("RecipeShowCmd(nope) = %v, want a 'recipe \"nope\" not found' error", err)
 	}

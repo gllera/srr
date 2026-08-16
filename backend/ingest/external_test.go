@@ -40,7 +40,7 @@ func emit(t *testing.T, payload string) string {
 func TestExternalFetcherProtocol(t *testing.T) {
 	requireSh(t)
 
-	guid := hash("abc")
+	guid := Hash("abc")
 	payload := fmt.Sprintf(`{"etag":"e1","last_modified":"lm1","items":[{"guid":%d,"title":"T","content":"C","link":"https://x/1","published":"2024-03-01T12:00:00Z"}]}`, guid)
 
 	got, err := New().Fetch(context.Background(), emit(t, payload), nil, nil, Request{URL: "https://x", MaxSize: 1024})
@@ -162,7 +162,7 @@ func TestExternalFetcherSecretEnv(t *testing.T) {
 func TestExternalFetcherDatelessItem(t *testing.T) {
 	requireSh(t)
 
-	payload := fmt.Sprintf(`{"items":[{"guid":%d,"title":"T","content":"C","link":"https://x/1"}]}`, hash("no-date"))
+	payload := fmt.Sprintf(`{"items":[{"guid":%d,"title":"T","content":"C","link":"https://x/1"}]}`, Hash("no-date"))
 	got, err := New().Fetch(context.Background(), emit(t, payload), nil, nil, Request{URL: "https://x", MaxSize: 1024})
 	if err != nil {
 		t.Fatalf("fetch: %v", err)

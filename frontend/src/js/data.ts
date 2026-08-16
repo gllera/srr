@@ -22,7 +22,8 @@ import {
 } from "./idx"
 import { RELOAD_GUARD_KEY } from "./keys"
 import { activeMounts, loadMounts, reconcileMounts, renameStoreState, saveMounts, type MountRecord } from "./mounts"
-import { keyAt, legacyNames, manifestNames, type IManifestWire, type StoreNames } from "./names"
+import { gunzipJson, keyAt, legacyNames, manifestNames, type IManifestWire, type StoreNames } from "./names"
+import { ASSET_KEY_SRC } from "./sw-grammar"
 
 export { IDX_PACK_SIZE, META_PACK_SIZE }
 
@@ -260,12 +261,21 @@ export function setActive(mid: string): boolean {
    return true
 }
 
+// The "reader is older than the store" failure, minted in one place — parseDb
+// (the root's v) and loadManifest (the manifest's v) both throw it — so
+// classifyError keys on the class rather than the popup's prose.
+class TooNewError extends Error {
+   constructor(what: string, v: number | undefined) {
+      super(`This reader is older than the store (${what} v${v}, supported v${DB_FORMAT_VERSION}) — reload to update.`)
+   }
+}
+
 // Classify a boot/refresh failure into a chip kind (§8.3). A CORS rejection and
 // a network outage are indistinguishable to fetch (both a TypeError) — the chip
 // is honest about that ("Unreachable…") rather than claiming a cause.
 function classifyError(e: unknown): { kind: MountKind; error: string } {
    const msg = e instanceof Error ? e.message : String(e)
-   if (/older than the store/.test(msg)) return { kind: "toonew", error: msg }
+   if (e instanceof TooNewError) return { kind: "toonew", error: msg }
    // fetch threw (no Response) — network, CORS, or a timeout/abort.
    if (e instanceof TypeError || (e instanceof DOMException && (e.name === "TimeoutError" || e.name === "AbortError")))
       return { kind: "offline", error: "Unreachable" }
@@ -308,8 +318,8 @@ function assertPackOk(store: Store, res: Response, isLatest: boolean): void {
    //
    // §8.5: the guarded reload is a WHOLE-PAGE action, so it is HOME-ONLY. Firing
    // it because a PEER's tail 404'd would yank a reading user out of an unrelated
-   // store; a peer instead just throws here, and its own refreshPeers/retryMount
-   // re-boots that mount in place (the scoped recovery). The single global
+   // store; a peer instead just throws here, and refreshPeers re-boots that
+   // mount in place (the scoped recovery). The single global
    // reload guard stays correct — it guards the global action, cleared once the
    // home mount completes a successful applyDb.
    if (store.role === "home" && isLatest && !store.bgRefresh && !sessionStorage.getItem(RELOAD_GUARD_KEY)) {
@@ -335,7 +345,7 @@ function loadManifest(store: Store, m: number): Promise<IManifestWire> {
       // current, so it names a manifest the store should still serve; if it
       // doesn't, reloading would fetch the same pair again. Surface it.
       if (!res.ok) throw new Error(`manifest/${m}.gz fetch failed: ${res.status} ${res.url}`)
-      return (await new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).json()) as IManifestWire
+      return gunzipJson<IManifestWire>(res)
    }).then((parsed) => {
       // manifest/<m>.gz is write-once, so its body can only ever describe
       // generation m. A disagreement means the store served something else
@@ -346,10 +356,7 @@ function loadManifest(store: Store, m: number): Promise<IManifestWire> {
       // it names carry the same `v` (backend dbFormatVersion), because a root
       // is a pointer into the manifest chain and neither is meaningful without
       // the other.
-      if ((parsed.v ?? 0) > DB_FORMAT_VERSION)
-         throw new Error(
-            `This reader is older than the store (manifest v${parsed.v}, supported v${DB_FORMAT_VERSION}) — reload to update.`,
-         )
+      if ((parsed.v ?? 0) > DB_FORMAT_VERSION) throw new TooNewError("manifest", parsed.v)
       return parsed
    })
    store.manifestMemo = { m, man }
@@ -397,15 +404,12 @@ async function parseDb(store: Store, res: Response): Promise<Snapshot> {
    // with a cryptic "incorrect header check"; surface the real status instead
    // (mirrors assertPackOk for the pack fetches).
    if (!res.ok) throw new Error(`db.gz fetch failed: ${res.status} ${res.url}`)
-   const raw: IRootWire = await new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).json()
+   const raw = await gunzipJson<IRootWire>(res)
    // A store stamped newer than this build understands: its layout may have
    // changed in ways this reader would misread, so say so plainly through the
    // error popup instead of rendering wrong (or crashing on a shifted field).
    // Absent v (0) is a store written before the field existed — readable.
-   if ((raw.v ?? 0) > DB_FORMAT_VERSION)
-      throw new Error(
-         `This reader is older than the store (format v${raw.v}, supported v${DB_FORMAT_VERSION}) — reload to update.`,
-      )
+   if ((raw.v ?? 0) > DB_FORMAT_VERSION) throw new TooNewError("format", raw.v)
    const snap = rootIsLegacy(raw) ? fromLegacyRoot(raw) : await fromManifestRoot(store, raw)
    snap.db.feeds ??= {}
    snap.db.seq ??= 0 // backend omitempty: absent for an empty store
@@ -801,29 +805,10 @@ export async function refreshPeers(): Promise<boolean> {
    return anyUpdated
 }
 
-// Reset every mount's backoff (an `online` event, or the user's retry action) so
-// the next poll retries immediately (§8.3 "reset on any success or an `online`
-// event").
-export function resetMountBackoff(mid?: string): void {
-   if (mid) backoffs.delete(mid)
-   else backoffs.clear()
-}
-
-// Retry ONE mount now: clear its backoff and (re)boot it. Used by the mount
-// card's per-mount retry action (§8.3). Returns true if it booted OK.
-export async function retryMount(mid: string): Promise<boolean> {
-   const s = stores.get(mid)
-   if (!s) return false
-   backoffs.delete(mid)
-   try {
-      s.dbLoad = loadDb(s)
-      await applyDb(s, await s.dbLoad)
-      statuses.set(mid, { state: "ok", kind: "", error: "" })
-      return true
-   } catch (e) {
-      statuses.set(mid, { state: "error", ...classifyError(e) })
-      return false
-   }
+// Reset every mount's backoff (an `online` event) so the next poll retries
+// immediately (§8.3 "reset on any success or an `online` event").
+export function resetMountBackoff(): void {
+   backoffs.clear()
 }
 
 // Finalized idx-pack count for the current store (the latest pack holds the
@@ -1257,9 +1242,9 @@ export function groupFeedsByTag(includeEmpty = false, store: Store = active): Gr
 // (the reader's idx addressing jumps to arbitrary packs). For [ALL] all idx
 // packs are included.
 // Self-hosted asset keys as they appear (relative) in article content:
-// assets/<2hex>/<16hex><ext>. Mirrors the SW's RE_ASSET shape; global so
+// assets/<2hex>/<16hex><ext>, from the grammar's one source string; global so
 // matchAll finds every reference in a data pack's articles.
-const ASSET_REF_RE = /assets\/[0-9a-f]{2}\/[0-9a-f]{16}(?:\.\w+)?/gi
+const ASSET_REF_RE = new RegExp(ASSET_KEY_SRC, "gi")
 
 export async function packNamesForFilter(feeds: ReadonlyMap<number, number>, store: Store = active): Promise<string[]> {
    if (store.db.total_art === 0) return []

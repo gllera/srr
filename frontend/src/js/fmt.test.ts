@@ -18,7 +18,8 @@ import {
    normalizeProxy,
    srcColorIndex,
    SRC_COLORS,
-   dayLabel,
+   dayLabelCtx,
+   dayLabelWith,
 } from "./fmt"
 
 beforeEach(() => {
@@ -984,20 +985,20 @@ describe("srcColorIndex", () => {
    })
 })
 
-describe("dayLabel", () => {
+describe("dayLabelWith", () => {
    const at = (y: number, m: number, d: number) => Math.floor(new Date(y, m, d, 12, 0, 0).getTime() / 1000)
 
    it("labels today and yesterday relatively", () => {
       const now = new Date()
       const today = at(now.getFullYear(), now.getMonth(), now.getDate())
       const yesterday = at(now.getFullYear(), now.getMonth(), now.getDate() - 1)
-      expect(dayLabel(today)).toBe("TODAY")
-      expect(dayLabel(yesterday)).toBe("YESTERDAY")
+      expect(dayLabelWith(today, dayLabelCtx())).toBe("TODAY")
+      expect(dayLabelWith(yesterday, dayLabelCtx())).toBe("YESTERDAY")
    })
 
    it("labels an older date with weekday, day, month and the year", () => {
       // 9 Jun 2020 was a Tuesday; year shown because it isn't the current year.
-      expect(dayLabel(at(2020, 5, 9))).toBe("TUE 9 JUN 2020")
+      expect(dayLabelWith(at(2020, 5, 9), dayLabelCtx())).toBe("TUE 9 JUN 2020")
    })
 })
 

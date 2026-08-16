@@ -631,8 +631,9 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 	// legacy store (migrated below) and a fresh store (m==0) both keep it nil,
 	// which forces their first commit to publish. Sidecar/seen hydration above
 	// touches only json:"-" and config-half fields, none of which the manifest
-	// carries, so the loaded public projection is intact here.
-	if db.core.legacyRoot == nil && db.core.ManifestNum > 0 {
+	// carries, so the loaded public projection is intact here. Only a locked
+	// session ever commits, so only a locked session pays the signature.
+	if locked && db.core.legacyRoot == nil && db.core.ManifestNum > 0 {
 		sig, err := db.manifestSig()
 		if err != nil {
 			db.Close(ctx)

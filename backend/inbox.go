@@ -95,6 +95,21 @@ func fetchState(ch *Feed) inboxState {
 	}
 }
 
+// applyTo adopts the state wholesale onto f — the single write-side fold of
+// the projection above, shared by applyInbox, applyFetched, and setFeedURL's
+// reset (a zero inboxState IS the fresh-source state), so the field set can't
+// drift across the three.
+func (s inboxState) applyTo(f *Feed) {
+	f.Watermark = s.Watermark
+	f.BoundaryGUIDs = s.BoundaryGUIDs
+	f.ETag = s.ETag
+	f.LastModified = s.LastModified
+	f.FetchError = s.FetchError
+	f.LastOK = s.LastOK
+	f.FailStreak = s.FailStreak
+	f.LastNew = s.LastNew
+}
+
 // equal reports whether two fetch states are identical — the "did anything
 // advance this feed underneath the fan-out" guard of applyFetched.
 func (s inboxState) equal(o inboxState) bool {
@@ -135,16 +150,12 @@ func spoolEnvelope(name string, cycleID int64, feeds []*Feed) inboxEnvelope {
 // writeInbox publishes one producer cycle to its slot. AtomicPut, so a
 // consolidator draining concurrently never observes a half-written envelope.
 func writeInbox(ctx context.Context, be store.Backend, name string, env inboxEnvelope) error {
-	var buf bytes.Buffer
-	zw := gzip.NewWriter(&buf)
-	if err := json.NewEncoder(zw).Encode(env); err != nil {
+	body, err := gzipJSON(env)
+	if err != nil {
 		return fmt.Errorf("encode inbox envelope: %w", err)
 	}
-	if err := zw.Close(); err != nil {
-		return fmt.Errorf("compress inbox envelope: %w", err)
-	}
 	key := inboxKey(name)
-	if err := be.AtomicPut(ctx, key, &buf, store.ObjectMeta{}); err != nil {
+	if err := be.AtomicPut(ctx, key, bytes.NewReader(body), store.ObjectMeta{}); err != nil {
 		return fmt.Errorf("write %s: %w", key, err)
 	}
 	return nil
@@ -244,14 +255,7 @@ func (db *DB) applyInbox(env *inboxEnvelope, today uint16) ([]*Item, int) {
 			continue
 		}
 
-		ch.Watermark = rec.State.Watermark
-		ch.BoundaryGUIDs = rec.State.BoundaryGUIDs
-		ch.ETag = rec.State.ETag
-		ch.LastModified = rec.State.LastModified
-		ch.FetchError = rec.State.FetchError
-		ch.LastOK = rec.State.LastOK
-		ch.FailStreak = rec.State.FailStreak
-		ch.LastNew = rec.State.LastNew
+		rec.State.applyTo(ch)
 
 		for _, h := range rec.Stamps {
 			db.seen.stamp(ch.id, h, today)

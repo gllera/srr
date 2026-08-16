@@ -10,9 +10,12 @@
 // series owns (e.g. data/h3.gz) is NOT a pack name.
 import { PACK_SERIES_KINDS } from "./format.gen"
 
-// Content-hash assets: assets/<2hex>/<16hex><ext>. Matched anywhere in the path
-// so it holds whatever prefix the cdn-url adds.
-export const RE_ASSET = /\/assets\/[0-9a-f]{2}\/[0-9a-f]{16}(?:\.\w+)?$/i
+// Content-hash assets: assets/<2hex>/<16hex><ext>. The one source string for
+// the key grammar — fmt.ts (ASSET_KEY) and data.ts (ASSET_REF_RE) build their
+// own RegExps from it with their own anchors and flags. RE_ASSET matches
+// anywhere in the path so it holds whatever prefix the cdn-url adds.
+export const ASSET_KEY_SRC = String.raw`assets/[0-9a-f]{2}/[0-9a-f]{16}(?:\.\w+)?`
+export const RE_ASSET = new RegExp(`/${ASSET_KEY_SRC}$`, "i")
 
 // The one object-name grammar: write-once names only. Every stem is an OPAQUE
 // bare digit run — the kind letters were retired with the derived names — but

@@ -6,7 +6,8 @@ const imgProxyDialog = document.querySelector<HTMLElement>(".srr-imgproxy-dialog
 const backupDialog = document.querySelector<HTMLElement>(".srr-backup-dialog")
 const syncDialog = document.querySelector<HTMLElement>(".srr-sync-dialog")
 
-function divEl(className: string): HTMLDivElement {
+// Exported for picker.ts, which builds its overlay rows the same way.
+export function divEl(className: string): HTMLDivElement {
    const d = document.createElement("div")
    d.className = className
    return d
@@ -519,29 +520,18 @@ export function showContextMenu(anchor: HTMLElement, items: MenuItem[], opts?: {
          e.preventDefault()
          e.stopPropagation() // the dialog discipline: never reach app.ts's Escape
          close()
-      } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      } else if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Tab") {
+         // Arrows step; Tab is trapped within the items (wrapping), like the
+         // modal shell — otherwise focus tabs out to the page behind the
+         // still-open floating menu.
          e.preventDefault()
          e.stopPropagation() // ...nor the reader's arrow navigation
+         const fwd = e.key === "ArrowDown" || (e.key === "Tab" && !e.shiftKey)
          const f = focusables()
          const at = f.indexOf(document.activeElement as HTMLButtonElement)
-         // From the container (no item focused yet) the arrows enter at the
-         // matching end; from an item they step with wrap-around.
-         const next =
-            at === -1
-               ? e.key === "ArrowDown"
-                  ? 0
-                  : f.length - 1
-               : (at + (e.key === "ArrowDown" ? 1 : -1) + f.length) % f.length
-         f[next]?.focus()
-      } else if (e.key === "Tab") {
-         // Trap Tab within the items (wrapping), like the modal shell — otherwise
-         // focus tabs out to the page behind the still-open floating menu.
-         e.preventDefault()
-         e.stopPropagation()
-         const f = focusables()
-         if (f.length === 0) return
-         const at = f.indexOf(document.activeElement as HTMLButtonElement)
-         const next = at === -1 ? (e.shiftKey ? f.length - 1 : 0) : (at + (e.shiftKey ? -1 : 1) + f.length) % f.length
+         // From the container (no item focused yet) enter at the matching end;
+         // from an item, step with wrap-around.
+         const next = at === -1 ? (fwd ? 0 : f.length - 1) : (at + (fwd ? 1 : -1) + f.length) % f.length
          f[next]?.focus()
       }
    }

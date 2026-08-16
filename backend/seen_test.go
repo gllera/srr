@@ -35,7 +35,7 @@ func TestParseSeenV1ReadCompat(t *testing.T) {
 	}
 }
 
-// fnv32 must be byte-for-byte the FNV-32a used by ingest.hash (ingest/feed.go),
+// fnv32 must be byte-for-byte the FNV-32a used by ingest.Hash (ingest/feed.go),
 // so a title/guid hashed here lands in the same u32 keyspace the ingest layer
 // stamps GUIDs into. Pinned to the standard FNV-1a-32 test vectors.
 func TestFNV32MatchesFNVBasis(t *testing.T) {

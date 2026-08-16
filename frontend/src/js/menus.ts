@@ -30,12 +30,12 @@ import * as picker from "./picker"
 import { listPins } from "./pin"
 import { pinMenuEntry, postMounts } from "./pin-ui"
 import { enterSearch } from "./search-ui"
-import { isSplit } from "./split"
 
 export interface MenuDeps {
-   // Which surface is showing — the frontier reconciliation rebuilds the list only
-   // when it is the visible one (a display:none rebuild would pin zero row heights).
-   view: () => "list" | "reader"
+   // Is the LIST pane on screen (app.ts's layout facade)? The frontier
+   // reconciliation rebuilds the list only while it is — a display:none rebuild
+   // would pin zero row heights.
+   listVisible: () => boolean
    // The retryable error popup (the pin row's only app-level need).
    showError: (e: unknown, retry?: () => void) => void
    // The transient, focus-free notice — the undo offer's surface.
@@ -118,13 +118,12 @@ export async function offerFrontierUndo(): Promise<void> {
 // An open reader re-probes its chrome silently (prev/next + the pending pill
 // re-derive from the re-raised bounds; no content re-render, no scroll),
 // mirroring refreshAfterStore's reader branch.
-// Split view flips "is the list the visible surface?" from a question about
-// `view` to a question about the layout: the pane is on screen whatever surface
-// holds focus, so both branches below must treat it as visible or it keeps
-// showing the pre-move row set (stale membership under unread-only, stale dots
-// otherwise) with its observer torn down and no rebuild scheduled.
+// Both branches key on layout visibility (d.listVisible), never `view`: an
+// on-screen pane skipped here keeps showing the pre-move row set (stale
+// membership under unread-only, stale dots otherwise) with its observer torn
+// down and no rebuild scheduled.
 function afterFrontierMove() {
-   const listVisible = d.view() === "list" || isSplit()
+   const listVisible = d.listVisible()
    if (nav.isUnreadOnly()) {
       nav.applyFilter([...nav.filterTokens()])
       if (listVisible) void list.rerender()

@@ -415,14 +415,7 @@ func setFeedURL(ch *Feed, url string) {
 		return
 	}
 	ch.URL = url
-	ch.ETag = ""
-	ch.LastModified = ""
-	ch.Watermark = 0
-	ch.BoundaryGUIDs = nil
-	ch.FetchError = ""
-	ch.LastOK = 0
-	ch.FailStreak = 0
-	ch.LastNew = 0
+	inboxState{}.applyTo(ch)
 }
 
 type RmCmd struct {
@@ -512,8 +505,8 @@ func (o *RmCmd) report(ctx context.Context, db *DB, id int) error {
 }
 
 type LsCmd struct {
-	Tag    *string `short:"g" optional:"" help:"Filter by tag."`
-	Format string  `short:"f" default:"json" enum:"yaml,json" help:"Output format."`
+	Tag *string `short:"g" optional:"" help:"Filter by tag."`
+	formatFlag
 }
 
 func (o *LsCmd) Run() error {
@@ -533,8 +526,8 @@ func (o *LsCmd) Run() error {
 }
 
 type ShowCmd struct {
-	ID     int    `arg:"" help:"Feed id."`
-	Format string `short:"f" default:"json" enum:"yaml,json" help:"Output format."`
+	ID int `arg:"" help:"Feed id."`
+	formatFlag
 }
 
 func (o *ShowCmd) Run() error {

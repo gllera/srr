@@ -284,34 +284,56 @@ function feedRow(f: FeedListView): HTMLElement {
    )
 }
 
-// fetchOneFeed runs a single-feed fetch cycle (POST /api/fetch?id=N) from the
-// row action: outcome in the banner, then a snapshot refresh redraws the row.
-async function fetchOneFeed(f: FeedListView, btn: HTMLButtonElement): Promise<void> {
+// runFetchCycle is the shared skeleton of the two SSE fetch actions below:
+// disable the trigger, mark the body fetching for the cycle's duration, stream
+// the cycle folding each per-feed frame through onFeed, hand the cycle-level
+// error ("" when clean) to report — which owns the outcome banner — then
+// reconcile with a snapshot refresh.
+async function runFetchCycle(
+   btn: HTMLButtonElement,
+   path: string,
+   onFeed: (p: FeedProgress) => void,
+   report: (errMsg: string) => void,
+): Promise<void> {
    btn.disabled = true
    document.body.classList.add("fetching")
-   let result: FeedProgress | null = null
    let errMsg = ""
    try {
-      await streamSSE("/api/fetch?id=" + f.id, ({ event, data }) => {
-         if (event === "feed") {
-            result = data as FeedProgress
-            applyFeedEvent(result)
-         } else if (event === "error") errMsg = (data as { error: string }).error
+      await streamSSE(path, ({ event, data }) => {
+         if (event === "feed") onFeed(data as FeedProgress)
+         else if (event === "error") errMsg = (data as { error: string }).error
       })
    } catch (e) {
       errMsg = (e as Error).message
    } finally {
       document.body.classList.remove("fetching")
    }
-   const r: FeedProgress | null = result
-   if (errMsg) banner(errMsg)
-   else if (r && r.error) banner(`${r.title}: ${r.error}`)
-   else if (r) banner(`${r.title}: ${r.new} new article${r.new === 1 ? "" : "s"}`, true)
+   report(errMsg)
    try {
       await refresh()
    } catch (e) {
       banner((e as Error).message)
    }
+}
+
+// fetchOneFeed runs a single-feed fetch cycle (POST /api/fetch?id=N) from the
+// row action: outcome in the banner, then a snapshot refresh redraws the row.
+async function fetchOneFeed(f: FeedListView, btn: HTMLButtonElement): Promise<void> {
+   let result: FeedProgress | null = null
+   await runFetchCycle(
+      btn,
+      "/api/fetch?id=" + f.id,
+      (p) => {
+         result = p
+         applyFeedEvent(p)
+      },
+      (errMsg) => {
+         const r = result
+         if (errMsg) banner(errMsg)
+         else if (r && r.error) banner(`${r.title}: ${r.error}`)
+         else if (r) banner(`${r.title}: ${r.new} new article${r.new === 1 ? "" : "s"}`, true)
+      },
+   )
 }
 
 // applyFeedEvent folds one SSE per-feed result into the cached snapshot and, on
@@ -345,30 +367,19 @@ export function applyFeedEvent(p: FeedProgress): void {
 // action — the alarm carries its own remedy.
 async function fetchAllFromStrip(btn: HTMLButtonElement): Promise<void> {
    if (document.body.classList.contains("fetching")) return
-   btn.disabled = true
-   document.body.classList.add("fetching")
-   let errMsg = ""
    let failed = 0
-   try {
-      await streamSSE("/api/fetch", ({ event, data }) => {
-         if (event === "feed") {
-            const p = data as FeedProgress
-            if (p.error) failed++
-            applyFeedEvent(p)
-         } else if (event === "error") errMsg = (data as { error: string }).error
-      })
-   } catch (e) {
-      errMsg = (e as Error).message
-   } finally {
-      document.body.classList.remove("fetching")
-   }
-   if (errMsg) banner(errMsg)
-   else banner(failed ? `Fetch done — ${failed} feed${failed === 1 ? "" : "s"} failed` : "Fetch done", !failed)
-   try {
-      await refresh()
-   } catch (e) {
-      banner((e as Error).message)
-   }
+   await runFetchCycle(
+      btn,
+      "/api/fetch",
+      (p) => {
+         if (p.error) failed++
+         applyFeedEvent(p)
+      },
+      (errMsg) => {
+         if (errMsg) banner(errMsg)
+         else banner(failed ? `Fetch done — ${failed} feed${failed === 1 ? "" : "s"} failed` : "Fetch done", !failed)
+      },
+   )
 }
 
 // Column comparators for the sortable headers. Numeric columns first-click

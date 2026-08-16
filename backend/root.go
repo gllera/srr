@@ -143,7 +143,7 @@ func namesFromLegacy(l *legacyCore) (*ManifestNames, []legacyObject) {
 	// legacy pairs each pre-cutover key with the fresh stem reserved for it;
 	// migrateRoot copies one to the other.
 	var legacy []legacyObject
-	stemKey := func(series string, stem int) string { return fmt.Sprintf("%s/%d.gz", series, stem) }
+	stemKey := store.PackKey
 
 	nf := numFinalizedIdx(l.TotalArticles)
 	tc := l.TotalArticles - l.DeltaArticles

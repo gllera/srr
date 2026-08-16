@@ -23,7 +23,7 @@ type RecipeGroup struct {
 
 // RecipeLsCmd prints the whole recipes map as JSON/YAML.
 type RecipeLsCmd struct {
-	Format string `short:"f" default:"json" enum:"yaml,json" help:"Output format."`
+	formatFlag
 }
 
 func (o *RecipeLsCmd) Run() error {
@@ -34,8 +34,8 @@ func (o *RecipeLsCmd) Run() error {
 
 // RecipeShowCmd prints one recipe; errors if it does not exist.
 type RecipeShowCmd struct {
-	Name   string `arg:"" help:"Recipe name."`
-	Format string `short:"f" default:"json" enum:"yaml,json" help:"Output format."`
+	Name string `arg:"" help:"Recipe name."`
+	formatFlag
 }
 
 func (o *RecipeShowCmd) Run() error {

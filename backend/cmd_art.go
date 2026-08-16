@@ -191,20 +191,6 @@ func listArticles(ctx context.Context, db *DB, q artQuery) (*articlesOutput, err
 		return strings.Contains(foldSearchText(ad.Title), needle), nil
 	}
 
-	// Total counts the window, not the store: it answers "how many
-	// articles does this query match", which is what the returned page is
-	// drawn from.
-	filteredTotal := 0
-	for i := lo; i <= hi; i++ {
-		ok, err := matches(&entries[i])
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			filteredTotal++
-		}
-	}
-
 	startIdx := hi
 	if q.before != nil {
 		b := sort.Search(len(entries), func(i int) bool {
@@ -214,14 +200,16 @@ func listArticles(ctx context.Context, db *DB, q artQuery) (*articlesOutput, err
 			startIdx = b
 		}
 	}
-	if startIdx < lo {
-		return &articlesOutput{Articles: []articleResult{}, Total: filteredTotal}, nil
-	}
 
+	// One descending pass runs matches once per entry: Total counts the whole
+	// window — not the store: it answers "how many articles does this query
+	// match", which is what the returned page is drawn from — while the page
+	// collects only below the --before clamp, until the limit fills.
+	filteredTotal := 0
 	var results []articleResult
 	lastID := -1
 
-	for i := startIdx; i >= lo && len(results) < q.limit; i-- {
+	for i := hi; i >= lo; i-- {
 		e := &entries[i]
 		ok, err := matches(e)
 		if err != nil {
@@ -230,12 +218,19 @@ func listArticles(ctx context.Context, db *DB, q artQuery) (*articlesOutput, err
 		if !ok {
 			continue
 		}
+		filteredTotal++
+		if i > startIdx || len(results) >= q.limit {
+			continue
+		}
 		results = append(results, articleResult{
 			Idx:        e.ChronIdx,
 			packID:     e.PackID,
 			packOffset: e.PackOffset,
 		})
 		lastID = e.ChronIdx
+	}
+	if startIdx < lo {
+		return &articlesOutput{Articles: []articleResult{}, Total: filteredTotal}, nil
 	}
 
 	if len(results) > 0 {

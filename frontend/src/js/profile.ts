@@ -63,6 +63,7 @@ import {
    UNREAD_ONLY_KEY,
 } from "./keys"
 import {
+   coerceRecord,
    loadMounts,
    mergeMountRecords,
    reconcileMounts,
@@ -398,41 +399,61 @@ export interface ImportResult {
    mountsChanged?: boolean
 }
 
-// seen — the per-key rule shared verbatim by both import modes: a key whose
-// incoming `st` timestamp is strictly newer than the local one wins in either
-// direction (raise or explicit rewind); a key without a timestamp on either
-// side falls back to the legacy one-way max. Adopting an incoming value adopts
-// its timestamp verbatim (or drops the local one when the incoming side has
-// none — the value's ordering is then genuinely unknown). Returns whether any
+// The per-key seen rule shared verbatim by both import modes and every mount:
+// a key whose incoming `st` timestamp is strictly newer than the local one wins
+// in either direction (raise or explicit rewind — the ONE path allowed to lower
+// a frontier); a key without a timestamp on either side falls back to the
+// legacy one-way max. Adopting an incoming value adopts its timestamp verbatim
+// (or drops the local one when the incoming side has none — the value's
+// ordering is then genuinely unknown). Mutates `existing`/`existingTs` in
+// place; the callers own the reads (their differing corrupt-input tolerance)
+// and the writes.
+function mergeSeenInto(
+   existing: Record<string, number>,
+   existingTs: Record<string, number>,
+   incoming: Record<string, unknown>,
+   incomingTs: Record<string, number>,
+): { changed: boolean; tsChanged: boolean } {
+   let changed = false
+   let tsChanged = false
+   for (const [k, v] of Object.entries(incoming)) {
+      if (typeof v !== "number" || !Number.isFinite(v)) continue
+      const localV = existing[k]
+      const localTs = existingTs[k] ?? 0
+      const remoteTs = incomingTs[k] ?? 0
+      // Both sides carry ordering info and disagree → strict LWW (this is
+      // the one path that can lower a value: an explicit rewind). Otherwise
+      // legacy raise-only max — and when the max ADOPTS the incoming value,
+      // its timestamp (or lack of one) comes along.
+      const adopt = localTs > 0 && remoteTs > 0 && remoteTs !== localTs ? remoteTs > localTs : v > (localV ?? -1) // tie or no ordering → one-way raise
+      if (!adopt) continue
+      if (v !== localV) {
+         existing[k] = v
+         changed = true
+      }
+      if (remoteTs !== localTs) {
+         if (remoteTs > 0) existingTs[k] = remoteTs
+         else delete existingTs[k]
+         tsChanged = true
+      }
+   }
+   return { changed, tsChanged }
+}
+
+// seen — the HOME store's merge: mergeSeenInto over the lenient readers
+// (readSeen/readSeenTs degrade any corrupt map to {}). Returns whether any
 // seen VALUE actually changed (timestamp-only convergence is not a change).
 function mergeSeen(incoming: unknown, incomingTs: Record<string, number>): boolean {
    try {
       if (incoming === null || typeof incoming !== "object" || Array.isArray(incoming)) return false
       const existing = readSeen()
       const existingTs = readSeenTs()
-      let changed = false
-      let tsChanged = false
-      for (const [k, v] of Object.entries(incoming as Record<string, unknown>)) {
-         if (typeof v !== "number" || !Number.isFinite(v)) continue
-         const localV = existing[k]
-         const localTs = existingTs[k] ?? 0
-         const remoteTs = incomingTs[k] ?? 0
-         // Both sides carry ordering info and disagree → strict LWW (this is
-         // the one path that can lower a value: an explicit rewind). Otherwise
-         // legacy raise-only max — and when the max ADOPTS the incoming value,
-         // its timestamp (or lack of one) comes along.
-         const adopt = localTs > 0 && remoteTs > 0 && remoteTs !== localTs ? remoteTs > localTs : v > (localV ?? -1) // tie or no ordering → one-way raise
-         if (!adopt) continue
-         if (v !== localV) {
-            existing[k] = v
-            changed = true
-         }
-         if (remoteTs !== localTs) {
-            if (remoteTs > 0) existingTs[k] = remoteTs
-            else delete existingTs[k]
-            tsChanged = true
-         }
-      }
+      const { changed, tsChanged } = mergeSeenInto(
+         existing,
+         existingTs,
+         incoming as Record<string, unknown>,
+         incomingTs,
+      )
       if (changed) lsSet(SEEN_KEY, JSON.stringify(existing))
       if (tsChanged) lsSet(SEEN_TS_KEY, JSON.stringify(existingTs))
       return changed
@@ -518,32 +539,20 @@ function mergeSubstate(mid: string, sub: unknown, mode: "merge" | "sync"): boole
    return changed
 }
 
-// mergeSeenMid is mergeSeen for a mount id's namespaced keys — the same per-key
-// LWW rule (strictly-newer st wins in either direction, else raise-only max).
+// mergeSeenMid is mergeSeen for a mount id's namespaced keys — the same
+// mergeSeenInto adopt loop, but over the strict readers (parseMap/cleanTsMap
+// drop malformed entries key by key rather than degrading the whole map).
 function mergeSeenMid(mid: string, incoming: unknown, incomingTs: Record<string, number>): boolean {
    try {
       if (incoming === null || typeof incoming !== "object" || Array.isArray(incoming)) return false
       const existing = parseMap(lsGet(seenKey(mid)))
       const existingTs = cleanTsMap(parseAny(lsGet(seenTsKey(mid))))
-      let changed = false
-      let tsChanged = false
-      for (const [k, v] of Object.entries(incoming as Record<string, unknown>)) {
-         if (typeof v !== "number" || !Number.isFinite(v)) continue
-         const localV = existing[k]
-         const localTs = existingTs[k] ?? 0
-         const remoteTs = incomingTs[k] ?? 0
-         const adopt = localTs > 0 && remoteTs > 0 && remoteTs !== localTs ? remoteTs > localTs : v > (localV ?? -1)
-         if (!adopt) continue
-         if (v !== localV) {
-            existing[k] = v
-            changed = true
-         }
-         if (remoteTs !== localTs) {
-            if (remoteTs > 0) existingTs[k] = remoteTs
-            else delete existingTs[k]
-            tsChanged = true
-         }
-      }
+      const { changed, tsChanged } = mergeSeenInto(
+         existing,
+         existingTs,
+         incoming as Record<string, unknown>,
+         incomingTs,
+      )
       if (changed) lsSet(seenKey(mid), JSON.stringify(existing))
       if (tsChanged) lsSet(seenTsKey(mid), JSON.stringify(existingTs))
       return changed
@@ -608,7 +617,7 @@ export function exportProfile(): string {
 function mergeMountState(obj: Record<string, unknown>, mode: "merge" | "sync"): boolean {
    let changed = false
    if (Array.isArray(obj["mnt"])) {
-      const incoming = (obj["mnt"] as unknown[]).map(coerceMountRecord).filter((r): r is MountRecord => r !== null)
+      const incoming = (obj["mnt"] as unknown[]).map(coerceRecord).filter((r): r is MountRecord => r !== null)
       // A modern build ALWAYS writes `mnt` (exportProfile → ensureHome ⇒ never
       // empty), so this branch runs on essentially every pull. Only report a
       // change when the table actually MOVED — an identical mnt round-trip must
@@ -631,27 +640,6 @@ function mergeMountState(obj: Record<string, unknown>, mode: "merge" | "sync"): 
       }
    }
    return changed
-}
-
-// A lenient coercion of one untrusted mnt record (mirrors mounts.ts's internal
-// one, which is not exported). Strict on id/url; tolerant elsewhere.
-function coerceMountRecord(r: unknown): MountRecord | null {
-   if (typeof r !== "object" || r === null || Array.isArray(r)) return null
-   const o = r as Record<string, unknown>
-   if (typeof o["id"] !== "string" || !o["id"] || typeof o["url"] !== "string" || !o["url"]) return null
-   const rec: MountRecord = {
-      id: o["id"],
-      url: o["url"],
-      label: typeof o["label"] === "string" ? o["label"] : "",
-      ord: typeof o["ord"] === "number" && Number.isFinite(o["ord"]) ? o["ord"] : 0,
-      role: o["role"] === "home" ? "home" : "peer",
-      cred: o["cred"] === true,
-      added: typeof o["added"] === "number" && Number.isFinite(o["added"]) ? Math.floor(o["added"] as number) : 0,
-      ts: typeof o["ts"] === "number" && Number.isFinite(o["ts"]) ? Math.floor(o["ts"] as number) : 0,
-      del: o["del"] === true,
-   }
-   if (typeof o["moved_to"] === "string" && o["moved_to"]) rec.moved_to = o["moved_to"]
-   return rec
 }
 
 // importProfile parses `json` and applies it to the current device's state.

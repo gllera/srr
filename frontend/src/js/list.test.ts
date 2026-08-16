@@ -220,7 +220,6 @@ vi.mock("./fmt", () => ({
    srcColorIndex: (id: number) => id % 8,
    // Two chrons per "day" so a small fixture spans multiple strata. list.ts
    // relabels through the hoisted-ctx pair; the ctx itself is opaque to it.
-   dayLabel: (n: number) => "D" + Math.floor(n / 2),
    dayLabelCtx: () => ({ nowYear: 0, midnightNow: 0 }),
    dayLabelWith: (n: number) => "D" + Math.floor(n / 2),
    // The real cap-at-999 readout; the "N new" pill shares it with the reader's
@@ -284,7 +283,7 @@ describe("list", () => {
    })
 
    it("inserts a sticky day divider before the first row of each day stratum", async () => {
-      // dayLabel stub buckets 2 chrons/day; rows 5..0 → D2,D2,D1,D1,D0,D0.
+      // dayLabelWith stub buckets 2 chrons/day; rows 5..0 → D2,D2,D1,D1,D0,D0.
       setIndex(6)
       await list.render()
       const divs = Array.from(document.querySelectorAll(".srr-day-divider"))
@@ -1539,7 +1538,7 @@ describe("list", () => {
    })
 
    it("snaps flush when the same-day row above is clipped by the pinned divider (no gap)", async () => {
-      setIndex(10) // dayLabel = 2 chrons/day, so row 6 is the 2nd row of its day (row 7 above)
+      setIndex(10) // dayLabelWith = 2 chrons/day, so row 6 is the 2nd row of its day (row 7 above)
       nav._setAnchor(5)
       await list.render()
 

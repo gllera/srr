@@ -10,16 +10,18 @@ export interface SSEEvent {
    data: unknown
 }
 
-// api(method, path, body?) issues a JSON request and returns the parsed body.
+// api(method, path, body?, contentType?) issues a JSON request — or, when
+// contentType is set, sends body raw under that header (the OPML import's XML
+// dry-run) — and returns the parsed body.
 // Errors are NOT always our JSON {error}: hostGuard and intermediaries (the
 // tunnel, Cloudflare Access) answer plain text or HTML — that body is surfaced
 // verbatim, which is how a topology error (a 403, an Access login page) gets
 // diagnosed instead of showing an opaque "invalid JSON".
-export async function api(method: string, path: string, body?: unknown): Promise<unknown> {
+export async function api(method: string, path: string, body?: unknown, contentType?: string): Promise<unknown> {
    const opts: RequestInit = { method, headers: {} }
    if (body !== undefined) {
-      ;(opts.headers as Record<string, string>)["Content-Type"] = "application/json"
-      opts.body = JSON.stringify(body)
+      ;(opts.headers as Record<string, string>)["Content-Type"] = contentType ?? "application/json"
+      opts.body = contentType ? (body as BodyInit) : JSON.stringify(body)
    }
    const res = await fetch(path, opts)
    const text = await res.text()

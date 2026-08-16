@@ -29,6 +29,13 @@ import {
 
 export type { IManifestWire }
 
+// Gunzip a fetched store object straight to JSON. Store objects are served as
+// raw gzip bytes with no Content-Encoding, so the reader (data.ts) and the
+// service worker both decompress by hand — through this one helper. Callers
+// pass res (or res.clone()) themselves.
+export const gunzipJson = <T>(res: Response): Promise<T> =>
+   new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).json() as Promise<T>
+
 // --- resolved names -------------------------------------------------------
 
 export interface SeriesList {

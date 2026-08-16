@@ -1,5 +1,6 @@
 import { PACK_BASE } from "./base"
 import { IMG_PROXY_KEY } from "./keys"
+import { ASSET_KEY_SRC } from "./sw-grammar"
 import { HTTP_RE, isValidHttpish, normalizeHttpish, URL_DENY } from "./urlish"
 
 // URL_DENY (imported from its side-effect-free home, urlish.ts) guards only
@@ -399,7 +400,7 @@ export function extractPrefetchMedia(html: string, base: URL = PACK_BASE): IPref
 // article content (backend assets.go contentHashKey). Anchored at both ends: an
 // external URL that merely CONTAINS such a path is not a key of this store, and
 // only a key can be pinned.
-const ASSET_KEY = /^assets\/[0-9a-f]{2}\/[0-9a-f]{16}(?:\.\w+)?$/i
+const ASSET_KEY = new RegExp(`^${ASSET_KEY_SRC}$`, "i")
 
 // The self-hosted asset keys an article references, for the ★-Saved pin path
 // (app.ts). Mirrors the backend's own asset attribute set (mod/helper_assets.go
@@ -539,16 +540,7 @@ export function srcColorIndex(feedId: number): number {
 const DOW = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"]
 const MON = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
 
-// A coarse day label for the list's time strata: TODAY / YESTERDAY for the near
-// edge (how you think when catching up), otherwise weekday + day + month, with
-// the year appended only when it isn't the current one. Local time (matches the
-// per-row age). Math.round on the local-midnight difference stays correct
-// across a DST hour.
-export function dayLabel(unix: number): string {
-   return dayLabelWith(unix, dayLabelCtx())
-}
-
-// The per-call invariants of dayLabel (current time + its local midnight),
+// The per-call invariants of the day label (current time + its local midnight),
 // hoisted so a bulk pass (list.ts relabelDividers walks every loaded row)
 // builds them once instead of twice per row.
 export interface DayLabelCtx {
@@ -564,6 +556,11 @@ export function dayLabelCtx(): DayLabelCtx {
    }
 }
 
+// A coarse day label for the list's time strata: TODAY / YESTERDAY for the near
+// edge (how you think when catching up), otherwise weekday + day + month, with
+// the year appended only when it isn't the current one. Local time (matches the
+// per-row age). Math.round on the local-midnight difference stays correct
+// across a DST hour.
 export function dayLabelWith(unix: number, ctx: DayLabelCtx): string {
    const d = new Date(unix * 1000)
    const diff = Math.round(

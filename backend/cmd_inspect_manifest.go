@@ -124,7 +124,7 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 		}
 		next := names.Next[series]
 		for _, stem := range s.Stems {
-			k := fmt.Sprintf("%s/%d.gz", series, stem)
+			k := store.PackKey(series, stem)
 			if seen[k] {
 				bad("M3 violated: %s is listed twice", k)
 			}
@@ -140,7 +140,7 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 	// true at runtime; this catches a hand-edited or corrupt manifest that reused
 	// a finalized-pack stem for a summary, or placed one at/above the counter.
 	checkStem := func(series string, stem int) {
-		k := fmt.Sprintf("%s/%d.gz", series, stem)
+		k := store.PackKey(series, stem)
 		if seen[k] {
 			bad("M3 violated: %s is listed twice", k)
 		}

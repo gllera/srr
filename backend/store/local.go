@@ -185,18 +185,7 @@ func (d *Local) Version(_ context.Context, key string) (string, error) {
 // local store is one filesystem on one host; the multi-writer race this guards
 // belongs to object storage, where s3.go implements it for real.
 func (d *Local) PutIfVersion(ctx context.Context, key string, r io.Reader, meta ObjectMeta, want string) (string, error) {
-	cur, err := d.Version(ctx, key)
-	if err != nil {
-		return "", err
-	}
-	if cur != want {
-		return "", fmt.Errorf("%s: %w", d.localPath("conditional write", key), ErrPreconditionFailed)
-	}
-	h := sha256.New()
-	if err := d.AtomicPut(ctx, key, io.TeeReader(r, h), meta); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return putIfVersionDigest(ctx, d, func() string { return d.localPath("conditional write", key) }, key, r, meta, want)
 }
 
 // sweepTempLeftovers removes uniqueTempName staging files a hard-killed

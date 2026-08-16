@@ -153,9 +153,12 @@ func Resolve(ctx context.Context, client *http.Client, rawURL string, maxSize in
 
 // --- RSS/Atom/RDF feed parser -----------------------------------------
 
-// hash is FNV-32a, inlined to avoid the per-call hash.Hash32 allocation
-// (this runs once per parsed item across every fetch).
-func hash(s string) uint32 {
+// Hash is FNV-32a, inlined to avoid the per-call hash.Hash32 allocation
+// (this runs once per parsed item across every fetch). Exported because it
+// defines the u32 keyspace item GUIDs are stamped into: the seen pool's
+// folded-title hashes (seen.go titleHash) must land in the same keyspace, so
+// membership there is the OR over both axes.
+func Hash(s string) uint32 {
 	const (
 		offset32 = 2166136261
 		prime32  = 16777619
@@ -281,13 +284,13 @@ func rawToFeedItem(r mod.RawFeedItem, dateHint *string) *mod.RawItem {
 	}
 	if guid == "" {
 		// No guid/id/link: derive a stable id from the item's own text so
-		// distinct dateless/linkless items don't all collapse to hash("")
+		// distinct dateless/linkless items don't all collapse to Hash("")
 		// and dedup each other away.
 		guid = "t:" + title + "\x00c:" + content
 	}
 
 	return &mod.RawItem{
-		GUID:      hash(guid),
+		GUID:      Hash(guid),
 		Title:     title,
 		Content:   content,
 		Link:      link,

@@ -533,13 +533,13 @@ func TestCacheControlForKey(t *testing.T) {
 		key, want string
 	}{
 		{"db.gz", cacheRevalidate},
-		{"idx/0.gz", cacheImmutable},
-		{"idx/12.gz", cacheImmutable},
-		{"data/1.gz", cacheImmutable},
-		{"data/250.gz", cacheImmutable},
-		{"meta/0.gz", cacheImmutable},
-		{"seen/441.gz", cacheImmutable},
-		{"assets/ab/0123456789abcdef.jpg", cacheImmutable},
+		{"idx/0.gz", CacheImmutable},
+		{"idx/12.gz", CacheImmutable},
+		{"data/1.gz", CacheImmutable},
+		{"data/250.gz", CacheImmutable},
+		{"meta/0.gz", CacheImmutable},
+		{"seen/441.gz", CacheImmutable},
+		{"assets/ab/0123456789abcdef.jpg", CacheImmutable},
 		// Every stem is now an OPAQUE digit run: the kind letters were retired
 		// with the derived names, so an L/h/s/d form is not a name any series
 		// can produce and must not be stamped immutable.
@@ -574,8 +574,8 @@ func TestCacheControlForKey(t *testing.T) {
 		{"db.gz", cacheRevalidate},
 		// manifest/<m>.gz — the immutable generation manifests every Commit
 		// publishes (docs/MANIFEST-SPEC.md §4.2). Bare stems only, like db/.
-		{"manifest/1.gz", cacheImmutable},
-		{"manifest/1743.gz", cacheImmutable},
+		{"manifest/1.gz", CacheImmutable},
+		{"manifest/1743.gz", CacheImmutable},
 		{"manifest/L3.gz", ""},
 		{"manifest/d1.gz", ""},
 		// config.gz — the backend-only config sidecar (§4.3). Mutable like
@@ -602,12 +602,12 @@ func TestCacheControlForKeyFrontend(t *testing.T) {
 		{"manifest.webmanifest", cacheRevalidate},
 		{"sitemap.txt", cacheRevalidate},
 		// Content-hashed root assets: immutable.
-		{"frontend.5730a221.css", cacheImmutable},
-		{"frontend.778222e7.js", cacheImmutable},
-		{"sw.57d1d92e.js", cacheImmutable},
-		{"icon.aea4e164.svg", cacheImmutable},
-		{"icon-192.936dab90.png", cacheImmutable},
-		{"apple-touch-icon.bcdd2574.png", cacheImmutable},
+		{"frontend.5730a221.css", CacheImmutable},
+		{"frontend.778222e7.js", CacheImmutable},
+		{"sw.57d1d92e.js", CacheImmutable},
+		{"icon.aea4e164.svg", CacheImmutable},
+		{"icon-192.936dab90.png", CacheImmutable},
+		{"apple-touch-icon.bcdd2574.png", CacheImmutable},
 		// Not a hash (too short / non-hex) → no policy.
 		{"frontend.css", ""},
 		{"app.1234.js", ""},

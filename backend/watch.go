@@ -369,10 +369,8 @@ func (o *DB) SyncWatch(ctx context.Context, written []ArticleData) error {
 			eval(fastBase+i, &written[i])
 		}
 	} else {
-		chron := start
-		if err := o.walkArticles(ctx, start, total, func(ad *ArticleData) error {
+		if err := o.walkArticles(ctx, start, total, func(chron int, ad *ArticleData) error {
 			eval(chron, ad)
-			chron++
 			return nil
 		}); err != nil {
 			return fmt.Errorf("watch: reading chrons [%d, %d): %w", start, total, err)
@@ -401,7 +399,7 @@ func (o *DB) SyncWatch(ctx context.Context, written []ArticleData) error {
 			return err
 		}
 		stem := names.alloc(watchSeries)
-		key := fmt.Sprintf("%s/%d.gz", watchSeries, stem)
+		key := store.PackKey(watchSeries, stem)
 		if err := o.AtomicPut(ctx, key, bytes.NewReader(body), store.ObjectMeta{}); err != nil {
 			return fmt.Errorf("write %s: %w", key, err)
 		}

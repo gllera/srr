@@ -34,7 +34,7 @@ import * as data from "./data"
 import { showContextMenu, type MenuItem } from "./dropdown"
 import { el } from "./els"
 import { srcColorIndex } from "./fmt"
-import { ROW_SWIPE_TRIGGER } from "./gestures"
+import { AXIS_SLOP, ROW_SWIPE_TRIGGER } from "./gestures"
 import { PLAYER_RATE_KEY, playerStateKey } from "./keys"
 import { URL_DENY } from "./urlish"
 
@@ -996,8 +996,7 @@ function moveQueued(entry: QueueEntry, delta: -1 | 1): void {
 // gestures.ts registration: the document machine declines any touch starting
 // inside .srr-player (the scrubber guard), so it can never reach these rows —
 // and that is right, a drag here must never read as a reader page turn. The
-// axis lock restates the machine's own three faces at the same slop.
-const PANEL_AXIS_SLOP = 8 // gestures.ts's AXIS_SLOP, restated for the same feel
+// axis lock is the machine's own three faces at its own AXIS_SLOP.
 function attachRowSwipe(row: HTMLElement, entry: QueueEntry): void {
    let x0 = 0
    let y0 = 0
@@ -1027,11 +1026,11 @@ function attachRowSwipe(row: HTMLElement, entry: QueueEntry): void {
       const dy = e.touches[0].clientY - y0
       if (mode === "idle") {
          // Vertical-dominant past the slop is a scroll for the gesture's life.
-         if (Math.abs(dy) > PANEL_AXIS_SLOP && Math.abs(dy) >= Math.abs(dx)) {
+         if (Math.abs(dy) > AXIS_SLOP && Math.abs(dy) >= Math.abs(dx)) {
             mode = "veto"
             return
          }
-         if (Math.abs(dx) <= PANEL_AXIS_SLOP || Math.abs(dx) <= Math.abs(dy)) return
+         if (Math.abs(dx) <= AXIS_SLOP || Math.abs(dx) <= Math.abs(dy)) return
          mode = "drag"
          row.style.transition = "none"
       }
@@ -1280,6 +1279,23 @@ function barVisible(): boolean {
    return adopted || el.article.hidden || !inView
 }
 
+// The bar's identity/transport controls, one painter for both bar states: the
+// READY state is exactly the active state at paused = true — same writes, only
+// the value source differs (queue head vs the claimed track).
+function paintBar(kind: "audio" | "video", feedId: number, title: string, paused: boolean): void {
+   el.player.dataset.kind = kind
+   el.player.dataset.src = String(srcColorIndex(feedId))
+   el.playerSource.textContent = data.feedTitle(feedId)
+   el.playerName.textContent = title || "(untitled)"
+   el.playerTitle.setAttribute("aria-label", `Go to ${title || "this article"} — ${data.feedTitle(feedId)}`)
+   el.playerToggle.setAttribute("aria-label", paused ? "Play" : "Pause")
+   el.playerToggle.setAttribute("aria-pressed", String(!paused))
+   el.playerToggle.classList.toggle("srr-player-playing", !paused)
+   const rate = readRate()
+   el.playerRate.textContent = `${rate}×`
+   el.playerRate.setAttribute("aria-label", `Playback speed — ${rate}×`)
+}
+
 function syncBar(): void {
    const show = barVisible()
    el.player.hidden = !show
@@ -1305,34 +1321,12 @@ function syncBar(): void {
       // first chip tap, without autoplay and without secretly claiming an
       // element the user can already see in the article.
       const q0 = queue[0]
-      el.player.dataset.kind = q0.kind
-      el.player.dataset.src = String(srcColorIndex(q0.feedId))
-      el.playerSource.textContent = data.feedTitle(q0.feedId)
-      el.playerName.textContent = q0.title || "(untitled)"
-      el.playerTitle.setAttribute("aria-label", `Go to ${q0.title || "this article"} — ${data.feedTitle(q0.feedId)}`)
-      el.playerToggle.setAttribute("aria-label", "Play")
-      el.playerToggle.setAttribute("aria-pressed", "false")
-      el.playerToggle.classList.remove("srr-player-playing")
-      el.playerRate.textContent = `${readRate()}×`
-      el.playerRate.setAttribute("aria-label", `Playback speed — ${readRate()}×`)
+      paintBar(q0.kind, q0.feedId, q0.title, true)
       el.playerTime.textContent = ""
       el.playerSeekFill.style.width = "0%"
       return
    }
-   const paused = active.media.paused
-   el.player.dataset.kind = active.media.tagName === "VIDEO" ? "video" : "audio"
-   el.player.dataset.src = String(srcColorIndex(active.feedId))
-   el.playerSource.textContent = data.feedTitle(active.feedId)
-   el.playerName.textContent = active.title || "(untitled)"
-   el.playerTitle.setAttribute(
-      "aria-label",
-      `Go to ${active.title || "this article"} — ${data.feedTitle(active.feedId)}`,
-   )
-   el.playerToggle.setAttribute("aria-label", paused ? "Play" : "Pause")
-   el.playerToggle.setAttribute("aria-pressed", String(!paused))
-   el.playerToggle.classList.toggle("srr-player-playing", !paused)
-   el.playerRate.textContent = `${readRate()}×`
-   el.playerRate.setAttribute("aria-label", `Playback speed — ${readRate()}×`)
+   paintBar(active.media.tagName === "VIDEO" ? "video" : "audio", active.feedId, active.title, active.media.paused)
    syncTime()
 }
 

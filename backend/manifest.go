@@ -79,7 +79,7 @@ const manifestSeries = "manifest"
 // series in the PackSeries grammar, bare stems only — the manifest counter IS
 // the name.
 func manifestKey(m int) string {
-	return fmt.Sprintf("%s/%d.gz", manifestSeries, m)
+	return store.PackKey(manifestSeries, m)
 }
 
 // Manifest is one complete, self-contained description of one store state
@@ -517,7 +517,7 @@ func manifestNamesOf(buf []byte) ([]string, map[string]int, error) {
 	stems := func(series string, runs [][2]int) {
 		for _, r := range runs {
 			for i := range r[1] {
-				add(fmt.Sprintf("%s/%d.gz", series, r[0]+i))
+				add(store.PackKey(series, r[0]+i))
 			}
 		}
 	}

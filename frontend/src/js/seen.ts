@@ -30,8 +30,15 @@ export interface FrontierScope {
 }
 
 export function readSeen(): Record<string, number> {
+   return readSeenFor(data.activeStore().mid)
+}
+
+// One mount's parsed seen map by id — the peer-store variant of readSeen (the
+// picker's store rollup tallies a NON-active store's frontier). This module
+// owns the localStorage shape, so the parse lives here, never at a caller.
+export function readSeenFor(mid: string): Record<string, number> {
    try {
-      const raw = localStorage.getItem(seenK())
+      const raw = localStorage.getItem(seenKey(mid))
       return raw ? JSON.parse(raw) : {}
    } catch {
       return {}

@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
+	"srr/mod"
 	"srr/store"
 
 	"golang.org/x/net/html"
-	"golang.org/x/net/html/atom"
 )
 
 // SyncOutFeeds writes out/<name>.<ext> for every managed (non-External)
@@ -146,31 +146,24 @@ func (o *DB) syncOneOutFeed(ctx context.Context, of OutFeed, cdn string) error {
 	from := total - k
 
 	// Collect all matches in the tail (oldest→newest via walkArticles), then
-	// take the last `limit` to get the newest-first window. collect builds the
-	// callback for one walk over [start, total): besides the tag/feed-id
-	// selector it skips expired articles — chron < the feed's AddIdx
-	// (retention bumped past them and deleted their assets, so emitting one
-	// would syndicate 404s). Chron rides a counter beside the walk, like
-	// ExpireArticles. The Feeds lookup is nil-safe for a deleted feed (already
-	// excluded by the selector anyway).
+	// take the last `limit` to get the newest-first window. Besides the
+	// tag/feed-id selector the callback skips expired articles — chron < the
+	// feed's AddIdx (retention bumped past them and deleted their assets, so
+	// emitting one would syndicate 404s). The Feeds lookup is nil-safe for a
+	// deleted feed (already excluded by the selector anyway).
 	var matches []ArticleData
-	collect := func(start int) func(*ArticleData) error {
-		cur := start
-		return func(ad *ArticleData) error {
-			chron := cur
-			cur++
-			if !include[ad.FeedID] {
-				return nil
-			}
-			if ch := o.core.Feeds[ad.FeedID]; ch != nil && chron < ch.AddIdx {
-				return nil
-			}
-			cp := *ad
-			matches = append(matches, cp)
+	collect := func(chron int, ad *ArticleData) error {
+		if !include[ad.FeedID] {
 			return nil
 		}
+		if ch := o.core.Feeds[ad.FeedID]; ch != nil && chron < ch.AddIdx {
+			return nil
+		}
+		cp := *ad
+		matches = append(matches, cp)
+		return nil
 	}
-	if err := o.walkArticles(ctx, from, total, collect(from)); err != nil {
+	if err := o.walkArticles(ctx, from, total, collect); err != nil {
 		return fmt.Errorf("walk articles for %q: %w", of.Name, err)
 	}
 
@@ -376,53 +369,15 @@ func stableGUID(ad ArticleData) string {
 	return fmt.Sprintf("urn:srr:%08x", h.Sum32())
 }
 
-// outAssetAttrs mirrors mod.assetAttrs: the element/attribute pairs whose
-// values may contain relative asset references we need to CDN-prefix.
-// We duplicate the list here rather than exporting it from mod to keep
-// db_out.go self-contained.
-var outAssetAttrs = map[string][]string{
-	"img":   {"src"},
-	"video": {"src", "poster"},
-	"audio": {"src"},
-	"a":     {"href"},
-}
-
-// parseBodyFragment parses content as an HTML body fragment. Callers treat a
-// parse failure as "leave the content alone" — published content is immutable.
-func parseBodyFragment(content string) ([]*html.Node, error) {
-	return html.ParseFragment(strings.NewReader(content), &html.Node{
-		Type:     html.ElementNode,
-		Data:     "body",
-		DataAtom: atom.Body,
-	})
-}
-
-// visitAssetAttrs calls fn on each attribute in the outAssetAttrs
-// element/attribute set, depth-first across nodes. Shared by rewriteAssetURLs
-// (CDN-prefixing) and collectAssetRefs (expiration harvesting) so the two
-// can't drift on which attributes carry asset keys.
-func visitAssetAttrs(nodes []*html.Node, fn func(a *html.Attribute)) {
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
-		if n.Type == html.ElementNode {
-			if attrs, ok := outAssetAttrs[n.Data]; ok {
-				for _, name := range attrs {
-					for i := range n.Attr {
-						if n.Attr[i].Key == name {
-							fn(&n.Attr[i])
-						}
-					}
-				}
-			}
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
-		}
-	}
-	for _, n := range nodes {
-		walk(n)
-	}
-}
+// The fragment parse and the asset-attribute walk live in mod/helper_assets.go
+// beside the upload step's own table, so the element/attribute set harvested
+// here can never drift from what the sanitizer keeps and the upload rewrites.
+// Aliased for this package's three consumers: rewriteAssetURLs (CDN-prefixing),
+// collectAssetRefs (expiration harvesting) and absolutizeContent (processing.go).
+var (
+	parseBodyFragment = mod.ParseBodyFragment
+	visitAssetAttrs   = mod.VisitAssetAttrs
+)
 
 // rewriteAssetURLs rewrites relative attribute values (those not starting with
 // a URL scheme or "//") in img/video src/poster and a href to absolute CDN

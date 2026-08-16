@@ -16,7 +16,7 @@
 // is pinned, and the token's own header gets no vote.**
 // -----------------------------------------------------------------------------
 import { b64u, isObject, random, unb64u, utf8, utf8decode } from "./bytes"
-import { clearSessionCookie, hasCookie, mintSession, sessionCookie, type SessionConfig } from "./session"
+import { clearSessionCookie, cookieValue, hasCookie, mintSession, sessionCookie, type SessionConfig } from "./session"
 
 const SCOPE = "openid email"
 
@@ -174,27 +174,20 @@ interface Flow {
 const packFlow = (f: Flow) => b64u(utf8.encode(JSON.stringify(f)))
 
 function readFlow(request: Request): Flow | null {
-   for (const part of (request.headers.get("cookie") ?? "").split(";")) {
-      const eq = part.indexOf("=")
-      if (eq === -1 || part.slice(0, eq).trim() !== FLOW_COOKIE) continue
-      try {
-         const f: unknown = JSON.parse(utf8decode.decode(unb64u(part.slice(eq + 1).trim())))
-         if (
-            isObject(f) &&
-            typeof f.state === "string" &&
-            typeof f.nonce === "string" &&
-            typeof f.verifier === "string"
-         ) {
-            return {
-               state: f.state,
-               nonce: f.nonce,
-               verifier: f.verifier,
-               next: safeNext(f.next),
-            }
+   const raw = cookieValue(request.headers.get("cookie"), FLOW_COOKIE)
+   if (!raw) return null
+   try {
+      const f: unknown = JSON.parse(utf8decode.decode(unb64u(raw)))
+      if (isObject(f) && typeof f.state === "string" && typeof f.nonce === "string" && typeof f.verifier === "string") {
+         return {
+            state: f.state,
+            nonce: f.nonce,
+            verifier: f.verifier,
+            next: safeNext(f.next),
          }
-      } catch {
-         // an unreadable flow cookie is no flow cookie
       }
+   } catch {
+      // an unreadable flow cookie is no flow cookie
    }
    return null
 }

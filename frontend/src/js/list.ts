@@ -659,7 +659,7 @@ export function fillRow(a: HTMLElement, art: import("./format.gen").IMetaWire, s
    a.dataset.feed = String(art.f)
    a.dataset.src = String(srcColorIndex(art.f))
    // The article's own timestamp — relabelDividers buckets rows into day strata
-   // by comparing the dayLabel of consecutive rows.
+   // by comparing the day label of consecutive rows.
    a.dataset.ts = String(art.w)
    a.classList.toggle("srr-row-unread", nav.isRowUnread(chron, art.f, seen))
    a.querySelector(".srr-row-source")!.textContent = data.feedTitle(art.f)
@@ -917,7 +917,7 @@ function showEmptyState(): void {
 // The list's TIME axis: rebuild the sticky day-strata dividers from scratch over
 // the currently rendered rows (idempotent — drop the old ones, walk the rows
 // newest-first, and insert a divider before the first row of each new day).
-// Cheap: the window is bounded, and dayLabel is unique per calendar day so a
+// Cheap: the window is bounded, and the day label is unique per calendar day so a
 // label change IS a day boundary. Suppressed in search and ★ Saved (both are
 // cross-time explicit sets, not a date-ordered walk). Callers run
 // it inside any scroll-compensation bracket so the divider heights ride the same

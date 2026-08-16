@@ -59,6 +59,16 @@ type SFTP struct {
 	// workers, so the redial swap must not race their reads of it.
 	mu   sync.Mutex
 	sess *sftpSession
+
+	// sweptDirs records the directories this handle's AtomicPut has already
+	// swept for staging leftovers (see sweepTempLeftovers): the sweep is a full
+	// READDIR — ~100 entries per round-trip, so a data/ directory of a few
+	// thousand objects costs dozens of round-trips — and crash leftovers do not
+	// reappear, so it runs at most once per directory per handle. The first put
+	// to each directory still reclaims them, which is the janitor guarantee.
+	// Its own sync.Map rather than mu: the asset workers' puts must not
+	// serialize on the redial lock.
+	sweptDirs sync.Map
 }
 
 // sftpSession is one dialed SSH connection plus the SFTP subsystem on it.
@@ -678,18 +688,7 @@ func (d *SFTP) Version(ctx context.Context, key string) (string, error) {
 // PutIfVersion is best-effort, exactly as Local.PutIfVersion is and with the
 // same justification: check, then rename.
 func (d *SFTP) PutIfVersion(ctx context.Context, key string, r io.Reader, meta ObjectMeta, want string) (string, error) {
-	cur, err := d.Version(ctx, key)
-	if err != nil {
-		return "", err
-	}
-	if cur != want {
-		return "", fmt.Errorf("%s: %w", d.sftpPath("conditional write", key), ErrPreconditionFailed)
-	}
-	h := sha256.New()
-	if err := d.AtomicPut(ctx, key, io.TeeReader(r, h), meta); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return putIfVersionDigest(ctx, d, func() string { return d.sftpPath("conditional write", key) }, key, r, meta, want)
 }
 
 // AtomicPut ignores meta: SFTP files have no stored Content-Type/-Encoding —
@@ -710,8 +709,12 @@ func (d *SFTP) AtomicPut(ctx context.Context, key string, r io.Reader, _ ObjectM
 			return fmt.Errorf("opening file %s: %w", tmpFile, err)
 		}
 		// Sweep AFTER creating our own staging file, so the sweep can read the
-		// server's clock off it. See sweepTempLeftovers.
-		d.sweepTempLeftovers(c, path.Dir(file), path.Base(tmpFile))
+		// server's clock off it — and at most once per directory per handle
+		// (see sweptDirs). See sweepTempLeftovers.
+		dir := path.Dir(file)
+		if _, swept := d.sweptDirs.LoadOrStore(dir, struct{}{}); !swept {
+			d.sweepTempLeftovers(c, dir, path.Base(tmpFile))
+		}
 
 		if _, err := io.Copy(fs, body); err != nil {
 			fs.Close()
@@ -747,7 +750,10 @@ func (d *SFTP) AtomicPut(ctx context.Context, key string, r io.Reader, _ ObjectM
 // "now" — the server's clock, read without an extra round-trip, so the gate
 // never compares a remote mtime against this host's clock. Best-effort and
 // silent on errors — janitor work must never fail the AtomicPut that
-// triggered it.
+// triggered it. Unlike the Local sweep (os.ReadDir is ~free), the ReadDir here
+// pages the whole directory over the wire, so AtomicPut gates it to at most
+// once per directory per handle (sweptDirs) — the first put still reclaims
+// crash leftovers, and no later put can find new ones.
 func (d *SFTP) sweepTempLeftovers(c *sftp.Client, dir, ownTemp string) {
 	entries, err := c.ReadDir(dir)
 	if err != nil {

@@ -15,14 +15,7 @@ import type { FeedProgress, ImportDryRun, ImportFeed, InspectResult } from "./ty
 // importDryRun POSTs OPML XML to /api/import?dry_run=1: the server walks the
 // outline tree and resolves every URL without writing anything — {feeds, skipped}.
 async function importDryRun(xml: string): Promise<ImportDryRun> {
-   const res = await fetch("/api/import?dry_run=1", {
-      method: "POST",
-      headers: { "Content-Type": "application/xml" },
-      body: xml,
-   })
-   const data = await res.json()
-   if (!res.ok) throw new Error((data && data.error) || res.statusText)
-   return data as ImportDryRun
+   return (await api("POST", "/api/import?dry_run=1", xml, "application/xml")) as ImportDryRun
 }
 
 interface ImportRow {

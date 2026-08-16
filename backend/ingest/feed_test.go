@@ -126,7 +126,7 @@ func TestParseRSS2(t *testing.T) {
 	if items[0].Link != "http://example.com/1" {
 		t.Errorf("link = %q", items[0].Link)
 	}
-	if items[0].GUID != hash("guid-1") {
+	if items[0].GUID != Hash("guid-1") {
 		t.Errorf("guid = %d, want hash of %q", items[0].GUID, "guid-1")
 	}
 	if items[0].Published.Year() != 2006 {
@@ -158,7 +158,7 @@ func TestParseAtom(t *testing.T) {
 	}
 
 	item := items[0]
-	if item.GUID != hash("urn:entry:1") {
+	if item.GUID != Hash("urn:entry:1") {
 		t.Errorf("guid = %d", item.GUID)
 	}
 	if item.Title != "Atom Entry" {
@@ -332,15 +332,15 @@ func TestResolveNoFeedErrors(t *testing.T) {
 // TestHash pins the FNV-32a GUID hash to exact values — the contract external
 // fetchers replicate — plus distinctness for distinct inputs.
 func TestHash(t *testing.T) {
-	if got := hash("test-guid-12345"); got != 0x7bafce13 {
-		t.Errorf(`hash("test-guid-12345") = %#x, want 0x7bafce13`, got)
+	if got := Hash("test-guid-12345"); got != 0x7bafce13 {
+		t.Errorf(`Hash("test-guid-12345") = %#x, want 0x7bafce13`, got)
 	}
 	// Empty string hashes to the (non-zero) FNV offset basis.
-	if got := hash(""); got != 0x811c9dc5 {
-		t.Errorf(`hash("") = %#x, want 0x811c9dc5 (the FNV offset basis)`, got)
+	if got := Hash(""); got != 0x811c9dc5 {
+		t.Errorf(`Hash("") = %#x, want 0x811c9dc5 (the FNV offset basis)`, got)
 	}
 	// Distinct inputs → distinct hashes.
-	if hash("guid-a") == hash("guid-b") {
+	if Hash("guid-a") == Hash("guid-b") {
 		t.Error("distinct inputs produced the same hash")
 	}
 }
@@ -377,7 +377,7 @@ func TestParseCallbackError(t *testing.T) {
 }
 
 func TestParseGUIDFallbackDistinctForGUIDlessItems(t *testing.T) {
-	// Items with no guid/id/link must NOT all collapse to hash("") — that would
+	// Items with no guid/id/link must NOT all collapse to Hash("") — that would
 	// dedup distinct articles away. Two such items with different title/content
 	// get distinct GUIDs derived from their own text.
 	items := collectFeed(t, `<rss version="2.0"><feed>
@@ -388,8 +388,8 @@ func TestParseGUIDFallbackDistinctForGUIDlessItems(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("got %d items, want 2", len(items))
 	}
-	if items[0].GUID == hash("") || items[1].GUID == hash("") {
-		t.Errorf("guid-less items collapsed to hash(\"\"): %d, %d", items[0].GUID, items[1].GUID)
+	if items[0].GUID == Hash("") || items[1].GUID == Hash("") {
+		t.Errorf("guid-less items collapsed to Hash(\"\"): %d, %d", items[0].GUID, items[1].GUID)
 	}
 	if items[0].GUID == items[1].GUID {
 		t.Errorf("distinct guid-less items share a GUID (%d); they would dedup each other away", items[0].GUID)
@@ -509,7 +509,7 @@ func TestParseRSSWithAttributes(t *testing.T) {
     </item>
   </feed></rss>`)
 
-	if items[0].GUID != hash("custom-guid-123") {
+	if items[0].GUID != Hash("custom-guid-123") {
 		t.Errorf("guid should use text content, not attributes")
 	}
 }
@@ -598,7 +598,7 @@ func TestParseGUIDPriorityOverID(t *testing.T) {
     </item>
   </feed></rss>`)
 
-	if items[0].GUID != hash("guid-value") {
+	if items[0].GUID != Hash("guid-value") {
 		t.Errorf("GUID = %d, want hash of %q (guid wins over id)", items[0].GUID, "guid-value")
 	}
 }
@@ -645,7 +645,7 @@ func TestParseRSSItemGUIDFallbackChain(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			items := collectFeed(t, `<rss version="2.0"><feed><item>`+c.item+`</item></feed></rss>`)
-			if items[0].GUID != hash("http://example.com/fallback") {
+			if items[0].GUID != Hash("http://example.com/fallback") {
 				t.Errorf("GUID should fall back to the link hash")
 			}
 		})

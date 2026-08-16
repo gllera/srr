@@ -239,7 +239,7 @@ func crashRead(t *testing.T, ctx context.Context) crashState {
 	}
 	// walkArticles streams the pack region and the live delta chain in one
 	// chron-ordered pass, so the projection crosses the seam the way readers do.
-	if err := db.walkArticles(ctx, 0, st.total, func(ad *ArticleData) error {
+	if err := db.walkArticles(ctx, 0, st.total, func(_ int, ad *ArticleData) error {
 		st.titles = append(st.titles, ad.Title)
 		return nil
 	}); err != nil {

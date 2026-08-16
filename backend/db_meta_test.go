@@ -661,7 +661,7 @@ func TestWalkArticlesRejectsTruncatedDataPack(t *testing.T) {
 		t.Fatalf("corrupt data pack: %v", err)
 	}
 
-	err = db.walkArticles(ctx, 0, c.TotalArticles, func(*ArticleData) error { return nil })
+	err = db.walkArticles(ctx, 0, c.TotalArticles, func(int, *ArticleData) error { return nil })
 	if err == nil || !strings.Contains(err.Error(), "beyond data pack") {
 		t.Fatalf("walkArticles err = %v, want the 'beyond data pack' corruption guard", err)
 	}

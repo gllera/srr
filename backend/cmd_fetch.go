@@ -535,14 +535,7 @@ func (db *DB) applyFetched(fetched []fetchedFeed, today uint16) []*Item {
 		}
 
 		live.URL = snap.URL
-		live.Watermark = snap.Watermark
-		live.BoundaryGUIDs = snap.BoundaryGUIDs
-		live.ETag = snap.ETag
-		live.LastModified = snap.LastModified
-		live.FetchError = snap.FetchError
-		live.LastOK = snap.LastOK
-		live.FailStreak = snap.FailStreak
-		live.LastNew = snap.LastNew
+		fetchState(snap).applyTo(live)
 
 		for _, h := range snap.seenStamps {
 			db.seen.stamp(live.id, h, today)

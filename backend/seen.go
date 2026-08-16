@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"slices"
 
+	"srr/ingest"
 	"srr/store"
 )
 
@@ -97,21 +98,11 @@ func newSeenPool() *seenPool {
 // overflow the shifted id.
 func seenKey(feedID int, h uint32) uint64 { return uint64(uint16(feedID))<<32 | uint64(h) }
 
-// fnv32 is FNV-32a, byte-for-byte identical to ingest.hash (ingest/feed.go), so
-// a folded-title hash lands in the same u32 keyspace the ingest layer stamps
-// item GUIDs into — membership (has) is the OR over both axes.
-func fnv32(s string) uint32 {
-	const (
-		offset32 = 2166136261
-		prime32  = 16777619
-	)
-	h := uint32(offset32)
-	for i := 0; i < len(s); i++ {
-		h ^= uint32(s[i])
-		h *= prime32
-	}
-	return h
-}
+// fnv32 delegates to ingest.Hash (ingest/feed.go, the single FNV-32a
+// implementation), so a folded-title hash lands in the same u32 keyspace the
+// ingest layer stamps item GUIDs into — membership (has) is the OR over both
+// axes.
+func fnv32(s string) uint32 { return ingest.Hash(s) }
 
 // titleHash hashes a folded title (foldSearchText, the same folding the search
 // blooms use) into the shared per-feed keyspace. Two titles that fold to the

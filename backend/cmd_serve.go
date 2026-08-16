@@ -15,12 +15,13 @@ import (
 	"os"
 	"os/signal"
 	"path"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"srr/store"
 )
 
 // webui/dist is the Parcel-built admin console (a separate `parcel build` into
@@ -187,12 +188,6 @@ func secHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// webUIHashedRe matches a Parcel content-hashed asset name (frontend.<hash>.js,
-// styles.<hash>.css, …): a slash-free basename of <stem>.<8+ hex>.<ext>. The
-// name changes whenever the bytes do, so such a file is safe to cache forever.
-// Mirrors store.feHashedRe (the frontend-shell classifier).
-var webUIHashedRe = regexp.MustCompile(`^[^/]+\.[0-9a-f]{8,}\.[a-z0-9]+$`)
-
 // webUICacheHeaders gives the embedded admin UI the right Cache-Control for a
 // content-hashed Parcel bundle, mirroring store.cacheControlForKey:
 //
@@ -212,7 +207,10 @@ func webUICacheHeaders(fsys fs.FS, next http.Handler) http.Handler {
 		if err != nil || d.IsDir() {
 			return nil //nolint:nilerr // a missing UI file is a build bug, not a request-time error
 		}
-		if webUIHashedRe.MatchString(path.Base(p)) {
+		// A Parcel content-hashed asset name (frontend.<hash>.js) is the same
+		// shape the frontend-shell classifier owns: the name changes whenever
+		// the bytes do, so such a file is safe to cache forever.
+		if store.HashedFrontendAsset(path.Base(p)) {
 			return nil // hashed assets are immutable — no validator needed
 		}
 		b, err := fs.ReadFile(fsys, p)
@@ -227,8 +225,8 @@ func webUICacheHeaders(fsys fs.FS, next http.Handler) http.Handler {
 		if p == "/" {
 			p = "/index.html" // what FileServerFS will serve for the directory
 		}
-		if webUIHashedRe.MatchString(path.Base(p)) {
-			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		if store.HashedFrontendAsset(path.Base(p)) {
+			w.Header().Set("Cache-Control", store.CacheImmutable)
 			next.ServeHTTP(w, r)
 			return
 		}

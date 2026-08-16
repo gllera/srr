@@ -113,6 +113,16 @@ function readerLive(): boolean {
    return isSplit() && reader.hasArticle() && nav.currentChron() >= 0
 }
 
+// The list pane's twin: is the LIST on screen right now? Under split the pane
+// is always on screen whatever `view` (the focus surface) says; off split the
+// two views alternate, so it is `view` itself. Every "should the list repaint"
+// question asks this layout question, never `view` — a repaint gated on focus
+// left the always-visible pane stale beside the reader (the split-view bug
+// class rounds 2-6 kept refinding, one `view ===` site at a time).
+function listVisible(): boolean {
+   return view === "list" || isSplit()
+}
+
 function showList() {
    view = "list"
    document.body.classList.add("srr-view-list")
@@ -707,12 +717,11 @@ async function switchMount(mid: string) {
 // chrome against the shifted bounds. The picker re-renders its own rows itself.
 function toggleUnseenOnly() {
    nav.setUnreadOnly(!nav.isUnreadOnly())
-   // "Visible" is the real condition, not `view === "list"`: under split the list
-   // pane is on screen whatever the focus surface says, so the zero-row-heights
-   // reason for deferring does not apply and a bare invalidate() would leave a
-   // stale row set — read rows that should now show, or vice versa — beside the
-   // reader, with the observer torn down and no rebuild coming.
-   if (view === "list" || isSplit()) void list.rerender()
+   // Visibility (listVisible), not `view`: on an on-screen pane a bare
+   // invalidate() would leave a stale row set — read rows that should now show,
+   // or vice versa — beside the reader, with the observer torn down and no
+   // rebuild coming; deferring is only for a display:none list (zero row heights).
+   if (listVisible()) void list.rerender()
    else list.invalidate()
    // The reader re-derives for the new mode: a real article re-probes its
    // chrome; a placeholder (pos < 0) re-runs the switch (reprobeReaderChrome
@@ -990,14 +999,13 @@ async function init() {
          // would be wrong in both cases.
          nav.applyFilter([...nav.filterTokens()])
          void list.render()
-      } else if (view !== "reader" || isSplit()) {
-         // Under split the "gentle" branch is not optional: the list pane is on
-         // screen next to the reader, so the display:none reasoning above (a
-         // rebuild would pin zero row heights, and the return path re-derives
-         // anyway) simply does not hold — there is no return path, and skipping
-         // it leaves another device's reads showing as unread beside the article
-         // you are on. list.rerender keeps the cursor with the reader
-         // (list.mayClaimCursor), so the gentle rebuild costs the pane nothing.
+      } else if (listVisible()) {
+         // On an on-screen pane the gentle rebuild is not optional: the
+         // display:none reasoning above (zero row heights, the return path
+         // re-derives anyway) does not hold — there is no return path, and
+         // skipping it leaves another device's reads showing as unread beside
+         // the article you are on. list.rerender keeps the cursor with the
+         // reader (list.mayClaimCursor), so the rebuild costs the pane nothing.
          void list.rerender()
       }
       if (picker.isOpen()) picker.render()
@@ -1023,7 +1031,7 @@ async function init() {
    const refreshAfterStore = () => {
       reader.refreshFeedLabel()
       if (view === "reader" || isSplit()) reader.reprobeReaderChrome(true)
-      if (view !== "reader" || isSplit()) void list.onStoreGrown()
+      if (listVisible()) void list.onStoreGrown()
       if (picker.isOpen()) picker.render()
       // New articles landed: the launcher badge is the one readout that is
       // supposed to notice without anyone opening the app (RDR12).
@@ -1094,7 +1102,7 @@ async function init() {
       readPosition: reader.readPosition,
    })
    menus.setup({
-      view: () => view,
+      listVisible,
       showError,
       showSnackbar,
       hideSnackbar,
@@ -1203,7 +1211,7 @@ async function init() {
    // search bar's own input (debounced live query, Enter applies immediately,
    // Escape / ✕ leave search) and owns the debounce timer.
    searchUI.setup({
-      view: () => view,
+      listVisible,
       selectTokens,
       persistHash,
       setTitle,

@@ -5,20 +5,17 @@ import { HOME_MID, PER_STORE_KEYS, pinsKey, savedKey, seenKey } from "./keys"
 import {
    activeMounts,
    addMount,
-   editMount,
    forgetStoreState,
    homeUrl,
    loadMounts,
    mergeMountRecords,
-   moveMount,
    mountId,
-   mountLabel,
-   type MountRecord,
    normalizeStoreUrl,
    reconcileMounts,
    removeMount,
    renameStoreState,
    saveMounts,
+   type MountRecord,
 } from "./mounts"
 
 // mounts.ts is the multi-store mount table (docs/MULTI-STORE-SPEC.md §3). These
@@ -151,7 +148,7 @@ describe("mergeMountRecords — OR-set LWW (§3.4)", () => {
    })
 })
 
-describe("add / remove / edit mutations", () => {
+describe("add / remove mutations", () => {
    it("addMount normalizes, assigns an id, and returns records", () => {
       const res = addMount(loadMounts(), "cdn.example.org/store")! // scheme-less → normalizeStoreUrl rejects (no scheme)
       // normalizeStoreUrl requires a parseable absolute URL; a bare host is null.
@@ -172,13 +169,6 @@ describe("add / remove / edit mutations", () => {
       expect(removed.find((r) => r.id === added.id)!.del).toBe(true)
       const homeRemoved = removeMount(removed, HOME_MID)
       expect(homeRemoved.find((r) => r.id === HOME_MID)!.del).toBe(false)
-   })
-   it("editMount changes label and bumps ts", () => {
-      const added = addMount(loadMounts(), "https://cdn.example.org/store/")!
-      const edited = editMount(added.records, added.id, { label: "Alice" })
-      const rec = edited.find((r) => r.id === added.id)!
-      expect(rec.label).toBe("Alice")
-      expect(mountLabel(rec)).toBe("Alice")
    })
 })
 
@@ -204,7 +194,7 @@ describe("reconcileMounts — home-collision collapse (§3.2)", () => {
    })
 })
 
-describe("renameStoreState + moveMount — re-host (§3.5)", () => {
+describe("renameStoreState — re-host (§3.5)", () => {
    it("renameStoreState moves the per-store keys, source wins on collision", () => {
       localStorage.setItem(seenKey("sAAAA"), JSON.stringify({ "feed:1": 1 }))
       localStorage.setItem(savedKey("sAAAA"), JSON.stringify([5]))
@@ -213,19 +203,6 @@ describe("renameStoreState + moveMount — re-host (§3.5)", () => {
       expect(localStorage.getItem(seenKey("sAAAA"))).toBeNull()
       expect(localStorage.getItem(seenKey("sBBBB"))).toBe(JSON.stringify({ "feed:1": 1 }))
       expect(localStorage.getItem(savedKey("sBBBB"))).toBe(JSON.stringify([5]))
-   })
-   it("moveMount writes a rename tombstone + a live record and renames state", () => {
-      const added = addMount(loadMounts(), "https://old.example.org/store/")!
-      localStorage.setItem(seenKey(added.id), JSON.stringify({ "feed:2": 4 }))
-      const moved = moveMount(added.records, added.id, "https://new.example.org/store/")!
-      const tomb = moved.records.find((r) => r.id === added.id)!
-      expect(tomb.del).toBe(true)
-      expect(tomb.moved_to).toBe(moved.id)
-      const live = moved.records.find((r) => r.id === moved.id)!
-      expect(live.del).toBe(false)
-      // state followed the move
-      expect(localStorage.getItem(seenKey(added.id))).toBeNull()
-      expect(localStorage.getItem(seenKey(moved.id))).toBe(JSON.stringify({ "feed:2": 4 }))
    })
    it("a peer replays a rename tombstone deterministically", () => {
       // Device B adopts a tombstone (from A) with moved_to and holds source state.

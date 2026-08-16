@@ -92,6 +92,14 @@ func (f *netFlags) AfterApply() error {
 	return nil
 }
 
+// formatFlag is the shared -f output-format flag of every record-listing verb
+// (feed/recipe/watch ls+show, syndicate ls), embedded anonymously so o.Format
+// promotes. Unlike the scoped structs above it is per-command presentation, not
+// a cycle knob: no AfterApply, no yaml resolution, not in scopedFlagNamesList.
+type formatFlag struct {
+	Format string `short:"f" default:"json" enum:"yaml,json" help:"Output format."`
+}
+
 // floorScoped enforces the value floors that used to live post-parse in
 // main(): a zero/negative size cap would disable guards (MaxAssetSize) or make
 // the writer roll a pack per line (PackSize), and a KeepManifests below the
@@ -160,41 +168,23 @@ func envStr(name, def string) string {
 	return def
 }
 
-func envInt(name string, def int) int {
+func envVal[T any](name string, def T, parse func(string) (T, error)) T {
 	v, ok := os.LookupEnv(name)
 	if !ok || v == "" {
 		return def
 	}
-	n, err := strconv.Atoi(v)
+	t, err := parse(v)
 	if err != nil {
 		slog.Warn("malformed env value; using default", "var", name, "value", v, "default", def)
 		return def
 	}
-	return n
+	return t
 }
+
+func envInt(name string, def int) int { return envVal(name, def, strconv.Atoi) }
 
 func envDur(name string, def time.Duration) time.Duration {
-	v, ok := os.LookupEnv(name)
-	if !ok || v == "" {
-		return def
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		slog.Warn("malformed env value; using default", "var", name, "value", v, "default", def)
-		return def
-	}
-	return d
+	return envVal(name, def, time.ParseDuration)
 }
 
-func envBool(name string, def bool) bool {
-	v, ok := os.LookupEnv(name)
-	if !ok || v == "" {
-		return def
-	}
-	b, err := strconv.ParseBool(v)
-	if err != nil {
-		slog.Warn("malformed env value; using default", "var", name, "value", v, "default", def)
-		return def
-	}
-	return b
-}
+func envBool(name string, def bool) bool { return envVal(name, def, strconv.ParseBool) }

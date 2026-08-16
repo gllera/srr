@@ -691,7 +691,7 @@ func (o *DB) emitDelta(ctx context.Context, lines [][]byte, n int, size int64) e
 		}
 	}
 	stem := c.Names.alloc(dataSeries)
-	if err := o.savePack(ctx, fmt.Sprintf("%s/%d.gz", dataSeries, stem), p); err != nil {
+	if err := o.savePack(ctx, store.PackKey(dataSeries, stem), p); err != nil {
 		return err
 	}
 	c.Names.Deltas.Stems = append(c.Names.Deltas.Stems, stem)
@@ -875,7 +875,7 @@ func (o *DB) consolidateTail(ctx context.Context, batch []ArticleData, batchLine
 			}
 			pos := mTotal/idxPackSize - 1
 			stem := c.Names.alloc(idxSeries)
-			if err := o.savePackFinal(ctx, fmt.Sprintf("%s/%d.gz", idxSeries, stem), meta); err != nil {
+			if err := o.savePackFinal(ctx, store.PackKey(idxSeries, stem), meta); err != nil {
 				return err
 			}
 			if err := c.Names.putAt(idxSeries, pos, stem); err != nil {
@@ -895,7 +895,7 @@ func (o *DB) consolidateTail(ctx context.Context, batch []ArticleData, batchLine
 		if data.Len() > 0 && data.Len() >= globals.PackSize<<10 {
 			pos := c.NextPackID
 			stem := c.Names.alloc(dataSeries)
-			if err := o.savePackFinal(ctx, fmt.Sprintf("%s/%d.gz", dataSeries, stem), data); err != nil {
+			if err := o.savePackFinal(ctx, store.PackKey(dataSeries, stem), data); err != nil {
 				return err
 			}
 			if err := c.Names.putAt(dataSeries, pos, stem); err != nil {
@@ -949,10 +949,10 @@ func (o *DB) consolidateTail(ctx context.Context, batch []ArticleData, batchLine
 	idxTailPos := numFinalizedIdx(c.TotalArticles)
 	idxStem := c.Names.alloc(idxSeries)
 	dataStem := c.Names.alloc(dataSeries)
-	if err := o.savePack(ctx, fmt.Sprintf("%s/%d.gz", idxSeries, idxStem), meta); err != nil {
+	if err := o.savePack(ctx, store.PackKey(idxSeries, idxStem), meta); err != nil {
 		return err
 	}
-	if err := o.savePack(ctx, fmt.Sprintf("%s/%d.gz", dataSeries, dataStem), data); err != nil {
+	if err := o.savePack(ctx, store.PackKey(dataSeries, dataStem), data); err != nil {
 		return err
 	}
 	if err := c.Names.setTail(idxSeries, idxTailPos, idxStem); err != nil {

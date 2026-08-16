@@ -310,7 +310,7 @@ func TestDeltaWalkAndReadMirror(t *testing.T) {
 	}
 
 	var got []string
-	if err := db.walkArticles(ctx, 0, c.TotalArticles, func(ad *ArticleData) error {
+	if err := db.walkArticles(ctx, 0, c.TotalArticles, func(_ int, ad *ArticleData) error {
 		got = append(got, ad.Title)
 		return nil
 	}); err != nil {
@@ -502,7 +502,7 @@ func TestDeltaByteCapForcesConsolidation(t *testing.T) {
 	}
 	// The consolidated tail round-trips every article across the pack↔delta seam.
 	var got int
-	if err := db.walkArticles(ctx, 0, c.TotalArticles, func(_ *ArticleData) error { got++; return nil }); err != nil {
+	if err := db.walkArticles(ctx, 0, c.TotalArticles, func(int, *ArticleData) error { got++; return nil }); err != nil {
 		t.Fatalf("walkArticles after byte-cap consolidation: %v", err)
 	}
 	if got != c.TotalArticles {
@@ -744,7 +744,7 @@ func TestRemoveFeedDrainsLiveChain(t *testing.T) {
 		t.Errorf("live entries for reused id: %d, want %d", live[reused.id], reused.TotalArt)
 	}
 	var titles []string
-	if err := db.walkArticles(ctx, 0, c.TotalArticles, func(ad *ArticleData) error {
+	if err := db.walkArticles(ctx, 0, c.TotalArticles, func(_ int, ad *ArticleData) error {
 		titles = append(titles, ad.Title)
 		return nil
 	}); err != nil {

@@ -86,6 +86,31 @@ func RewriteAttrs(content string, fn func(marker string) (string, bool, error)) 
 	})
 }
 
+// ParseBodyFragment parses content as an HTML body fragment. Callers treat a
+// parse failure as "leave the content alone" — published content is immutable.
+func ParseBodyFragment(content string) ([]*html.Node, error) {
+	return html.ParseFragment(strings.NewReader(content), &html.Node{
+		Type:     html.ElementNode,
+		Data:     "body",
+		DataAtom: atom.Body,
+	})
+}
+
+// VisitAssetAttrs calls fn on each attribute in the assetAttrs
+// element/attribute set, depth-first across nodes. It is the visit-style view
+// of the same table the upload step's RewriteAttrs walks, exported for the
+// main package's consumers of that set — out-feed CDN-prefixing, expiration
+// harvesting, pre-pipeline absolutizing — so none of them can drift on which
+// attributes carry asset references.
+func VisitAssetAttrs(nodes []*html.Node, fn func(a *html.Attribute)) {
+	for _, n := range nodes {
+		_ = visitNode(n, assetAttrs, func(a *html.Attribute) error {
+			fn(a)
+			return nil
+		})
+	}
+}
+
 // walkAssetAttrs parses content as an HTML fragment and calls fn(value) for
 // every attribute listed in attrs (tag -> attr names). fn returns
 // (newValue, true, nil) to replace the value, (_, false, nil) to leave it, or a
@@ -95,11 +120,7 @@ func RewriteAttrs(content string, fn func(marker string) (string, bool, error)) 
 // is the shared HTML walk behind both the upload step (RewriteAttrs, marker ->
 // key) and #selfhost (URL -> marker).
 func walkAssetAttrs(content string, attrs map[string][]string, fn func(val string) (string, bool, error)) (string, error) {
-	nodes, err := html.ParseFragment(strings.NewReader(content), &html.Node{
-		Type:     html.ElementNode,
-		Data:     "body",
-		DataAtom: atom.Body,
-	})
+	nodes, err := ParseBodyFragment(content)
 	if err != nil {
 		// Unparseable content: leave it untouched rather than fail the item.
 		return content, nil
@@ -130,9 +151,30 @@ func walkAssetAttrs(content string, attrs map[string][]string, fn func(val strin
 
 // walkNode applies fn to the attrs-listed attributes on n and its descendants,
 // replacing each value when fn returns ok. Returns true if any value changed, or
-// the first error fn returns (which stops the walk).
+// the first error fn returns (which stops the walk). The replace-style face of
+// visitNode below, kept for #selfhost and walkAssetAttrs.
 func walkNode(n *html.Node, attrs map[string][]string, fn func(val string) (string, bool, error)) (bool, error) {
 	changed := false
+	err := visitNode(n, attrs, func(a *html.Attribute) error {
+		nv, ok, err := fn(a.Val)
+		if err != nil {
+			return err
+		}
+		if ok {
+			a.Val = nv
+			changed = true
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return changed, nil
+}
+
+// visitNode applies fn to the attrs-listed attributes on n and its
+// descendants; the first error fn returns stops the walk.
+func visitNode(n *html.Node, attrs map[string][]string, fn func(a *html.Attribute) error) error {
 	if n.Type == html.ElementNode {
 		if names, ok := attrs[n.Data]; ok {
 			for _, name := range names {
@@ -140,26 +182,17 @@ func walkNode(n *html.Node, attrs map[string][]string, fn func(val string) (stri
 					if n.Attr[i].Key != name {
 						continue
 					}
-					nv, ok, err := fn(n.Attr[i].Val)
-					if err != nil {
-						return false, err
-					}
-					if ok {
-						n.Attr[i].Val = nv
-						changed = true
+					if err := fn(&n.Attr[i]); err != nil {
+						return err
 					}
 				}
 			}
 		}
 	}
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		cc, err := walkNode(c, attrs, fn)
-		if err != nil {
-			return false, err
-		}
-		if cc {
-			changed = true
+		if err := visitNode(c, attrs, fn); err != nil {
+			return err
 		}
 	}
-	return changed, nil
+	return nil
 }

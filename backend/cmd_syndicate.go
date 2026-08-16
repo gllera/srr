@@ -46,7 +46,7 @@ type SyndicateGroup struct {
 type SyndicateLsCmd struct {
 	// Same -f contract as `feed ls` / `feed show`, so every record-listing verb
 	// answers to one flag.
-	Format string `short:"f" default:"json" enum:"yaml,json" help:"Output format."`
+	formatFlag
 }
 
 func (o *SyndicateLsCmd) Run() error {

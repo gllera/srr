@@ -3,6 +3,8 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -26,12 +28,14 @@ import (
 )
 
 const (
-	// cacheImmutable stamps write-once keys: finalized packs (idx|data|
+	// CacheImmutable stamps write-once keys: finalized packs (idx|data|
 	// meta/<n>.gz) never change once written; latest packs (L<seq>) and the
 	// summaries (idx/h<N>, meta/s<N>) are write-once names — never rewritten
 	// after the db.gz commit that publishes them; assets/ keys are
-	// content-hashed. The CDN/client may cache them all forever.
-	cacheImmutable = "public, max-age=31536000, immutable"
+	// content-hashed. The CDN/client may cache them all forever. Exported so
+	// serve's embedded admin-UI cache layer stamps its hashed bundle assets
+	// with the same directive.
+	CacheImmutable = "public, max-age=31536000, immutable"
 	// cacheRevalidate stamps db.gz: the store's only mutable key (the
 	// consistency root naming the current L<seq> generation), rewritten every
 	// fetch. Must-revalidate forces a conditional request every load.
@@ -122,6 +126,13 @@ func ParsePackKey(key string) (series string, stem int, ok bool) {
 	return series, stem, true
 }
 
+// PackKey formats the write-once pack-grammar key of one series object —
+// ParsePackKey's inverse, kept beside the grammar so no caller spells the
+// shape for itself.
+func PackKey(series string, stem int) string {
+	return fmt.Sprintf("%s/%d.gz", series, stem)
+}
+
 // feHashedRe matches a content-hashed frontend asset at the store root —
 // "<name>.<8+ hex>.<ext>" with no path separator. Parcel emits such names
 // (frontend.5730a221.css, sw.57d1d92e.js, icon-192.936dab90.png); the hash
@@ -171,7 +182,7 @@ func cacheControlForKey(key string) string {
 		// rewritten on every upgrade, so revalidate.
 		return cacheRevalidate
 	case strings.HasPrefix(key, "assets/") || packKeyRe.MatchString(key) || feHashedRe.MatchString(key):
-		return cacheImmutable
+		return CacheImmutable
 	default:
 		return ""
 	}
@@ -636,6 +647,28 @@ func joinFailures(causes map[string]error) ([]string, error) {
 		errs[i] = causes[k]
 	}
 	return failed, errors.Join(errs...)
+}
+
+// putIfVersionDigest is the shared PutIfVersion body of the two filesystem
+// backends (local, SFTP): a best-effort compare-and-swap — Version, compare,
+// then AtomicPut teeing through sha256 so the caller gets the new token
+// without a re-read. Best-effort because neither backend has a conditional
+// write; see Local.PutIfVersion for what the check-then-rename window buys.
+// errPath resolves the key's display path LAZILY: the backends' path helpers
+// log at debug, and that log belongs to the precondition-failure branch alone.
+func putIfVersionDigest(ctx context.Context, b Backend, errPath func() string, key string, r io.Reader, meta ObjectMeta, want string) (string, error) {
+	cur, err := b.Version(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	if cur != want {
+		return "", fmt.Errorf("%s: %w", errPath(), ErrPreconditionFailed)
+	}
+	h := sha256.New()
+	if err := b.AtomicPut(ctx, key, io.TeeReader(r, h), meta); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func Open(ctx context.Context, outputPath string) (Backend, error) {

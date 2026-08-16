@@ -19,9 +19,9 @@
 // groups fed by a third header row-mode.
 import { VERSION } from "./base"
 import * as data from "./data"
-import { wrapTabFocus } from "./dropdown"
+import { divEl, wrapTabFocus } from "./dropdown"
 import { countBadge, formatBytes, formatDate, isStale, srcColorIndex, timeAgoProse } from "./fmt"
-import { favoritesKey, seenKey } from "./keys"
+import { favoritesKey } from "./keys"
 import { mountLabel } from "./mounts"
 import * as nav from "./nav"
 import * as refresh from "./refresh"
@@ -32,6 +32,9 @@ import * as refresh from "./refresh"
 // folding rule in the reader rather than a hand-synced second copy — the same
 // argument urlish.ts makes for its URL regexes.
 import { fold } from "./search"
+// readSeenFor, not nav's active-mount readSeen: the mount switcher's rollup
+// reads a PEER store's namespaced seen map — seen.ts owns that shape.
+import { readSeenFor } from "./seen"
 import * as sync from "./sync"
 import { URL_DENY } from "./urlish"
 
@@ -368,12 +371,6 @@ function link(value: string, text: string, className?: string): HTMLAnchorElemen
    return a
 }
 
-function div(className: string): HTMLDivElement {
-   const d = document.createElement("div")
-   d.className = className
-   return d
-}
-
 // Feed-health grade for the row's health tint (ported from dropdown.ts). "" healthy,
 // "warn" amber, "crit" red. Degrades gracefully when the new vitals are absent.
 const STALE_WARN_SEC = 3 * 86400
@@ -498,7 +495,7 @@ function renderFilterList(): void {
    // as scope pills rather than list members. [ALL]'s unread count (the
    // whole-store total) fills in async like every row's; ★ Saved only shows
    // when something is saved, and [ALL] goes full-width alone until then.
-   const scope = div("srr-picker-scope")
+   const scope = divEl("srr-picker-scope")
    const allRow = link("", "[ALL]", cls("srr-scope-chip", ""))
    scope.appendChild(allRow)
    const savedN = nav.savedCount()
@@ -523,10 +520,10 @@ function renderFilterList(): void {
    // double-count it (the [ALL] total) sums over distinct feeds instead.
    const favFeeds = [...sortedTags.flatMap((t) => tagged.get(t)!), ...untagged].filter((ch) => favs.has(ch.id))
    if (favFeeds.length > 0) {
-      const groupDiv = div("srr-tag-group srr-fav-group")
+      const groupDiv = divEl("srr-tag-group srr-fav-group")
       // A plain div, not a link: the lane is a VIEW of feeds you marked, not a
       // filter token nav can resolve, so a tap on it has nothing to select.
-      const header = div("srr-tag-header srr-fav-header")
+      const header = divEl("srr-tag-header srr-fav-header")
       const title = document.createElement("span")
       title.className = "srr-row-title"
       title.textContent = "★ Favorites"
@@ -553,7 +550,7 @@ function renderFilterList(): void {
    for (const tag of sortedTags) {
       const group = tagged.get(tag)!
       const expanded = tag === currentTag && tag !== current
-      const groupDiv = div(expanded ? "srr-tag-group" : "srr-tag-group srr-tag-collapsed")
+      const groupDiv = divEl(expanded ? "srr-tag-group" : "srr-tag-group srr-tag-collapsed")
       const header = link(tag, tag, cls("srr-tag-header", tag))
       const worst = group.reduce<"" | "warn" | "crit">(
          (g, ch) => (g === "crit" || feedGrade(ch) === "crit" ? "crit" : feedGrade(ch) || g),
@@ -581,7 +578,7 @@ function renderFilterList(): void {
       frag.appendChild(groupDiv)
    }
 
-   if (sortedTags.length > 0 && untagged.length > 0) frag.appendChild(div("srr-tag-sep"))
+   if (sortedTags.length > 0 && untagged.length > 0) frag.appendChild(divEl("srr-tag-sep"))
    for (const ch of untagged) {
       const item = feedLink(ch, cls("", String(ch.id)), favs.has(ch.id))
       unreadRows.push([item, ch])
@@ -590,7 +587,7 @@ function renderFilterList(): void {
 
    // The row-search's empty state, built with the rows so applyQuery only has to
    // toggle it. role=status so a narrowing that finds nothing is announced.
-   emptyNote = div("srr-picker-empty")
+   emptyNote = divEl("srr-picker-empty")
    emptyNote.setAttribute("role", "status")
    emptyNote.hidden = true
    frag.appendChild(emptyNote)
@@ -622,12 +619,7 @@ function mountChip(status: data.MountStatus): string {
 function storeUnread(store: data.Store): number {
    try {
       if (!store.db || store.db.total_art === 0) return 0
-      let seen: Record<string, number> = {}
-      try {
-         seen = JSON.parse(localStorage.getItem(seenKey(store.mid)) || "{}") as Record<string, number>
-      } catch {
-         seen = {}
-      }
+      const seen = readSeenFor(store.mid)
       const feeds = Object.values(store.db.feeds) as IFeed[]
       if (feeds.length === 0) return 0
       const { counts } = data.unreadTally(feeds, (id: number) => seen["feed:" + id], store)
@@ -647,7 +639,7 @@ function storeUnread(store: data.Store): number {
 function renderMounts(stores: data.Store[]): HTMLElement {
    const activeMid = data.activeStore().mid
    const labels = new Map(data.mountRecords().map((r) => [r.id, mountLabel(r)]))
-   const box = div("srr-picker-mounts")
+   const box = divEl("srr-picker-mounts")
    for (const s of stores) {
       const status = data.mountStatus(s.mid)
       const row = document.createElement("a")

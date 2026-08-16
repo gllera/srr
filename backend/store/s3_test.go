@@ -526,10 +526,10 @@ func TestS3PutCacheControlAndContentType(t *testing.T) {
 		key, wantCC, wantCT string
 	}{
 		{"db.gz", cacheRevalidate, "application/gzip"},
-		{"idx/0.gz", cacheImmutable, "application/gzip"},
-		{"data/3.gz", cacheImmutable, "application/gzip"},
-		{"seen/4.gz", cacheImmutable, "application/gzip"},
-		{"assets/ab/0123456789abcdef.jpg", cacheImmutable, "application/octet-stream"},
+		{"idx/0.gz", CacheImmutable, "application/gzip"},
+		{"data/3.gz", CacheImmutable, "application/gzip"},
+		{"seen/4.gz", CacheImmutable, "application/gzip"},
+		{"assets/ab/0123456789abcdef.jpg", CacheImmutable, "application/octet-stream"},
 		{".locked", "", "application/octet-stream"}, // no cache policy, no key-derived type
 	}
 	for _, c := range cases {

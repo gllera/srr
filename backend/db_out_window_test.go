@@ -88,10 +88,7 @@ func sparseOutStore(t *testing.T) (*DB, int, int) {
 func referenceWindow(t *testing.T, db *DB, include map[int]bool, limit int) []ArticleData {
 	t.Helper()
 	var matches []ArticleData
-	cur := 0
-	err := db.walkArticles(ctx, 0, db.core.TotalArticles, func(ad *ArticleData) error {
-		chron := cur
-		cur++
+	err := db.walkArticles(ctx, 0, db.core.TotalArticles, func(chron int, ad *ArticleData) error {
 		if !include[ad.FeedID] {
 			return nil
 		}

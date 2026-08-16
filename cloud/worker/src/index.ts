@@ -17,6 +17,7 @@ import { beginLogin, handleCallback, logout } from "./oidc"
 import { getSession } from "./session"
 import { rosterLookup, type RosterEntry } from "./roster"
 import { classify, type Route } from "./router"
+import { isNavigation, missingConfig, notFound, serveShellAsset, serveShellIndex } from "./shell"
 
 export interface Env {
    ASSETS: Fetcher
@@ -30,10 +31,6 @@ export interface Env {
    ROSTER: string
 }
 
-// Mirror of frontend/_headers (the Pages deploy's CSP); index.html also
-// carries it as a <meta> fallback, but the header is the real layer here.
-const CSP = "script-src 'self'; object-src 'none'; base-uri 'none'"
-
 // no-store because the 401 branch of deny() is one of these: an auth verdict
 // that a shared cache could hand to the next visitor is not a verdict.
 const json = (status: number, error: string) =>
@@ -41,8 +38,6 @@ const json = (status: number, error: string) =>
       status,
       headers: { "content-type": "application/json", "cache-control": "no-store" },
    })
-
-const notFound = () => new Response("not found", { status: 404 })
 
 // Store and sync bytes are FEED-SOURCED or client-written, and here they are
 // served from the app's OWN origin under the tenant prefix — the one assumption
@@ -67,18 +62,6 @@ function userContent(res: Response): Response {
    return new Response(res.body, { status: res.status, statusText: res.statusText, headers })
 }
 
-const isNavigation = (request: Request) =>
-   request.headers.get("sec-fetch-mode") === "navigate" || (request.headers.get("accept") || "").includes("text/html")
-
-// Every one of these is operator config supplied out of band (`wrangler secret
-// put`), so an unset one is a DEPLOYMENT mistake and not a request the user got
-// wrong. Say so with a 500: falling through would send a visitor to a login that
-// cannot complete, and they would meet a redirect loop instead of a cause.
-function missingConfig(env: Env): string[] {
-   const need = ["OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "SESSION_HMAC_SECRET"] as const
-   return need.filter((k) => !env[k])
-}
-
 // Anonymous → login redirect (navigations) or 401 (fetches); authenticated
 // but unauthorized → 403. The one deny path every gated route shares.
 //
@@ -97,32 +80,6 @@ function deny(request: Request, url: URL, authenticated: boolean): Response {
       })
    }
    return json(401, "auth required")
-}
-
-// The shell gets nosniff but NEVER userContent(): its `sandbox` would drop the
-// reader into an opaque origin with scripting off — the app would simply not
-// run. Two different jobs sharing one header name is exactly the trap, so the
-// shell sets its own and the store keeps its own.
-async function serveShellIndex(request: Request, env: Env): Promise<Response> {
-   const res = await env.ASSETS.fetch(new URL("/index.html", request.url))
-   const headers = new Headers(res.headers)
-   headers.set("cache-control", "no-cache")
-   headers.set("content-security-policy", CSP)
-   headers.set("x-content-type-options", "nosniff")
-   return new Response(res.body, { status: res.status, headers })
-}
-
-async function serveShellAsset(request: Request, env: Env, name: string): Promise<Response> {
-   const res = await env.ASSETS.fetch(new URL(`/${name}`, request.url))
-   if (!res.ok) return res
-   const headers = new Headers(res.headers)
-   // Content-hashed names are immutable; the webmanifest is the one stable name.
-   headers.set("cache-control", name === "manifest.webmanifest" ? "no-cache" : "public, max-age=31536000, immutable")
-   // Safe only because these are OUR bundle's bytes under correct types: nosniff
-   // BLOCKS a script served as anything but a JS MIME type (and a stylesheet as
-   // anything but text/css), so the asset test pins the type alongside it.
-   headers.set("x-content-type-options", "nosniff")
-   return new Response(res.body, { status: res.status, headers })
 }
 
 // Serve a store object from R2 with its stored metadata (the engine stamps

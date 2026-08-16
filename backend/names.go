@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+
+	"srr/store"
 )
 
 // The object-name table — docs/MANIFEST-SPEC.md §4.5, "names are listed, never
@@ -117,7 +119,7 @@ type StemRef struct {
 	Stem   int    `json:"stem"`
 }
 
-func (r StemRef) key() string { return fmt.Sprintf("%s/%d.gz", r.Series, r.Stem) }
+func (r StemRef) key() string { return store.PackKey(r.Series, r.Stem) }
 
 // SummaryName is a derived summary object: a StemRef plus the count of
 // finalized packs it covers. Coverage rides NEXT TO the name instead of inside
@@ -130,7 +132,7 @@ type SummaryName struct {
 	Covers int    `json:"covers"`
 }
 
-func (s SummaryName) key() string { return fmt.Sprintf("%s/%d.gz", s.Series, s.Stem) }
+func (s SummaryName) key() string { return store.PackKey(s.Series, s.Stem) }
 
 // DeltaNames is the ordered live delta chain: stems in the data series, oldest
 // first. Each segment holds one dirty cycle's whole batch as data-pack JSONL.
@@ -142,7 +144,7 @@ type DeltaNames struct {
 func (d DeltaNames) keys() []string {
 	out := make([]string, len(d.Stems))
 	for i, s := range d.Stems {
-		out[i] = fmt.Sprintf("%s/%d.gz", d.Series, s)
+		out[i] = store.PackKey(d.Series, s)
 	}
 	return out
 }
@@ -296,7 +298,7 @@ func (n *ManifestNames) key(series string, pos int) (string, error) {
 		return "", fmt.Errorf("%s: the store names no object at position %d (%d listed from %d)",
 			series, pos, len(s.Stems), s.Base)
 	}
-	return n.resolve(fmt.Sprintf("%s/%d.gz", series, s.Stems[i])), nil
+	return n.resolve(store.PackKey(series, s.Stems[i])), nil
 }
 
 // deltaKeys / seenKey / hsumKey / ssumKey are the singleton accessors. They go
@@ -427,7 +429,7 @@ func (n *ManifestNames) keys() []string {
 	var out []string
 	for name, s := range n.Series {
 		for _, stem := range s.Stems {
-			out = append(out, n.resolve(fmt.Sprintf("%s/%d.gz", name, stem)))
+			out = append(out, n.resolve(store.PackKey(name, stem)))
 		}
 	}
 	out = append(out, n.deltaKeys()...)
