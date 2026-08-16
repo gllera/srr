@@ -183,3 +183,42 @@ func TestRecipeSetSecrets(t *testing.T) {
 		return nil
 	})
 }
+
+// TestValidatePipeChecksParameters pins the config-time gate on a built-in's
+// PARAMETERS, not just its name. A built-in parses its params inside the
+// per-item closure, so `#readability timout=30s` used to be stored by every
+// write surface (recipe set, feed add -p, store import, the GUI, the MCP tool)
+// and then fail the FETCH of every feed on that recipe, every five minutes,
+// with nothing pointing back at the command that introduced it.
+func TestValidatePipeChecksParameters(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pipe []string
+		bad  string // substring the error must name; "" = must pass
+	}{
+		{"unknown param", []string{"#readability timout=30s"}, "timout"},
+		{"bad regex", []string{"#filter keep_title=notaregex"}, "keep_title"},
+		{"bad duration", []string{"#readability timeout=notaduration"}, "timeout"},
+		{"negative int", []string{"#filter min_words=-3"}, "min_words"},
+		{"unknown module", []string{"#nosuchmod"}, "unknown built-in"},
+		{"valid params", []string{"#readability timeout=30s", "#filter min_words=50"}, ""},
+		{"parameterless", []string{"#sanitize", "#minify", "#unlazy"}, ""},
+		{"external command untouched", []string{"my-script --flag=bogus"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validatePipe(tc.pipe, true)
+			if tc.bad == "" {
+				if err != nil {
+					t.Fatalf("validatePipe(%v) = %v, want nil", tc.pipe, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("validatePipe(%v) = nil, want an error naming %q", tc.pipe, tc.bad)
+			}
+			if !strings.Contains(err.Error(), tc.bad) {
+				t.Errorf("error %q does not name %q", err, tc.bad)
+			}
+		})
+	}
+}

@@ -221,13 +221,7 @@ func (d *S3) put(ctx context.Context, key string, r io.Reader, ignoreExisting bo
 	// it gets the path prefix, so the CDN serves finalized packs immutable and
 	// db.gz/latest always-revalidate.
 	cacheControl := cacheControlForKey(key)
-	contentType := meta.ContentType
-	if contentType == "" {
-		contentType = contentTypeForKey(key)
-	}
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
+	contentType := contentTypeFor(meta, key)
 	key = d.s3path("write", key)
 
 	var condition *string

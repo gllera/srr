@@ -278,15 +278,6 @@ func memoManifestFetch(storeTarget string, root []byte, fetch keyGetter) keyGett
 	}
 }
 
-// loadStore resolves the store root through whichever shape it carries and
-// returns the in-memory core, INCLUDING its object-name table. It is the single
-// root resolver: NewDB and the read-only tools (`srr inspect`, `srr art`)
-// both go through it, so the writer and the checkers can never disagree about
-// what a store's objects are called.
-//
-// The returned core carries no configuration for a v3 store — that lives in
-// config.gz, which only the callers that need it read (NewDB always; inspect
-// for its cross-check).
 // errFutureFormat refuses a store document from the future — the one-way door
 // the format cutover documents, stated once for every gzip-JSON document that
 // carries a `v` (the root, each manifest, the config sidecar). This binary
@@ -296,6 +287,15 @@ func errFutureFormat(key string, v int) error {
 	return fmt.Errorf("%s was written by a newer srr (format v%d, this binary supports v%d)", key, v, dbFormatVersion)
 }
 
+// loadStore resolves the store root through whichever shape it carries and
+// returns the in-memory core, INCLUDING its object-name table. It is the single
+// root resolver: NewDB and the read-only tools (`srr inspect`, `srr art`)
+// both go through it, so the writer and the checkers can never disagree about
+// what a store's objects are called.
+//
+// The returned core carries no configuration for a v3 store — that lives in
+// config.gz, which only the callers that need it read (NewDB always; inspect
+// for its cross-check).
 func loadStore(fetch keyGetter) (*DBCore, error) {
 	data, err := fetch(dbFileKey)
 	if err != nil {

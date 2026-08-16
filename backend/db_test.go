@@ -22,33 +22,63 @@ import (
 
 var ctx = context.Background()
 
-func setupTestDB(t *testing.T) (*DB, *DBCore, string) {
+// testGlobals installs g as the process globals for one test and returns the
+// store dir, filling in whatever g leaves unset with the same values main()
+// floors — and doing the two things a test store needs beyond its fields.
+//
+// It exists because a dozen sites spelled `globals = &Globals{PackSize: 1,
+// Store: dir}` by hand and so opted out of BOTH: the finalGzip stub and the
+// memo resets. Opting out of the stub is not merely untidy — it makes a
+// 50k-boundary test pay real zopfli, and one of them
+// (TestPutArticlesIdxPackSplitAtBoundary) ran 3.4s where its
+// setupTestDB-routed twin over the identical workload ran 0.22s, about a tenth
+// of the package's whole wall clock.
+func testGlobals(t *testing.T, g Globals) string {
 	t.Helper()
-	dir := t.TempDir()
-	globals = &Globals{
-		PackSize: 1, // 1 KB, small to test pack splitting
-		Store:    dir,
-		// Floor Workers/MaxFeedSize like main() does, so the fetch/preview paths
-		// see realistic values under test without per-call-site guards.
-		Workers:     runtime.NumCPU(),
-		MaxFeedSize: defaultMaxFeedSize,
-		// CacheDir is always set in production (kong default + main()'s floor);
-		// mirror that here with a per-test dir so fetch-path tests never touch
-		// the real user cache (~/.cache/srr).
-		CacheDir: t.TempDir(),
+	if g.Store == "" {
+		g.Store = t.TempDir()
 	}
+	if g.PackSize == 0 {
+		g.PackSize = 1 // 1 KB, small to test pack splitting
+	}
+	// Floor Workers/MaxFeedSize like main() does, so the fetch/preview paths
+	// see realistic values under test without per-call-site guards.
+	if g.Workers == 0 {
+		g.Workers = runtime.NumCPU()
+	}
+	if g.MaxFeedSize == 0 {
+		g.MaxFeedSize = defaultMaxFeedSize
+	}
+	// CacheDir is always set in production (kong default + main()'s floor);
+	// mirror that here with a per-test dir so fetch-path tests never touch the
+	// real user cache (~/.cache/srr).
+	if g.CacheDir == "" {
+		g.CacheDir = t.TempDir()
+	}
+	globals = &g
 
 	// Skip zopfli recompression of finalized packs: the 50k-boundary tests
 	// would pay ~10s per finalized search shard for bytes whose validity
 	// gzipBest's own tests already pin. Identity keeps the published bytes
 	// exactly what the assertions read back.
 	finalGzip = func(_ string, gz []byte) ([]byte, error) { return gz, nil }
-
-	// The meta-tail memo is process-global: fresh test stores share seq/count
-	// shapes, so a stale entry from the previous test could be trusted here
-	// and hand it another store's tail lines.
-	metaTailMemo.reset()
 	t.Cleanup(func() { finalGzip = gzipBest })
+
+	// The process-global memos are cleared per store: fresh test stores share
+	// seq/count shapes, so a stale entry from the previous test could be trusted
+	// here and hand it another store's tail lines. The sidecar memos key on the
+	// store target so they cannot collide across tests, but a test that
+	// overwrites an object it has already READ (the corrupt-sidecar cases) wants
+	// the clean slate too.
+	metaTailMemo.reset()
+	seenBodyMemo.reset()
+	refsBodyMemo.reset()
+	return g.Store
+}
+
+func setupTestDB(t *testing.T) (*DB, *DBCore, string) {
+	t.Helper()
+	dir := testGlobals(t, Globals{})
 
 	db, err := NewDB(ctx, false)
 	if err != nil {
@@ -476,7 +506,7 @@ func TestAtomicPut(t *testing.T) {
 
 func TestDBLocking(t *testing.T) {
 	dir := t.TempDir()
-	globals = &Globals{PackSize: 1, Store: dir}
+	testGlobals(t, Globals{Store: dir})
 
 	db, err := NewDB(ctx, true)
 	if err != nil {
@@ -510,7 +540,7 @@ func TestDBLocking(t *testing.T) {
 
 func TestDBLockingForce(t *testing.T) {
 	dir := t.TempDir()
-	globals = &Globals{PackSize: 1, Store: dir, Force: true}
+	testGlobals(t, Globals{Store: dir, Force: true})
 
 	db1, err := NewDB(ctx, true)
 	if err != nil {
@@ -596,7 +626,7 @@ func TestRemoveNonExistentFeed(t *testing.T) {
 
 func TestCommitAndReopen(t *testing.T) {
 	dir := t.TempDir()
-	globals = &Globals{PackSize: 1, Store: dir}
+	testGlobals(t, Globals{Store: dir})
 
 	db, err := NewDB(ctx, false)
 	if err != nil {
@@ -759,7 +789,7 @@ func assertKey(t *testing.T, dir, key string, present bool) {
 
 func TestDBOpenCorruptedJSON(t *testing.T) {
 	dir := t.TempDir()
-	globals = &Globals{PackSize: 1, Store: dir}
+	testGlobals(t, Globals{Store: dir})
 
 	// Write invalid db.gz
 	os.WriteFile(filepath.Join(dir, "db.gz"), []byte("not gzip"), 0644)
@@ -772,7 +802,7 @@ func TestDBOpenCorruptedJSON(t *testing.T) {
 
 func TestDBOpenEmptyDir(t *testing.T) {
 	dir := t.TempDir()
-	globals = &Globals{PackSize: 1, Store: dir}
+	testGlobals(t, Globals{Store: dir})
 
 	// Fresh DB with no db.gz should work
 	db, err := NewDB(ctx, false)
@@ -792,7 +822,7 @@ func TestDBOpenEmptyDir(t *testing.T) {
 // fetch nothing.
 func TestNewDBRejectsUrllessFeed(t *testing.T) {
 	dir := t.TempDir()
-	globals = &Globals{PackSize: 1, Store: dir}
+	testGlobals(t, Globals{Store: dir})
 
 	// Legacy shape: feed carries feeds[] but no top-level url.
 	legacy := `{"feeds":{"1":{"title":"Old","feeds":[{"url":"http://example.com/feed"}],"total_art":0,"add_idx":0}}}`
@@ -817,7 +847,7 @@ func TestNewDBRejectsUrllessFeed(t *testing.T) {
 
 func TestPutArticlesIdxPackSplitAtBoundary(t *testing.T) {
 	dir := t.TempDir()
-	globals = &Globals{PackSize: 1024, Store: dir} // large enough that data doesn't split
+	testGlobals(t, Globals{PackSize: 1024, Store: dir}) // large enough that data doesn't split
 
 	db, err := NewDB(ctx, false)
 	if err != nil {
@@ -936,7 +966,7 @@ func TestCommitRootIsAPointer(t *testing.T) {
 
 func TestDBNullFeedsInJSON(t *testing.T) {
 	dir := t.TempDir()
-	globals = &Globals{PackSize: 1, Store: dir}
+	testGlobals(t, Globals{Store: dir})
 
 	core := `{"fetched_at":0,"total_art":0,"next_pid":0,"pack_off":0,"feeds":null}` + "\n"
 	var buf bytes.Buffer
@@ -1001,7 +1031,7 @@ func TestPutArticlesResumption(t *testing.T) {
 
 func TestDBOpenCorruptedGzipValidInner(t *testing.T) {
 	dir := t.TempDir()
-	globals = &Globals{PackSize: 1, Store: dir}
+	testGlobals(t, Globals{Store: dir})
 
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
@@ -1113,7 +1143,7 @@ func TestNewDBLegacyPipeIngest(t *testing.T) {
 	// override fields use today, so those values revive as overrides — accepted
 	// on purpose, the old per-feed meaning matches the new one.
 	dir := t.TempDir()
-	globals = &Globals{PackSize: 1, Store: dir}
+	testGlobals(t, Globals{Store: dir})
 	legacy := `{"fetched_at":0,"total_art":0,"next_pid":0,"pack_off":0,` +
 		`"pipe":["#readability"],"ingest":"old-ingest",` +
 		`"feeds":{"0":{"title":"T","url":"http://example.com/rss","pipe":["#minify"],"ingest":"x"}}}`
@@ -1220,7 +1250,7 @@ func TestFeedByteCountersPersistAcrossReload(t *testing.T) {
 func TestNewDBFormatVersionGate(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	globals = &Globals{PackSize: 1, Store: dir}
+	testGlobals(t, Globals{Store: dir})
 	writeLegacyDB(t, dir, `{"v":99,"fetched_at":0,"total_art":0,"next_pid":0,"pack_off":0,"feeds":{}}`)
 
 	db, err := NewDB(ctx, false)
@@ -1238,7 +1268,7 @@ func TestNewDBFormatVersionGate(t *testing.T) {
 	// Commit refuses to publish an unmigrated core (a read-only session never
 	// commits).
 	dir2 := t.TempDir()
-	globals = &Globals{PackSize: 1, Store: dir2}
+	testGlobals(t, Globals{Store: dir2})
 	writeLegacyDB(t, dir2, `{"fetched_at":0,"total_art":0,"next_pid":0,"pack_off":0,"feeds":{}}`)
 	db2, err := NewDB(ctx, true)
 	if err != nil {

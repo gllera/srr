@@ -391,7 +391,7 @@ func ParseFeed(data []byte, fn func(*mod.RawItem) error) (title, lang string, pa
 			}
 		case xml.StartElement:
 			if se.Name.Local == itemTag {
-				raw, err := parseElement(dec, se)
+				raw, err := parseElement(dec, se, false) // the item element's own Txt is never read
 				if err != nil {
 					// A malformed element wedges the decoder (Go's xml decoder rejects a
 					// bare "]]>" even in non-strict mode, and keeps erroring after).
@@ -442,7 +442,16 @@ func ParseFeed(data []byte, fn func(*mod.RawItem) error) (title, lang string, pa
 	}
 }
 
-func parseElement(dec *xml.Decoder, start xml.StartElement) (mod.RawField, error) {
+// parseElement reads one element into a RawField. wantText controls whether the
+// element's own text is accumulated: the ITEM element's text is never read (the
+// caller consumes only its children, and every RawField.Txt reader in the
+// codebase reads a CHILD field), so building it meant copying every article
+// body a second time — a full extra copy of <content:encoded> plus
+// <description> per item of every response, every cycle, for a value nothing
+// looks at. Nested elements still fold their children's text, which is what
+// makes mixed content like <description>Hello <b>world</b></description> come
+// out whole.
+func parseElement(dec *xml.Decoder, start xml.StartElement, wantText bool) (mod.RawField, error) {
 	var f mod.RawField
 	if len(start.Attr) > 0 {
 		f.Attr = make(map[string]string, len(start.Attr))
@@ -472,12 +481,16 @@ func parseElement(dec *xml.Decoder, start xml.StartElement) (mod.RawField, error
 		}
 		switch t := tok.(type) {
 		case xml.CharData:
-			txt.Write(t)
+			if wantText {
+				txt.Write(t)
+			}
 		case xml.EndElement:
-			f.Txt = strings.TrimSpace(txt.String())
+			if wantText {
+				f.Txt = strings.TrimSpace(txt.String())
+			}
 			return f, nil
 		case xml.StartElement:
-			child, err := parseElement(dec, t)
+			child, err := parseElement(dec, t, true)
 			if err != nil {
 				return f, err
 			}
@@ -488,7 +501,9 @@ func parseElement(dec *xml.Decoder, start xml.StartElement) (mod.RawField, error
 			// Fold inner-element text back into the running text so mixed-content
 			// fields like <description>Hello <b>world</b> foo</description> preserve
 			// all text nodes, not just the direct CharData of this element.
-			txt.WriteString(child.Txt)
+			if wantText {
+				txt.WriteString(child.Txt)
+			}
 		}
 	}
 }

@@ -187,13 +187,25 @@ func (p *layoutPlan) binGeoArgs(extra ...binField) string {
 	return p.geoList(binGeoName, "", extra)
 }
 
-// binHeaderEndExpr is the header-length expression ("12 + numSlots*4").
-func (p *layoutPlan) binHeaderEndExpr(mul string) string {
+// headerEndExpr renders the header-length expression ("12 + numSlots*4") for
+// one side. name resolves a variable-length field's COUNT SOURCE to that side's
+// identifier and mul is its spacing; everything else — which fields
+// participate, their order, and the widths they multiply by — is the geometry
+// both emitters must agree on, so it is written once. This is the same rule
+// geoList states two dozen lines above: the emitted parsers must read the right
+// bytes into the right variables, and a disagreement here is not a compile
+// error on either side.
+func (p *layoutPlan) headerEndExpr(name func(from string) string, mul string) string {
 	out := fmt.Sprint(p.prefix)
 	for _, f := range p.vars {
-		out += fmt.Sprintf(" + %s%s%d", binLowerFirst(f.From), mul, f.Width)
+		out += fmt.Sprintf(" + %s%s%d", name(f.From), mul, f.Width)
 	}
 	return out
+}
+
+// binHeaderEndExpr is the header-length expression ("12 + numSlots*4").
+func (p *layoutPlan) binHeaderEndExpr(mul string) string {
+	return p.headerEndExpr(binLowerFirst, mul)
 }
 
 // emitGoLayout writes one layout's Go encoder/decoder.
@@ -354,14 +366,14 @@ func (p *layoutPlan) tsGeoArgs(extra ...binField) string {
 	return p.geoList(tsGeoName, "", extra)
 }
 
-// tsHeaderEndExpr is the header-length expression in TS spacing.
+// tsHeaderEndExpr is the header-length expression in TS spacing. The TS side
+// resolves a count source through the scalar table (its declared TS name);
+// the arithmetic itself is headerEndExpr's.
 func (p *layoutPlan) tsHeaderEndExpr() string {
-	out := fmt.Sprint(p.prefix)
-	for _, f := range p.vars {
-		src, _ := binFind(p.scalars, f.From)
-		out += fmt.Sprintf(" + %s * %d", src.TS, f.Width)
-	}
-	return out
+	return p.headerEndExpr(func(from string) string {
+		src, _ := binFind(p.scalars, from)
+		return src.TS
+	}, " * ")
 }
 
 // emitTSLayout writes one layout's TypeScript decoder. The reader never WRITES

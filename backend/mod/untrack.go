@@ -92,12 +92,46 @@ func untrackContent(body *html.Node) bool {
 	return changed
 }
 
+// trackerHints are literal substrings, at least one of which EVERY alternative
+// of trackerPixelRe necessarily contains. They are a pre-filter, not a second
+// rule: a src holding none of them cannot match the pattern, so the pattern
+// never runs on it.
+//
+// It exists because trackerPixelRe has no literal prefix, so Go's regexp falls
+// back to backtracking and restarts the alternation at every offset of the URL.
+// Profiling a real article (40 images, the full built-in pipe) put that one
+// MatchString at 8% of total CPU — ~6µs to reject a 30-byte URL. Every <img> of
+// every article pays it.
+//
+// TestTrackerHintsAreNecessary pins the implication in the direction that
+// matters: adding an alternative without a hint silently stops matching it.
+var trackerHints = []string{
+	"feedburner.", "pixel.", "stats.wordpress.", "list-manage.",
+	"google-analytics.", "facebook.com/tr", "scorecardresearch.",
+	"quantserve.", "doubleclick.", "yandex.",
+}
+
+// matchesTrackerPixel is trackerPixelRe.MatchString with the hint pre-filter in
+// front. Same answer for every input, by construction.
+func matchesTrackerPixel(src string) bool {
+	if src == "" {
+		return false
+	}
+	lower := strings.ToLower(src)
+	for _, h := range trackerHints {
+		if strings.Contains(lower, h) {
+			return trackerPixelRe.MatchString(src)
+		}
+	}
+	return false
+}
+
 // isTrackerPixel reports whether an <img> is an analytics beacon: a known
 // endpoint, or both sides declared <= 2px. An element still carrying a lazy
 // data-src URL is never size-classified — the placeholder may declare 1x1
 // while the real image waits in the data attribute.
 func isTrackerPixel(n *html.Node) bool {
-	if trackerPixelRe.MatchString(mediaAttr(n, "src")) {
+	if matchesTrackerPixel(mediaAttr(n, "src")) {
 		return true
 	}
 	for _, k := range lazySrcAttrs {

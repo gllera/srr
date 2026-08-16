@@ -176,15 +176,11 @@ func (d *HTTP) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	// caller's, and bytes they have already read cannot be re-delivered. The
 	// request is rebuilt per attempt because a Do that failed has consumed it.
 	err := withRetry(ctx, func(int) error {
-		req, err := d.newRequest(ctx, http.MethodGet, u, nil)
+		resp, err := d.do(ctx, http.MethodGet, "get", u, nil) //nolint:bodyclose // the caller below closes or streams it
 		if err != nil {
 			return err
 		}
-		resp, err := d.client.Do(req) //nolint:bodyclose // closed by the deferred drainClose below
-		if err != nil {
-			return fmt.Errorf("http get %s: %w", u.Redacted(), err)
-		}
-		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+		if missingStatus(resp) {
 			drainClose(resp.Body)
 			return errMissing("key not found on "+u.Redacted()+":", key)
 		}
@@ -258,14 +254,7 @@ func (d *HTTP) put(ctx context.Context, key string, r io.Reader, ignoreExisting 
 		req.Header.Set("If-None-Match", "*")
 	}
 
-	contentType := meta.ContentType
-	if contentType == "" {
-		contentType = contentTypeForKey(key)
-	}
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
-	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Content-Type", contentTypeFor(meta, key))
 	if meta.ContentEncoding != "" {
 		req.Header.Set("Content-Encoding", meta.ContentEncoding)
 	}
@@ -325,16 +314,12 @@ func (d *HTTP) Stat(ctx context.Context, key string) (int64, error) {
 	u := d.keyURL("stat", key)
 	var size int64
 	err := withRetry(ctx, func(int) error {
-		req, err := d.newRequest(ctx, http.MethodHead, u, nil)
+		resp, err := d.do(ctx, http.MethodHead, "head", u, nil) //nolint:bodyclose // the caller below closes or streams it
 		if err != nil {
 			return err
 		}
-		resp, err := d.client.Do(req) //nolint:bodyclose // closed by the deferred drainClose below
-		if err != nil {
-			return fmt.Errorf("http head %s: %w", u.Redacted(), err)
-		}
 		defer drainClose(resp.Body)
-		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+		if missingStatus(resp) {
 			slog.Debug("db not found", "key", u.Redacted())
 			return errMissing("http head "+u.Redacted()+":", key)
 		}
@@ -375,25 +360,45 @@ func (d *HTTP) Rm(ctx context.Context, key string) error {
 
 func (d *HTTP) rmOnce(ctx context.Context, u *url.URL) error {
 	return withRetry(ctx, func(int) error {
-		req, err := d.newRequest(ctx, http.MethodDelete, u, nil)
+		resp, err := d.do(ctx, http.MethodDelete, "delete", u, nil) //nolint:bodyclose // the caller below closes or streams it
 		if err != nil {
 			return err
-		}
-		resp, err := d.client.Do(req) //nolint:bodyclose // closed by the deferred drainClose below
-		if err != nil {
-			return fmt.Errorf("http delete %s: %w", u.Redacted(), err)
 		}
 		defer drainClose(resp.Body)
 		// Rm is contractually silent on missing keys (the GC sweeps re-delete a
 		// trailing window of already-gone names on purpose), which is also what
 		// makes a repeat of it harmless: the second delete of a key the first one
 		// removed is a success, not a 404.
-		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+		if missingStatus(resp) {
 			slog.Debug("db not found", "key", u.Redacted())
 			return nil
 		}
 		return statusErr("delete", u, resp)
 	})
+}
+
+// do builds and sends one request, wrapping a transport failure with the verb.
+// op is the verb as it appears in messages, so each call site names it once
+// instead of spelling it in both the wrap and the statusErr below it. It does
+// NOT close the body: every caller either streams it out (Get) or defers
+// drainClose, and which one is the caller's business.
+func (d *HTTP) do(ctx context.Context, method, op string, u *url.URL, body io.Reader) (*http.Response, error) {
+	req, err := d.newRequest(ctx, method, u, body)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := d.client.Do(req) //nolint:bodyclose // returned to the caller, who closes it
+	if err != nil {
+		return nil, fmt.Errorf("http %s %s: %w", op, u.Redacted(), err)
+	}
+	return resp, nil
+}
+
+// missingStatus reports whether a response is the store's "absent" answer. 404
+// and 410 both mean it: a server that has genuinely forgotten a key answers
+// either, and a predicate retyped at three sites is the shape that drifts.
+func missingStatus(resp *http.Response) bool {
+	return resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone
 }
 
 // Close releases this handle. It deliberately does NOT flush idle connections

@@ -8,6 +8,34 @@ import (
 	"testing"
 )
 
+// mustInboxKey resolves a producer slot key, failing the test on a name the
+// grammar rejects.
+func mustInboxKey(t *testing.T, name string) string {
+	t.Helper()
+	key, err := inboxKey(name)
+	if err != nil {
+		t.Fatalf("inboxKey(%q): %v", name, err)
+	}
+	return key
+}
+
+// TestInboxKeyRefusesEscapingNames pins the guard inside the formatter: a
+// producer name is operator input that becomes a store key, and the
+// consolidator's --inbox-producers list never checked it. `../db` resolved to
+// the store root on any path-joining backend, where the root's own JSON decodes
+// as a zero-valued envelope, takes drainInbox's "already drained" arm, and gets
+// Rm'd by reapInbox.
+func TestInboxKeyRefusesEscapingNames(t *testing.T) {
+	for _, name := range []string{"../db", "..", ".", "", "a/b", "sub/../../db"} {
+		if key, err := inboxKey(name); err == nil {
+			t.Errorf("inboxKey(%q) = %q, want an error", name, key)
+		}
+	}
+	if key, err := inboxKey("box-1.a_b"); err != nil || key != "inbox/box-1.a_b.gz" {
+		t.Errorf("inboxKey(ordinary name) = %q, %v", key, err)
+	}
+}
+
 // spoolTestFeed registers a feed and returns it, so tests exercise the real
 // AddFeed id assignment rather than fabricating a map entry.
 func spoolTestFeed(t *testing.T, db *DB, url string) *Feed {
@@ -160,7 +188,8 @@ func TestDrainInboxDiscardsUnknownFeed(t *testing.T) {
 // must stay in place so the next cycle retries it.
 func TestDrainInboxCorruptSlotIsWarnOnly(t *testing.T) {
 	db, _, _ := setupTestDB(t)
-	if err := db.Put(ctx, inboxKey("p1"), strings.NewReader("not gzip"), true); err != nil {
+	slot := mustInboxKey(t, "p1")
+	if err := db.Put(ctx, slot, strings.NewReader("not gzip"), true); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	arts, slots := db.drainInbox(ctx, []string{"p1"}, 100)
@@ -178,7 +207,7 @@ func TestReapInboxRemovesSlots(t *testing.T) {
 	reapInbox(context.Background(), db.Backend, []string{"p1"})
 	// Absence, not a zero size: a slot that is still THERE but reports 0 bytes
 	// was never reaped, and the producer would treat it as drained.
-	if _, err := db.Stat(ctx, inboxKey("p1")); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := db.Stat(ctx, mustInboxKey(t, "p1")); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("Stat after reap err = %v, want errors.Is(err, fs.ErrNotExist)", err)
 	}
 }

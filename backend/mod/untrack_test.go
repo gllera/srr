@@ -137,3 +137,44 @@ func TestUntrackWPTrailerTrailingWhitespaceNode(t *testing.T) {
 		t.Errorf("real body should survive trailer removal, got %q", got)
 	}
 }
+
+// TestTrackerHintsAreNecessary pins the pre-filter's one obligation: every
+// string trackerPixelRe accepts must contain a hint, or matchesTrackerPixel
+// would silently stop recognising a tracker the pattern still lists. The corpus
+// is one canonical URL per alternative plus near-misses; each is checked BOTH
+// ways, so a hint that is merely sufficient (or a pattern edit that outgrows
+// its hint) fails here rather than in production.
+func TestTrackerHintsAreNecessary(t *testing.T) {
+	corpus := []string{
+		"https://feeds.feedburner.com/~r/blog/~4/abc123",
+		"https://pixel.wp.com/g.gif?v=ext",
+		"https://stats.wordpress.com/b.gif?host=x",
+		"https://stats.wordpress.com/g.gif?host=x",
+		"https://list.us1.list-manage.com/track/open.php?u=1",
+		"https://www.google-analytics.com/collect?v=1",
+		"https://www.google-analytics.com/__utm.gif?x=1",
+		"https://www.facebook.com/tr?id=1&ev=PageView",
+		"https://b.scorecardresearch.com/p?c1=2",
+		"https://pixel.quantserve.com/pixel/p-1.gif",
+		"https://ad.doubleclick.net/ddm/x",
+		"https://mc.yandex.ru/watch/12345",
+		// Case variance: the pattern is (?i), so the filter must be too.
+		"https://PIXEL.WP.COM/g.gif",
+		"HTTPS://Feeds.FeedBurner.com/~r/blog/~4/x",
+		// Near-misses that must stay unmatched by both.
+		"https://example.com/image.png",
+		"https://feedburner.com/not-a-tracker.png",
+		"https://facebook.com/trending",
+		"https://cdn.example.com/pixel-art.png",
+		"",
+	}
+	for _, u := range corpus {
+		want := trackerPixelRe.MatchString(u)
+		if u == "" {
+			want = false // matchesTrackerPixel short-circuits the empty src
+		}
+		if got := matchesTrackerPixel(u); got != want {
+			t.Errorf("matchesTrackerPixel(%q) = %v, trackerPixelRe = %v — the hint list no longer implies the pattern", u, got, want)
+		}
+	}
+}

@@ -314,7 +314,7 @@ func (o *DB) loadRefs(ctx context.Context) *assetRefs {
 		return newAssetRefs()
 	}
 	key := o.core.Names.arefKey()
-	buf, err := o.readGz(ctx, key)
+	buf, err := o.readSidecar(ctx, &refsBodyMemo, key)
 	if err == nil {
 		var p *assetRefs
 		if p, err = parseAssetRefs(buf); err == nil {

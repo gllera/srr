@@ -117,28 +117,18 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 		return issues + o.checkConfigSidecar(fetch, core, true)
 	}
 	seen := map[string]bool{}
-	for _, series := range slices.Sorted(maps.Keys(names.Series)) {
-		s := names.Series[series]
-		if s.Tail >= 0 && (s.Tail < s.Base || s.Tail >= s.Base+len(s.Stems)) {
-			bad("%s tail position %d is outside the listed range [%d, %d)", series, s.Tail, s.Base, s.Base+len(s.Stems))
-		}
-		next := names.Next[series]
-		for _, stem := range s.Stems {
-			k := store.PackKey(series, stem)
-			if seen[k] {
-				bad("M3 violated: %s is listed twice", k)
-			}
-			seen[k] = true
-			if stem >= next {
-				bad("M3 violated: %s is at or above the series' next stem %d", k, next)
-			}
-		}
-	}
-	// Singletons (seen/hsum/ssum and each live delta) draw from the SAME
-	// per-series counters, so M3 governs them too: a summary or delta stem must
-	// be unique within its series and below that series' next. alloc keeps this
-	// true at runtime; this catches a hand-edited or corrupt manifest that reused
-	// a finalized-pack stem for a summary, or placed one at/above the counter.
+	// M3, stated once for everything that draws a stem. Positional entries and
+	// singletons (seen/aref/hsum/ssum, each live delta) come from the SAME
+	// per-series counters, so the rule governs both: a stem must be unique
+	// within its series and below that series' next. alloc keeps this true at
+	// runtime; this catches a hand-edited or corrupt manifest that reused a
+	// finalized-pack stem for a summary, or placed one at/above the counter.
+	//
+	// The positional loop used to carry its own copy, and the two had already
+	// drifted on the missing-counter case: it read names.Next[series] into an
+	// int, so a manifest with no counter for a series flagged EVERY one of its
+	// stems, while this form skips the comparison it cannot make. One rule, one
+	// verdict.
 	checkStem := func(series string, stem int) {
 		k := store.PackKey(series, stem)
 		if seen[k] {
@@ -147,6 +137,15 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 		seen[k] = true
 		if next, ok := names.Next[series]; ok && stem >= next {
 			bad("M3 violated: %s is at or above the series' next stem %d", k, next)
+		}
+	}
+	for _, series := range slices.Sorted(maps.Keys(names.Series)) {
+		s := names.Series[series]
+		if s.Tail >= 0 && (s.Tail < s.Base || s.Tail >= s.Base+len(s.Stems)) {
+			bad("%s tail position %d is outside the listed range [%d, %d)", series, s.Tail, s.Base, s.Base+len(s.Stems))
+		}
+		for _, stem := range s.Stems {
+			checkStem(series, stem)
 		}
 	}
 	if names.Seen != nil {
@@ -246,9 +245,11 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 				}
 				continue
 			}
-			base := p * watchPackSize
-			if _, perr := parseWatchDoc(buf, base, min(core.TotalArticles-base, watchPackSize)); perr != nil {
-				bad("watch bitmap %s does not describe chrons [%d, +%d): %v", k, base, watchPackSize, perr)
+			base, n := watchRegion(core.TotalArticles, p)
+			if _, perr := parseWatchDoc(buf, base, n); perr != nil {
+				// n, not watchPackSize: the final region is partial, and printing
+				// the stride there described a span the writer never wrote.
+				bad("watch bitmap %s does not describe chrons [%d, +%d): %v", k, base, n, perr)
 			}
 		}
 	}
@@ -502,6 +503,7 @@ func (o *InspectCmd) checkOrphans(fetch keyGetter, core *DBCore) int {
 // addresses down, the one thing M8 forbids and the gate on S35's compaction)
 // shows up as one of these DECREASING between generations.
 type chronState struct {
+	gen      int // the generation it was read from; part of every message below
 	totalArt int
 	nextPID  int
 	feeds    map[int]FeedPublic
@@ -530,7 +532,6 @@ func (o *InspectCmd) checkChronPermanence(fetch keyGetter, core *DBCore) int {
 
 	from := oldestLiveGen(core, keepManifests)
 	states := make([]chronState, 0, core.ManifestNum-from+1)
-	gens := make([]int, 0, core.ManifestNum-from+1)
 	for g := from; g < core.ManifestNum; g++ {
 		buf, err := fetch(manifestKey(g))
 		if err != nil {
@@ -543,16 +544,14 @@ func (o *InspectCmd) checkChronPermanence(fetch keyGetter, core *DBCore) int {
 		if err := json.Unmarshal(buf, &man); err != nil {
 			continue
 		}
-		states = append(states, chronState{totalArt: man.TotalArticles, nextPID: man.NextPackID, feeds: man.Feeds})
-		gens = append(gens, g)
+		states = append(states, chronState{gen: g, totalArt: man.TotalArticles, nextPID: man.NextPackID, feeds: man.Feeds})
 	}
 	// The current generation (root.m) is the loaded core itself, not a re-read.
-	cur := chronState{totalArt: core.TotalArticles, nextPID: core.NextPackID, feeds: map[int]FeedPublic{}}
+	cur := chronState{gen: core.ManifestNum, totalArt: core.TotalArticles, nextPID: core.NextPackID, feeds: map[int]FeedPublic{}}
 	for id, ch := range core.Feeds {
 		cur.feeds[id] = feedPublicOf(ch)
 	}
 	states = append(states, cur)
-	gens = append(gens, core.ManifestNum)
 
 	issues := 0
 	bad := func(format string, args ...any) {
@@ -560,7 +559,8 @@ func (o *InspectCmd) checkChronPermanence(fetch keyGetter, core *DBCore) int {
 		issues++
 	}
 	for i := 1; i < len(states); i++ {
-		older, newer, og, ng := states[i-1], states[i], gens[i-1], gens[i]
+		older, newer := states[i-1], states[i]
+		og, ng := older.gen, newer.gen
 		if newer.totalArt < older.totalArt {
 			bad("M8 violated: total_art fell %d→%d between manifest %d and %d — a chron was renumbered", older.totalArt, newer.totalArt, og, ng)
 		}

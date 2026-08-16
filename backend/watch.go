@@ -169,6 +169,18 @@ type watchDoc struct {
 // watchPlanes is the in-memory form of one region: rule name → plane bytes.
 type watchPlanes map[string][]byte
 
+// watchRegion is the geometry of one bitmap object: the chron its bit 0
+// describes, and how many chrons it covers — watchPackSize, or the remainder
+// for the final partial region. Stated once because parseWatchDoc VALIDATES
+// every object against this exact pair, so the writer, the read-back seed and
+// `srr inspect --validate` must all compute it the same way; a stride change
+// that missed one of them would make the checker assert healthy objects against
+// a region the writer no longer writes.
+func watchRegion(total, p int) (base, n int) {
+	base = p * watchPackSize
+	return base, min(total-base, watchPackSize)
+}
+
 // watchPlaneBytes is a plane's length for a region of n chrons.
 func watchPlaneBytes(n int) int { return (n + 7) / 8 }
 
@@ -337,9 +349,8 @@ func (o *DB) SyncWatch(ctx context.Context, written []ArticleData) error {
 	// once, versus permanently publishing an object missing the bits it used to
 	// carry.
 	var seed watchPlanes
-	if base := pStart * watchPackSize; start > base {
+	if base, n := watchRegion(total, pStart); start > base {
 		if key, err := c.Names.key(watchSeries, pStart); err == nil {
-			n := min(total-base, watchPackSize)
 			if buf, rerr := o.readGz(ctx, key); rerr != nil {
 				slog.Warn("watch bitmap read-back failed; rebuilding the region from the data packs", "key", key, "error", rerr)
 				start = base
@@ -375,8 +386,7 @@ func (o *DB) SyncWatch(ctx context.Context, written []ArticleData) error {
 
 	eval := func(chron int, ad *ArticleData) {
 		ri := chron/watchPackSize - pStart
-		base := (ri + pStart) * watchPackSize
-		n := min(total-base, watchPackSize)
+		base, n := watchRegion(total, ri+pStart)
 		for name, m := range rules {
 			if chron < from[name] || !m.Match(ad.Title, ad.Content, ad.Lang) {
 				continue
@@ -417,8 +427,7 @@ func (o *DB) SyncWatch(ctx context.Context, written []ArticleData) error {
 		s.Base = pStart
 	}
 	for p := pStart; p <= last; p++ {
-		base := p * watchPackSize
-		n := min(total-base, watchPackSize)
+		base, n := watchRegion(total, p)
 		body, err := gzipJSON(regions[p-pStart].encode(base, n))
 		if err != nil {
 			return err

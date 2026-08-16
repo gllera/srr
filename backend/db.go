@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -199,6 +200,67 @@ func readGzOptional(ctx context.Context, b store.Backend, key string) ([]byte, e
 		return nil, fmt.Errorf("decompress %s: %w", key, err)
 	}
 	return out, nil
+}
+
+// sidecarMemo caches the decompressed body of one backend-only sidecar — the
+// dedup pool and the asset refcount table — across DB opens in this process.
+//
+// Both are read on EVERY open and neither is small: on a production store the
+// seen sidecar is ~110 KB gzipped against a 56-byte root and a 540-byte config,
+// so a warm read-only open spends essentially all of its payload on state that
+// only the write paths consume. But it cannot simply be skipped for unlocked
+// sessions: since FET5 the fetch phase itself is READ-ONLY and snapshots the
+// pool there, and an empty pool does not fail — it silently re-ingests
+// duplicates.
+//
+// Sound for the same reason manifestMemo is: these are manifest-NAMED objects
+// drawn from a monotone per-series counter and never rewritten (M3), so a key
+// pins its bytes exactly. The store target is part of the memo key because a
+// process may open more than one store (the test suite opens one per test) and
+// stem 4 of one store is unrelated to stem 4 of another. One entry per role, so
+// the two never evict each other and memory stays bounded whatever a
+// long-running serve process does.
+type sidecarMemo struct {
+	sync.Mutex
+	key  string
+	body []byte
+}
+
+func (m *sidecarMemo) get(key string) ([]byte, bool) {
+	m.Lock()
+	defer m.Unlock()
+	if m.key == key && m.key != "" {
+		return m.body, true
+	}
+	return nil, false
+}
+
+func (m *sidecarMemo) put(key string, body []byte) {
+	m.Lock()
+	m.key, m.body = key, body
+	m.Unlock()
+}
+
+func (m *sidecarMemo) reset() { m.put("", nil) }
+
+var (
+	seenBodyMemo sidecarMemo
+	refsBodyMemo sidecarMemo
+)
+
+// readSidecar reads one backend-only sidecar through its memo. The memo key
+// carries the store target, so the same stem in two stores never collides.
+func (o *DB) readSidecar(ctx context.Context, m *sidecarMemo, key string) ([]byte, error) {
+	memoKey := globals.Store + "\x00" + key
+	if body, ok := m.get(memoKey); ok {
+		return body, nil
+	}
+	body, err := o.readGz(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	m.put(memoKey, body)
+	return body, nil
 }
 
 // gatherOrdered runs fn for every k in [0, n) over a bounded worker pool and

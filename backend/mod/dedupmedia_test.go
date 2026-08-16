@@ -1,6 +1,7 @@
 package mod
 
 import (
+	"math/rand"
 	"strings"
 	"testing"
 )
@@ -174,6 +175,55 @@ func TestDedupMediaKeepTagWrapperSurvives(t *testing.T) {
 		}
 		if !strings.Contains(got, "<div") {
 			t.Errorf("%s: the <div> wrapper must survive pruning, got %q", name, got)
+		}
+	}
+}
+
+// regexpMediaFileID is the pre-simplification implementation, kept as the
+// oracle. It must stay a literal transcription of the three patterns.
+func regexpMediaFileID(src string) string {
+	u := mediaSchemeRe.ReplaceAllString(strings.TrimSpace(src), "")
+	u = mediaPhotonRe.ReplaceAllString(u, "")
+	if i := strings.IndexAny(u, "?#"); i >= 0 {
+		u = u[:i]
+	}
+	return mediaWPSizeRe.ReplaceAllString(u, "$1")
+}
+
+// TestMediaFileIDMatchesRegexpForms holds the string implementations to the
+// three anchored patterns they replaced, which stay declared as the
+// specification. Fixed edge cases first (empty, bare scheme, uppercase host,
+// a dotless name, a size suffix with no dash, a two-dot extension), then a
+// couple hundred thousand random strings drawn from the alphabet the patterns
+// care about — the shapes nobody thinks to write by hand.
+func TestMediaFileIDMatchesRegexpForms(t *testing.T) {
+	fixed := []string{
+		"", ".", "..", "-", "x", "http://", "https://", "HTTP://a/b.jpg",
+		"https://i0.wp.com/site/x.jpg", "https://I3.WP.COM/site/x.jpg",
+		"i9.wp.com/a/b-100x200.png", "http://ex.com/a/foo-383x680.jpg",
+		"foo-383x680.jpg", "-100x200.jpg", "foo-100x200.tar.gz", "foo-x200.jpg",
+		"foo-100x.jpg", "foo100x200.jpg", "foo-100x200.", "foo-100x200",
+		"foo-100x200.JPG", "a/b/c-1x1.gif?x=1#frag", "  https://e.com/p.png  ",
+		"https://e.com/p.png#a-1x1.gif", "i.wp.com/x.jpg", "iz.wp.com/x.jpg",
+		"foo-0x0.a", "foo--1x1.jpg", "https://x/-1x1.webp", "foo-12x34.jpeg",
+	}
+	for _, s := range fixed {
+		if got, want := mediaFileID(s), regexpMediaFileID(s); got != want {
+			t.Errorf("mediaFileID(%q) = %q, regexp form = %q", s, got, want)
+		}
+	}
+	// Random strings from the alphabet the patterns care about.
+	const alpha = "abzAZ09-x./:htps?#w mcoi"
+	r := rand.New(rand.NewSource(7)) //nolint:gosec // G404: a FIXED seed is the point — the corpus must be reproducible
+	for range 200000 {
+		n := r.Intn(24)
+		var b strings.Builder
+		for range n {
+			b.WriteByte(alpha[r.Intn(len(alpha))])
+		}
+		s := b.String()
+		if got, want := mediaFileID(s), regexpMediaFileID(s); got != want {
+			t.Fatalf("mediaFileID(%q) = %q, regexp form = %q", s, got, want)
 		}
 	}
 }

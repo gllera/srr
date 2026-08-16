@@ -67,18 +67,32 @@ type SFTP struct {
 	// Its own sync.Map rather than mu: the asset workers' puts must not
 	// serialize on the redial lock.
 	sweptDirs sync.Map
+
+	// ensuredDirs records the directories this handle has already created, for
+	// the same reason and with the same shape as sweptDirs above.
+	// sftp.MkdirAll's fast path is still a remote Stat, so calling it per write
+	// adds a round-trip to every Put/AtomicPut once the handful of pack
+	// directories exist — which is the steady state. A directory this handle
+	// created cannot un-exist under it, and a directory another writer removed
+	// mid-cycle would fail the write itself, loudly.
+	ensuredDirs sync.Map
 }
 
 // sftpSession is one dialed SSH connection plus the SFTP subsystem on it.
-// conn is the raw transport, kept for the DIAL deadline alone (see
-// dialSFTPSession); it is nil for a session built over an already-established
+// There is deliberately no raw transport here (see the type below); the tests
+// build one over an already-established
 // transport (the tests' in-process pipe). lastOK is the last time an operation
 // on this session actually succeeded — the freshness the probe short-circuits
 // on.
+// There is deliberately NO net.Conn here. The session's transport carries every
+// other handle's in-flight I/O, so an absolute deadline armed on it times out
+// their transfers rather than the caller's — which is why probe bounds itself
+// with a timer instead. Not holding the conn is what makes that mistake
+// unrepresentable; the dial-time deadline lives in dialSFTPSession, on the
+// local variable, and is cleared before the session is built.
 type sftpSession struct {
 	client    *sftp.Client
 	sshClient *ssh.Client
-	conn      net.Conn
 	lastOK    atomic.Int64 // unix nanos, 0 = never
 }
 
@@ -400,7 +414,7 @@ func dialSFTPSession(ctx context.Context, key sftpSessionKey, u *url.URL) (_ *sf
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		return nil, fmt.Errorf("clearing dial deadline for %s: %w", key.addr, err)
 	}
-	return &sftpSession{client: client, sshClient: sshClient, conn: conn}, nil
+	return &sftpSession{client: client, sshClient: sshClient}, nil
 }
 
 func sftpHostKeyCallback() (ssh.HostKeyCallback, error) {
@@ -474,7 +488,7 @@ func newSFTP(ctx context.Context, u *url.URL) (Backend, error) {
 		if err := d.retry(ctx, func(c *sftp.Client) error {
 			info, err := c.Stat(basePath)
 			if err != nil {
-				if os.IsNotExist(err) {
+				if isNotExist(err) {
 					return fmt.Errorf("sftp base path %q does not exist", basePath)
 				}
 				return fmt.Errorf("checking sftp base path %q: %w", basePath, err)
@@ -584,9 +598,13 @@ func (d *SFTP) ensureDir(c *sftp.Client, file string) error {
 	if dir == d.path || dir == "." || dir == "/" {
 		return nil
 	}
+	if _, done := d.ensuredDirs.Load(dir); done {
+		return nil
+	}
 	if err := c.MkdirAll(dir); err != nil {
 		return fmt.Errorf("creating directory %s: %w", dir, err)
 	}
+	d.ensuredDirs.Store(dir, struct{}{})
 	return nil
 }
 
@@ -661,21 +679,9 @@ func (d *SFTP) Version(ctx context.Context, key string) (string, error) {
 	file := d.sftpPath("version", key)
 	var version string
 	err := d.retry(ctx, func(c *sftp.Client) error {
-		fs, err := c.Open(file)
-		if os.IsNotExist(err) {
-			version = ""
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("opening file %s: %w", file, err)
-		}
-		defer fs.Close()
-		token, err := digestToken(fs)
-		if err != nil {
-			return fmt.Errorf("reading file %s: %w", file, err)
-		}
-		version = token
-		return nil
+		var err error
+		version, err = versionDigest(file, func() (io.ReadCloser, error) { return c.Open(file) })
+		return err
 	})
 	if err != nil {
 		return "", err

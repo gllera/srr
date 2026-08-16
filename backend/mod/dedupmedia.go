@@ -110,12 +110,78 @@ func dedupMedia(body *html.Node) bool {
 // mediaFileID normalizes a media URL to the file identity behind it (see the
 // module doc). Two elements with equal IDs show the same picture.
 func mediaFileID(src string) string {
-	u := mediaSchemeRe.ReplaceAllString(strings.TrimSpace(src), "")
-	u = mediaPhotonRe.ReplaceAllString(u, "")
+	u := trimMediaScheme(strings.TrimSpace(src))
+	u = trimPhotonHost(u)
 	if i := strings.IndexAny(u, "?#"); i >= 0 {
 		u = u[:i]
 	}
-	return mediaWPSizeRe.ReplaceAllString(u, "$1")
+	return trimWPSize(u)
+}
+
+// The three normalizations above as string operations rather than regexp
+// replacements. All three patterns are ANCHORED (two prefixes, one suffix), so
+// each is a prefix test or a backwards scan — and Regexp.ReplaceAllString
+// appends the whole source to a fresh buffer even when nothing matches, which
+// is the usual case here. mediaFileID runs ~120 times per article across
+// #dedupmedia, #unlazy and #enclosure, and profiling put those unconditional
+// allocations at 6% of everything the pipeline allocates.
+//
+// TestMediaFileIDMatchesRegexpForms holds them to the patterns they replace,
+// which stay declared above as the specification.
+
+// trimMediaScheme drops a leading http:// or https:// (mediaSchemeRe).
+func trimMediaScheme(u string) string {
+	for _, p := range [...]string{"https://", "http://"} {
+		if len(u) >= len(p) && strings.EqualFold(u[:len(p)], p) {
+			return u[len(p):]
+		}
+	}
+	return u
+}
+
+// trimPhotonHost drops a leading i<digit>.wp.com/ Photon proxy (mediaPhotonRe).
+func trimPhotonHost(u string) string {
+	const host = ".wp.com/"
+	if len(u) >= len(host)+2 && (u[0] == 'i' || u[0] == 'I') && u[1] >= '0' && u[1] <= '9' &&
+		strings.EqualFold(u[2:2+len(host)], host) {
+		return u[2+len(host):]
+	}
+	return u
+}
+
+// isAlnumByte reports whether c is [A-Za-z0-9].
+func isAlnumByte(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
+// trimWPSize drops a WordPress -WIDTHxHEIGHT suffix before the extension
+// (mediaWPSizeRe), so foo-383x680.jpg and foo.jpg are one file.
+func trimWPSize(u string) string {
+	dot := strings.LastIndexByte(u, '.')
+	if dot <= 0 || dot == len(u)-1 {
+		return u
+	}
+	for i := dot + 1; i < len(u); i++ { // the extension must be [A-Za-z0-9]+
+		if !isAlnumByte(u[i]) {
+			return u
+		}
+	}
+	digits := func(end int) int {
+		i := end
+		for i > 0 && u[i-1] >= '0' && u[i-1] <= '9' {
+			i--
+		}
+		return i
+	}
+	h := digits(dot) // …-<w>x<HEIGHT>.ext
+	if h == dot || h == 0 || u[h-1] != 'x' {
+		return u
+	}
+	w := digits(h - 1) // …-<WIDTH>x…
+	if w == h-1 || w == 0 || u[w-1] != '-' {
+		return u
+	}
+	return u[:w-1] + u[dot:]
 }
 
 // dedupScore ranks duplicate copies; higher wins, ties keep document order.
@@ -142,7 +208,7 @@ func (a dedupScore) beats(b dedupScore) bool {
 func mediaScore(n *html.Node) dedupScore {
 	src := strings.TrimSpace(mediaAttr(n, "src"))
 	return dedupScore{
-		canonical: mediaFileID(src) == mediaSchemeRe.ReplaceAllString(src, ""),
+		canonical: mediaFileID(src) == trimMediaScheme(src),
 		hasAlt:    strings.TrimSpace(mediaAttr(n, "alt")) != "",
 		area:      pxDim(mediaAttr(n, "width")) * pxDim(mediaAttr(n, "height")),
 		attrs:     len(n.Attr),

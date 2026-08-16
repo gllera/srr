@@ -12,7 +12,7 @@ import (
 func setupFeedsTestDB(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
-	globals = &Globals{PackSize: 1, Store: dir}
+	testGlobals(t, Globals{Store: dir})
 	stubPassthroughResolve()
 
 	db, err := NewDB(ctx, false)
@@ -188,7 +188,7 @@ func TestFeedUpdSkipsResolveWhenURLUnchanged(t *testing.T) {
 func setupEmptyDB(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
-	globals = &Globals{PackSize: 1, Store: dir}
+	testGlobals(t, Globals{Store: dir})
 	stubPassthroughResolve()
 }
 

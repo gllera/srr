@@ -83,23 +83,40 @@ func (o *RecipeRmCmd) Run() error {
 
 // setRecipe upserts a recipe (full-replace), shared by `srr recipe set` and the
 // PUT /api/recipes handler. filterPipe + validatePipe enforce the #default rules.
-func setRecipe(ctx context.Context, db *DB, name, ingest string, pipe, secrets []string) error {
+// normalizeRecipe filters and validates one recipe, returning the value to
+// store. It is the recipe axis's chokepoint, the sibling of normalizeFeed and
+// validateWatchRule, and it exists because recipes are the one config object
+// with TWO writers: `srr recipe set` and `srr store import`. Those two had
+// already drifted — the import path re-spelled the pipe and secrets checks and
+// omitted validateIngest entirely, so a document carrying {"ingest":"#feeds"}
+// imported clean and then dispatched as `/bin/sh -c '#feeds'` (a shell comment:
+// empty stdout, hard ingest error) on every feed of that recipe, every cycle,
+// with no signal at the command that introduced it.
+func normalizeRecipe(name string, r Recipe) (Recipe, error) {
 	if name == "" {
-		return fmt.Errorf("recipe name is required")
+		return Recipe{}, fmt.Errorf("recipe name is required")
 	}
-	pipe = filterPipe(pipe)
+	pipe := filterPipe(r.Pipe)
 	if err := validatePipe(pipe, name != defaultRecipeName); err != nil {
-		return err
+		return Recipe{}, err
 	}
-	secrets = filterPipe(secrets)
+	secrets := filterPipe(r.Secrets)
 	if err := validateSecretScopes(secrets); err != nil {
-		return err
+		return Recipe{}, err
 	}
-	ingest, err := validateIngest(ingest)
+	ingest, err := validateIngest(r.Ingest)
+	if err != nil {
+		return Recipe{}, err
+	}
+	return Recipe{Ingest: ingest, Pipe: pipe, Secrets: secrets}, nil
+}
+
+func setRecipe(ctx context.Context, db *DB, name, ingest string, pipe, secrets []string) error {
+	r, err := normalizeRecipe(name, Recipe{Ingest: ingest, Pipe: pipe, Secrets: secrets})
 	if err != nil {
 		return err
 	}
-	db.core.Recipes[name] = Recipe{Ingest: ingest, Pipe: pipe, Secrets: secrets}
+	db.core.Recipes[name] = r
 	return db.Commit(ctx)
 }
 
@@ -170,6 +187,7 @@ func validateSecretScopes(scopes []string) error {
 // what it expands to, so it forbids self-reference. Run after filterPipe.
 func validatePipe(steps []string, allowDefault bool) error {
 	names := mod.Builtins()
+	builtin := make([]string, 0, len(steps))
 	for _, s := range steps {
 		fields := strings.Fields(s)
 		if len(fields) == 0 {
@@ -185,6 +203,21 @@ func validatePipe(steps []string, allowDefault bool) error {
 		if strings.HasPrefix(name, "#") && !slices.Contains(names, name) {
 			return fmt.Errorf("unknown built-in module %q (known: %s)", name, strings.Join(names, ", "))
 		}
+		builtin = append(builtin, s)
+	}
+	// PARAMETERS too, not just the module name. A built-in's parameters are
+	// parsed inside its per-item closure, so the only way to learn that
+	// `#readability timout=30s` is misspelled is to run the step — which is
+	// exactly what mod.Validate does, against a throwaway item. Without this the
+	// typo was stored happily by `srr recipe set`, `srr feed add -p`, `srr store
+	// import`, the GUI's steps editor and srr_update_feed, and then failed the
+	// FETCH of every feed on that recipe, every cycle, with no signal at the
+	// command that introduced it.
+	//
+	// #default is dropped first: it is a composition token this package expands,
+	// not a module, and mod has never heard of it.
+	if err := mod.New().Validate(context.Background(), builtin); err != nil {
+		return err
 	}
 	return nil
 }

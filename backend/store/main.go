@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -211,6 +212,17 @@ const contentTypeGzip = "application/gzip"
 // an inert media type (assets.go sniffedMediaType) — a zero-config install would
 // otherwise serve every self-hosted image as an octet-stream download. Either
 // way the type arrives as meta; a key extension never speaks for one.
+// contentTypeFor resolves the type a write actually sends: the caller's explicit
+// meta, else what the key's grammar implies, else the neutral default. The
+// precedence is the same on every backend that stores metadata (S3, HTTP), and
+// each of them used to spell it — plus restate it in prose — for itself.
+// contentTypeDefault is what a key whose grammar implies nothing gets.
+const contentTypeDefault = "application/octet-stream"
+
+func contentTypeFor(meta ObjectMeta, key string) string {
+	return cmp.Or(meta.ContentType, contentTypeForKey(key), contentTypeDefault)
+}
+
 func contentTypeForKey(key string) string {
 	if key == "db.gz" || key == "config.gz" || strings.HasPrefix(key, "inbox/") || packKeyRe.MatchString(key) {
 		return contentTypeGzip
@@ -562,7 +574,7 @@ func rmErr(err error, file string) error {
 	if err == nil {
 		return nil
 	}
-	if os.IsNotExist(err) {
+	if isNotExist(err) {
 		slog.Debug("db not found", "key", file)
 		return nil
 	}
@@ -675,6 +687,27 @@ func joinFailures(causes map[string]error) ([]string, error) {
 		errs[i] = causes[k]
 	}
 	return failed, errors.Join(errs...)
+}
+
+// versionDigest is the whole Version body of both filesystem backends: open,
+// treat absence as the empty token (which is what PutIfVersion's "must not
+// exist" precondition compares against), digest, wrap. Only the open differs
+// between them, so only the open is a parameter — the absence rule and the
+// token's form are stated once, beside digestToken, for the same reason.
+func versionDigest(file string, open func() (io.ReadCloser, error)) (string, error) {
+	f, err := open()
+	if isNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("opening file %s: %w", file, err)
+	}
+	defer f.Close()
+	token, err := digestToken(f)
+	if err != nil {
+		return "", fmt.Errorf("reading file %s: %w", file, err)
+	}
+	return token, nil
 }
 
 // digestToken is the version token of the two filesystem backends: hex sha256

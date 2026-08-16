@@ -159,19 +159,7 @@ func (d *Local) AtomicPut(_ context.Context, key string, r io.Reader, _ ObjectMe
 // monotone: it can never come back to bytes it already had.
 func (d *Local) Version(_ context.Context, key string) (string, error) {
 	file := d.localPath("version", key)
-	f, err := os.Open(file)
-	if os.IsNotExist(err) {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("opening file %s: %w", file, err)
-	}
-	defer f.Close()
-	token, err := digestToken(f)
-	if err != nil {
-		return "", fmt.Errorf("reading file %s: %w", file, err)
-	}
-	return token, nil
+	return versionDigest(file, func() (io.ReadCloser, error) { return os.Open(file) })
 }
 
 // PutIfVersion is a BEST-EFFORT compare-and-swap: a local store has no atomic

@@ -138,13 +138,23 @@ func (o *DB) Compact(ctx context.Context, dryRun bool) error {
 	assetKeys := map[string]struct{}{}
 	var contentDropped int64
 
+	// The rewritten FINALIZED packs are recompressed with zopfli, ~100x the cost
+	// of the tail's stdlib gzip, and a compaction rewrites every pack holding an
+	// expired line — hundreds on a real store, under the same .locked lease
+	// whose TTL is a correctness bound. Same finalizer as consolidation: the
+	// compress+upload runs on a bounded pool, names are recorded only once every
+	// write has landed.
 	dataTail := names.series(dataSeries).Tail
+	fin := o.newPackFinalizer(ctx)
 	for _, pid := range slices.Sorted(maps.Keys(dataExpired)) {
-		dropped, err := o.compactDataPack(ctx, c, names, pid, pid == dataTail, dataExpired[pid], assetKeys)
+		dropped, err := o.compactDataPack(ctx, c, names, fin, pid, pid == dataTail, dataExpired[pid], assetKeys)
 		if err != nil {
 			return err
 		}
 		contentDropped += dropped
+	}
+	if err := fin.wait(names); err != nil {
+		return fmt.Errorf("compact: rewrite data packs: %w", err)
 	}
 
 	metaTail := names.series(metaSeries).Tail
@@ -215,7 +225,7 @@ func markExpired(m map[int]map[int]bool, k, pos int) {
 // survivor is copied verbatim (byte-identical, so the reader's cache-first path
 // is unaffected). Returns the uncompressed content bytes dropped. Finalized
 // packs recompress with zopfli like the writer; the tail keeps fast gzip.
-func (o *DB) compactDataPack(ctx context.Context, c *DBCore, names *ManifestNames, pid int, isTail bool, expired map[int]bool, assetKeys map[string]struct{}) (int64, error) {
+func (o *DB) compactDataPack(ctx context.Context, c *DBCore, names *ManifestNames, fin *packFinalizer, pid int, isTail bool, expired map[int]bool, assetKeys map[string]struct{}) (int64, error) {
 	key, err := c.Names.key(dataSeries, pid)
 	if err != nil {
 		return 0, fmt.Errorf("compact: data pack %d: %w", pid, err)
@@ -246,16 +256,18 @@ func (o *DB) compactDataPack(ctx context.Context, c *DBCore, names *ManifestName
 		}
 	}
 	stem := names.alloc(dataSeries)
-	newKey := store.PackKey(dataSeries, stem)
 	if isTail {
-		err = o.savePack(ctx, newKey, p)
-	} else {
-		err = o.savePackFinal(ctx, newKey, p)
+		// The tail is stdlib-gzipped and cheap; write it here and name it now,
+		// so the finalizer carries only the expensive half.
+		if err := o.savePack(ctx, store.PackKey(dataSeries, stem), p); err != nil {
+			return 0, err
+		}
+		if err := names.putAt(dataSeries, pid, stem); err != nil {
+			return 0, err
+		}
+		return dropped, nil
 	}
-	if err != nil {
-		return 0, err
-	}
-	if err := names.putAt(dataSeries, pid, stem); err != nil {
+	if err := fin.save(dataSeries, pid, stem, p); err != nil {
 		return 0, err
 	}
 	return dropped, nil

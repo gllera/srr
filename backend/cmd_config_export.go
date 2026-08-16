@@ -178,15 +178,11 @@ func applyConfigDoc(ctx context.Context, db *DB, doc *configDoc) error {
 	recipes := map[string]Recipe{}
 	maps.Copy(recipes, db.core.Recipes)
 	for name, r := range doc.Recipes {
-		pipe := filterPipe(r.Pipe)
-		if err := validatePipe(pipe, name != defaultRecipeName); err != nil {
+		norm, err := normalizeRecipe(name, r)
+		if err != nil {
 			return fmt.Errorf("recipe %q: %w", name, err)
 		}
-		secrets := filterPipe(r.Secrets)
-		if err := validateSecretScopes(secrets); err != nil {
-			return fmt.Errorf("recipe %q: %w", name, err)
-		}
-		recipes[name] = Recipe{Ingest: r.Ingest, Pipe: pipe, Secrets: secrets}
+		recipes[name] = norm
 	}
 	// Feeds: validate every entry (URL shape, recipe reference, pipe tokens,
 	// bounded expire/dedup) before the first write.

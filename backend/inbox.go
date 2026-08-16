@@ -22,7 +22,21 @@ import (
 // generation-named): the slot's existence IS the backpressure signal, so a
 // producer whose previous cycle has not been drained skips rather than piling
 // up a queue the consolidator would have to reorder.
-func inboxKey(name string) string { return "inbox/" + name + ".gz" }
+//
+// It VALIDATES rather than formats blindly, the shape syncBlobPath uses for the
+// other operator-named key space. A producer name is operator input that
+// becomes a store key, and the consolidator side (--inbox-producers) never
+// checked it: `--inbox-producers ../db` resolves to the store's own root on any
+// path-joining backend, decodes as a zero-valued envelope (CycleID 0 <= the
+// zero watermark), takes the "already drained" arm, and reapInbox then Rm's it.
+// A formatter that cannot produce an escaping key makes that unreachable no
+// matter which caller forgets.
+func inboxKey(name string) (string, error) {
+	if !validSpoolName(name) {
+		return "", fmt.Errorf("invalid producer name %q: use letters, digits, '-', '_' or '.'", name)
+	}
+	return "inbox/" + name + ".gz", nil
+}
 
 // maxInboxSize bounds a spool object the consolidator will parse. A producer is
 // a trusted peer, but it is still a remote process writing into our store; an
@@ -154,7 +168,10 @@ func writeInbox(ctx context.Context, be store.Backend, name string, env inboxEnv
 	if err != nil {
 		return fmt.Errorf("encode inbox envelope: %w", err)
 	}
-	key := inboxKey(name)
+	key, err := inboxKey(name)
+	if err != nil {
+		return err
+	}
 	if err := be.AtomicPut(ctx, key, bytes.NewReader(body), store.ObjectMeta{}); err != nil {
 		return fmt.Errorf("write %s: %w", key, err)
 	}
@@ -164,7 +181,10 @@ func writeInbox(ctx context.Context, be store.Backend, name string, env inboxEnv
 // readInbox loads a producer's slot. A missing slot is (nil, nil) — the normal
 // state between spools.
 func readInbox(ctx context.Context, be store.Backend, name string) (*inboxEnvelope, error) {
-	key := inboxKey(name)
+	key, err := inboxKey(name)
+	if err != nil {
+		return nil, err
+	}
 	rc, err := getOptional(ctx, be, key)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", key, err)
@@ -280,7 +300,12 @@ func (db *DB) applyInbox(env *inboxEnvelope, today uint16) ([]*Item, int) {
 // skipped (not re-applied) next cycle and reaped then.
 func reapInbox(ctx context.Context, be store.Backend, names []string) {
 	for _, name := range names {
-		if err := be.Rm(ctx, inboxKey(name)); err != nil {
+		key, err := inboxKey(name)
+		if err != nil {
+			slog.Warn("reap inbox slot", "producer", name, "error", err)
+			continue
+		}
+		if err := be.Rm(ctx, key); err != nil {
 			slog.Warn("reap inbox slot", "producer", name, "error", err)
 		}
 	}

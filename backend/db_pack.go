@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 
 	"github.com/foobaz/go-zopfli/zopfli"
+	"golang.org/x/sync/errgroup"
 
 	"srr/store"
 )
@@ -293,11 +295,23 @@ func (o *DB) savePackFinal(ctx context.Context, key string, p *pack) error {
 // (setupTestDB stubs it to identity). Production always runs gzipBest.
 var finalGzip = gzipBest
 
-func (o *DB) flushPack(ctx context.Context, key string, p *pack, final bool) error {
+// takeBytes seals the pack and hands back a COPY of its bytes, leaving the pack
+// reset and reusable. The copy is what lets a finalized write be handed to a
+// worker while the materialization loop keeps appending to the same pack.
+func (p *pack) takeBytes() ([]byte, error) {
 	if err := p.gz.Close(); err != nil {
-		return err
+		return nil, err
 	}
-	out := p.buf.Bytes()
+	out := slices.Clone(p.buf.Bytes())
+	p.buf.Reset()
+	p.gz.Reset(&p.buf)
+	return out, nil
+}
+
+// putPack publishes already-sealed pack bytes, recompressing a finalized name
+// with zopfli first. Split out of flushPack so the finalizer below can call it
+// off the materialization loop's goroutine.
+func (o *DB) putPack(ctx context.Context, key string, out []byte, final bool) error {
 	if final {
 		var err error
 		if out, err = finalGzip(key, out); err != nil {
@@ -312,12 +326,88 @@ func (o *DB) flushPack(ctx context.Context, key string, p *pack, final bool) err
 	// the empty ObjectMeta keeps Content-Type falling through to
 	// contentTypeForKey exactly as before. Put's ignoreExisting=true matched
 	// AtomicPut's overwrite semantics already.
-	if err := o.AtomicPut(ctx, key, bytes.NewReader(out), store.ObjectMeta{}); err != nil {
+	return o.AtomicPut(ctx, key, bytes.NewReader(out), store.ObjectMeta{})
+}
+
+// packFinalizer runs the finalized-pack writes of one materialization pass off
+// the loop that produces them, and records their names only once every write
+// has landed.
+//
+// Finalized names are recompressed with zopfli, which is ~100x slower than the
+// stdlib gzip the tail packs use — measured here at ~7s per megabyte-ish pack
+// against 67ms. One per ~180 articles is nothing in steady state, but a
+// backfill or a bulk OPML import finalizes hundreds of packs in ONE locked
+// phase: 241 of them (a real store's data series) is ~28 minutes of serial
+// single-core CPU against a leaseTTL of 15, and the lease is stamped once at
+// acquire and never re-stamped mid-cycle. Compressing them concurrently is the
+// difference between a backfill that finishes inside its lease and one that
+// hands the store to a peer mid-write.
+//
+// Published bytes are unchanged: stems are still allocated in loop order, each
+// pack's bytes are taken at the same point, and only the compress+upload moves.
+// M4 is preserved by deferring the name records to wait(): a failed write means
+// no name is recorded at all, so the manifest can never name an object the
+// store does not hold — the objects that did land are orphans the GC reclaims,
+// which is the universal crash argument (§6.1) and nothing new.
+type packFinalizer struct {
+	o   *DB
+	ctx context.Context
+	g   *errgroup.Group
+	// pending is what wait() records on success, in QUEUE order — not completion
+	// order, because putAt enforces positional density (M5) and would reject a
+	// position that arrived before its predecessor. Appended from the
+	// materialization loop's goroutine only.
+	pending []pendingName
+}
+
+type pendingName struct {
+	series    string
+	pos, stem int
+}
+
+func (o *DB) newPackFinalizer(ctx context.Context) *packFinalizer {
+	var g errgroup.Group
+	g.SetLimit(rmParallel())
+	return &packFinalizer{o: o, ctx: ctx, g: &g}
+}
+
+// save queues one finalized pack. It takes the pack's bytes synchronously — the
+// caller keeps appending to the same pack — and compresses and uploads them on
+// a worker.
+func (f *packFinalizer) save(series string, pos, stem int, p *pack) error {
+	key := store.PackKey(series, stem)
+	body, err := p.takeBytes()
+	if err != nil {
 		return err
 	}
-	p.buf.Reset()
-	p.gz.Reset(&p.buf)
+	f.pending = append(f.pending, pendingName{series, pos, stem})
+	f.g.Go(func() error { return f.o.putPack(f.ctx, key, body, true) })
 	return nil
+}
+
+// wait blocks for every queued write and then records their names, in the order
+// they were queued. A single failure means NO name is recorded: the objects that
+// did land are orphans, which is the one crash story the whole store already
+// has (§6.1).
+func (f *packFinalizer) wait(names *ManifestNames) error {
+	if err := f.g.Wait(); err != nil {
+		return err
+	}
+	for _, n := range f.pending {
+		if err := names.putAt(n.series, n.pos, n.stem); err != nil {
+			return err
+		}
+	}
+	f.pending = nil
+	return nil
+}
+
+func (o *DB) flushPack(ctx context.Context, key string, p *pack, final bool) error {
+	out, err := p.takeBytes()
+	if err != nil {
+		return err
+	}
+	return o.putPack(ctx, key, out, final)
 }
 
 // gzipBest recompresses an already-gzipped pack with zopfli's exhaustive
@@ -940,6 +1030,9 @@ func (o *DB) consolidateTail(ctx context.Context, batch []ArticleData, batchLine
 		}
 	}
 
+	// Finalized packs compress and upload concurrently; their names are recorded
+	// by fin.wait below, before the tail packs are written.
+	fin := o.newPackFinalizer(ctx)
 	prevPackID := c.NextPackID
 	mTotal := tc0
 
@@ -951,13 +1044,11 @@ func (o *DB) consolidateTail(ctx context.Context, batch []ArticleData, batchLine
 			}
 			pos := mTotal/idxPackSize - 1
 			stem := c.Names.alloc(idxSeries)
-			if err := o.savePackFinal(ctx, store.PackKey(idxSeries, stem), meta); err != nil {
+			if err := fin.save(idxSeries, pos, stem, meta); err != nil {
 				return err
 			}
-			if err := c.Names.putAt(idxSeries, pos, stem); err != nil {
-				return err
-			}
-			// savePackFinal resets meta; the next entry starts a fresh idx pack.
+			// save takes meta's bytes and resets it; the next entry starts a
+			// fresh idx pack.
 			boundaries = nil
 			localIdx = 0
 		}
@@ -971,10 +1062,7 @@ func (o *DB) consolidateTail(ctx context.Context, batch []ArticleData, batchLine
 		if data.Len() > 0 && data.Len() >= globals.PackSize<<10 {
 			pos := c.NextPackID
 			stem := c.Names.alloc(dataSeries)
-			if err := o.savePackFinal(ctx, store.PackKey(dataSeries, stem), data); err != nil {
-				return err
-			}
-			if err := c.Names.putAt(dataSeries, pos, stem); err != nil {
+			if err := fin.save(dataSeries, pos, stem, data); err != nil {
 				return err
 			}
 		}
@@ -1009,6 +1097,12 @@ func (o *DB) consolidateTail(ctx context.Context, batch []ArticleData, batchLine
 	}
 	if mTotal != c.TotalArticles {
 		return fmt.Errorf("consolidate: replayed to %d entries but total_art is %d", mTotal, c.TotalArticles)
+	}
+
+	// Every finalized pack must be durable and named before the tail packs are
+	// published: the tail's position is stated relative to the finalized count.
+	if err := fin.wait(c.Names); err != nil {
+		return err
 	}
 
 	// Seal the latest (non-finalized) idx pack with its boundary footer before

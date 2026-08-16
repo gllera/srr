@@ -489,9 +489,14 @@ func (o *DB) loadSeen(ctx context.Context) *seenPool {
 // (rc == nil) returns (nil, false) so load falls through rather than treating
 // "absent" as a successful empty pool (which would mask the sibling).
 func (o *DB) tryLoadSeen(ctx context.Context, key string) (*seenPool, bool) {
-	data, err := readGzOptional(ctx, o.Backend, key)
-	if err != nil || data == nil {
-		return nil, false
+	data, ok := seenBodyMemo.get(globals.Store + "\x00" + key)
+	if !ok {
+		var err error
+		data, err = readGzOptional(ctx, o.Backend, key)
+		if err != nil || data == nil {
+			return nil, false
+		}
+		seenBodyMemo.put(globals.Store+"\x00"+key, data)
 	}
 	p, err := parseSeen(data)
 	if err != nil {

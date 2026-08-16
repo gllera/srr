@@ -755,7 +755,11 @@ func (o *FetchCmd) fetchPhase(ctx context.Context, db *DB, client *http.Client, 
 		// size: a spool that is present but reports 0 bytes (a store whose HEAD
 		// omits Content-Length) is still undrained, and treating it as drained
 		// would overwrite a cycle the consolidator has not folded in yet.
-		undrained, err := store.Exists(ctx, db.Backend, inboxKey(spoolName))
+		slot, err := inboxKey(spoolName)
+		if err != nil {
+			return err
+		}
+		undrained, err := store.Exists(ctx, db.Backend, slot)
 		if err != nil {
 			return fmt.Errorf("probe spool slot: %w", err)
 		}
