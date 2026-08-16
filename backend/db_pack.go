@@ -233,15 +233,7 @@ func (o *DB) loadPack(ctx context.Context, key string) ([]byte, error) {
 	if key == "" {
 		return nil, nil
 	}
-	rc, err := getOptional(ctx, o.Backend, key)
-	if err != nil {
-		return nil, err
-	}
-	if rc == nil {
-		return nil, nil
-	}
-	defer rc.Close()
-	return gunzip(rc)
+	return readGzOptional(ctx, o.Backend, key)
 }
 
 // packFromBytes wraps a decompressed DATA pack's bytes into an appendable
@@ -408,11 +400,46 @@ func checkLatestIdx(key string, raw []byte, totalArticles int) (entriesEnd int, 
 	return entriesEnd, nil
 }
 
-// readPackHeader decompresses only the leading size bytes of a pack (gzip
-// decodes from the stream head, so the entries are never inflated). Used for
-// the search shards' fixed-size bloom headers; idx packs use readIdxHeader,
-// whose header is variable-length.
-func (o *DB) readPackHeader(ctx context.Context, key string, size int) ([]byte, error) {
+// dataPackCursor resolves (data packId, offset) pairs to article records with
+// a single-slot pack cache: both consumers visit chrons monotonically (the
+// meta/expire walk ascends, the out-feed window descends), so consecutive
+// lookups nearly always hit the held pack. The one home for the
+// fetch + parse + bounds-check every consolidated chron→ArticleData
+// resolution shares.
+type dataPackCursor struct {
+	db     *DB
+	data   []ArticleData
+	packID int
+}
+
+func newDataPackCursor(db *DB) *dataPackCursor { return &dataPackCursor{db: db, packID: -1} }
+
+func (u *dataPackCursor) at(ctx context.Context, chron, packID, off int) (*ArticleData, error) {
+	if packID != u.packID {
+		key, err := dataKeyFor(&u.db.core, packID)
+		if err != nil {
+			return nil, err
+		}
+		raw, err := u.db.readGz(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		if u.data, err = parseDataPack(raw); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", key, err)
+		}
+		u.packID = packID
+	}
+	if off >= len(u.data) {
+		return nil, fmt.Errorf("chron %d: offset %d beyond data pack %d (%d entries)", chron, off, packID, len(u.data))
+	}
+	return &u.data[off], nil
+}
+
+// readGzPrefix opens a pack and hands read a decompressing reader positioned
+// at the stream head, so a header can be read without inflating the entries
+// (gzip decodes from the head). The shared prologue of readPackHeader and
+// readIdxHeader.
+func (o *DB) readGzPrefix(ctx context.Context, key string, read func(gz io.Reader) ([]byte, error)) ([]byte, error) {
 	rc, err := o.Get(ctx, key)
 	if err != nil {
 		return nil, err
@@ -423,59 +450,115 @@ func (o *DB) readPackHeader(ctx context.Context, key string, size int) ([]byte, 
 		return nil, fmt.Errorf("decompress %s: %w", key, err)
 	}
 	defer gz.Close()
-	hdr := make([]byte, size)
-	if _, err := io.ReadFull(gz, hdr); err != nil {
-		return nil, fmt.Errorf("read %s header: %w", key, err)
-	}
-	return hdr, nil
+	return read(gz)
+}
+
+// readPackHeader decompresses only the leading size bytes of a pack. Used for
+// the search shards' fixed-size bloom headers; idx packs use readIdxHeader,
+// whose header is variable-length.
+func (o *DB) readPackHeader(ctx context.Context, key string, size int) ([]byte, error) {
+	return o.readGzPrefix(ctx, key, func(gz io.Reader) ([]byte, error) {
+		hdr := make([]byte, size)
+		if _, err := io.ReadFull(gz, hdr); err != nil {
+			return nil, fmt.Errorf("read %s header: %w", key, err)
+		}
+		return hdr, nil
+	})
 }
 
 // readIdxHeader decompresses just the variable-length header of an idx pack:
 // the fixed prefix, then numSlots×4 cumulative-count bytes.
 func (o *DB) readIdxHeader(ctx context.Context, key string) ([]byte, error) {
-	rc, err := o.Get(ctx, key)
-	if err != nil {
-		return nil, err
+	return o.readGzPrefix(ctx, key, func(gz io.Reader) ([]byte, error) {
+		prefix := make([]byte, idxHeaderPrefix)
+		if _, err := io.ReadFull(gz, prefix); err != nil {
+			return nil, fmt.Errorf("read %s header prefix: %w", key, err)
+		}
+		numSlots, err := idxNumSlots(prefix)
+		if err != nil {
+			return nil, fmt.Errorf("read %s header prefix: %w", key, err)
+		}
+		rest := make([]byte, idxHeaderEnd(numSlots)-idxHeaderPrefix)
+		if _, err := io.ReadFull(gz, rest); err != nil {
+			return nil, fmt.Errorf("read %s header counts: %w", key, err)
+		}
+		return append(prefix, rest...), nil
+	})
+}
+
+// eachSummaryHeader walks a decompressed idx header summary — the
+// concatenation saveSummary published: finalized pack k's variable-length
+// header per chunk — calling fn once per chunk with the header decoded
+// header-only (no entries). The stride is each header's own declared length
+// via the generated geometry (idx_layout.gen.go), so the walk cannot drift
+// from the headers the writer concatenated. A truncated buffer stops the walk
+// with an error; a chunk that will not parse is fn's to judge (perr), so the
+// checker can tally and continue while the out-feed skipper aborts. Returns
+// the bytes consumed, for the checker's trailing-data report.
+func eachSummaryHeader(buf []byte, n int, fn func(k int, hdr *idxPack, perr error) error) (int, error) {
+	off := 0
+	for k := range n {
+		span, err := idxHeaderSpan(buf[off:])
+		if err != nil {
+			return off, fmt.Errorf("truncated at chunk %d/%d (offset %d of %d): %w", k, n, off, len(buf), err)
+		}
+		end := off + span
+		hdr, perr := parseIdxPack(buf[off:end], k, 0, 0)
+		off = end
+		if err := fn(k, hdr, perr); err != nil {
+			return off, err
+		}
 	}
-	defer rc.Close()
-	gz, err := gzip.NewReader(rc)
-	if err != nil {
-		return nil, fmt.Errorf("decompress %s: %w", key, err)
-	}
-	defer gz.Close()
-	prefix := make([]byte, idxHeaderPrefix)
-	if _, err := io.ReadFull(gz, prefix); err != nil {
-		return nil, fmt.Errorf("read %s header prefix: %w", key, err)
-	}
-	numSlots, err := idxNumSlots(prefix)
-	if err != nil {
-		return nil, fmt.Errorf("read %s header prefix: %w", key, err)
-	}
-	rest := make([]byte, idxHeaderEnd(numSlots)-idxHeaderPrefix)
-	if _, err := io.ReadFull(gz, rest); err != nil {
-		return nil, fmt.Errorf("read %s header counts: %w", key, err)
-	}
-	return append(prefix, rest...), nil
+	return off, nil
 }
 
 // saveSummary publishes a summary pack: the gzip concatenation of the headers
-// of finalized packs 0..n-1, each produced by the `header` callback. Shared by
-// SyncIdxSummary (the idx header summary, variable-length header) and SyncMeta
-// (the meta bloom summary, fixed bloom header). Coverage now rides NEXT TO the
-// name in the manifest instead of inside it (§10.3), so the caller allocates a
-// fresh stem and records {stem, covers} only once this save succeeds.
-func (o *DB) saveSummary(ctx context.Context, n int, header func(k int) ([]byte, error), sumKey string) error {
+// of the packs named by keys, in that order, each read by the `header`
+// callback. Shared by the idx header summary (variable-length header) and the
+// meta bloom summary (fixed bloom header). Coverage rides NEXT TO the name in
+// the manifest instead of inside it (§10.3), so the caller allocates a fresh
+// stem and records {stem, covers} only once this save succeeds.
+//
+// The reads run concurrently and the concatenation is driven by the key ORDER,
+// not by completion order — the published bytes are identical to the serial
+// form. That matters because n grows with the store forever: the meta summary
+// is rebuilt every 5,000 articles over every finalized shard, so at 1M articles
+// the serial version was ~200 round-trips of latency inside the locked phase.
+func (o *DB) saveSummary(ctx context.Context, keys []string, header func(key string) ([]byte, error), sumKey string) error {
+	hdrs, err := gatherOrdered(len(keys), func(k int) ([]byte, error) { return header(keys[k]) })
+	if err != nil {
+		return err
+	}
 	sum := newPack()
-	for k := range n {
-		hdr, err := header(k)
-		if err != nil {
-			return err
-		}
+	for _, hdr := range hdrs {
 		if _, err := sum.Write(hdr); err != nil {
 			return err
 		}
 	}
 	return o.savePack(ctx, sumKey, sum)
+}
+
+// publishSummary is the one summary-publishing path: resolve the first
+// `covers` positions of a series (failing before any I/O if the name table and
+// the chron arithmetic disagree), read their headers, save the concatenation
+// under a fresh stem, and return the {stem, covers} record for the caller to
+// adopt. Returning it rather than assigning it keeps the M4 ordering — a name
+// enters the table only after the object it names is durable — stated here
+// once instead of once per summary axis.
+func (o *DB) publishSummary(ctx context.Context, names *ManifestNames, series string, covers int, header func(key string) ([]byte, error)) (*SummaryName, error) {
+	keys := make([]string, covers)
+	for k := range covers {
+		key, err := names.key(series, k)
+		if err != nil {
+			return nil, err
+		}
+		keys[k] = key
+	}
+	sum := SummaryName{Series: series, Stem: names.alloc(series), Covers: covers}
+	if err := o.saveSummary(ctx, keys, header, sum.key()); err != nil {
+		return nil, err
+	}
+	return &sum, nil
 }
 
 // SyncIdxSummary publishes the idx header summary — the gzip concatenation of
@@ -495,18 +578,13 @@ func (o *DB) SyncIdxSummary(ctx context.Context) error {
 	if c.hdrPacks() == n || n == 0 {
 		return nil
 	}
-	stem := c.Names.alloc(idxSeries)
-	sum := SummaryName{Series: idxSeries, Stem: stem, Covers: n}
-	if err := o.saveSummary(ctx, n, func(k int) ([]byte, error) {
-		key, err := c.Names.key(idxSeries, k)
-		if err != nil {
-			return nil, err
-		}
+	sum, err := o.publishSummary(ctx, c.Names, idxSeries, n, func(key string) ([]byte, error) {
 		return o.readIdxHeader(ctx, key)
-	}, sum.key()); err != nil {
+	})
+	if err != nil {
 		return err
 	}
-	c.Names.HSum = &sum
+	c.Names.HSum = sum
 	return nil
 }
 
@@ -640,15 +718,13 @@ func (o *DB) checkTailIntact(ctx context.Context, tc int) error {
 	if latestIdxEntryCount(tc) == 0 {
 		return nil
 	}
-	// Past the guard tc>0, so the tail past the finalized packs holds 1..50000
-	// entries and the manifest is REQUIRED to name an idx tail. An empty key is
-	// therefore the exact name-table corruption this check exists to catch — and
-	// the read side (loadLatestIdx) already hard-errors on it, so warning-only or
-	// silently skipping here would let the writer sail past a store every reader
-	// is already failing to parse. Fail loudly, symmetric with the reader.
-	idxKey := o.core.Names.tailKey(idxSeries)
-	if idxKey == "" {
-		return fmt.Errorf("the store consolidated %d article(s) but names no idx tail", tc)
+	// Past the guard tc>0, so the manifest is REQUIRED to name an idx tail —
+	// idxTailKey is the reader's own check, shared so the two sides cannot
+	// disagree about the name-table corruption this exists to catch. Fail
+	// loudly, symmetric with the reader.
+	idxKey, err := idxTailKey(&o.core, tc)
+	if err != nil {
+		return err
 	}
 	raw, err := o.loadPack(ctx, idxKey)
 	if err != nil {
@@ -757,7 +833,7 @@ func (o *DB) loadDeltaChain(ctx context.Context) (*deltaChain, error) {
 	if o.deltaMemo != nil && o.deltaMemoKey == memoKey {
 		return o.deltaMemo, nil
 	}
-	chain, err := parseDeltaChain(func(key string) ([]byte, error) { return o.readGz(ctx, key) }, c)
+	chain, err := parseDeltaChain(o.fetcher(ctx), c)
 	if err != nil {
 		return nil, err
 	}

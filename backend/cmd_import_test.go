@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -21,12 +20,12 @@ func newImportWalker(selectedIDs []string) *importWalker {
 // partitions into kept (with resolved URLs) and failed.
 func TestResolveImportFeedsPartial(t *testing.T) {
 	setupEmptyDB(t)
-	resolveFeedURL = func(_ context.Context, url string) (string, error) {
+	stubResolve(t, func(_ context.Context, url string) (string, error) {
 		if strings.Contains(url, "bad") {
 			return "", fmt.Errorf("no feed found")
 		}
 		return url + "/feed.xml", nil
-	}
+	})
 	feeds := []*Feed{
 		{Title: "Good", URL: "https://good.example.com"},
 		{Title: "Bad", URL: "https://bad.example.com"},
@@ -60,12 +59,12 @@ func TestResolveImportFeedsPartial(t *testing.T) {
 // without aborting the whole batch.
 func TestImportRunPartialSuccess(t *testing.T) {
 	setupEmptyDB(t)
-	resolveFeedURL = func(_ context.Context, url string) (string, error) {
+	stubResolve(t, func(_ context.Context, url string) (string, error) {
 		if strings.Contains(url, "bad") {
 			return "", fmt.Errorf("no feed found")
 		}
 		return url, nil
-	}
+	})
 	opml := `<?xml version="1.0"?><opml version="2.0"><body>
 <outline title="Good" text="Good" xmlUrl="https://good.example.com/feed"/>
 <outline title="Bad" text="Bad" xmlUrl="https://bad.example.com/feed"/>
@@ -75,9 +74,7 @@ func TestImportRunPartialSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var out bytes.Buffer
-	stdout = &out
-	t.Cleanup(func() { stdout = os.Stdout })
+	out := captureCmdStdout(t)
 
 	if err := (&ImportCmd{Path: path, All: true}).Run(); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -100,12 +97,10 @@ func TestImportRunPartialSuccess(t *testing.T) {
 // resolveImportFeeds). The resolver is rigged to fail the test if it ever runs.
 func TestImportRejectsUnknownRecipeBeforeProbe(t *testing.T) {
 	setupEmptyDB(t)
-	prevResolve := resolveFeedURL
-	t.Cleanup(func() { resolveFeedURL = prevResolve })
-	resolveFeedURL = func(_ context.Context, _ string) (string, error) {
+	stubResolve(t, func(_ context.Context, _ string) (string, error) {
 		t.Error("resolveFeedURL must not run when the --recipe ref is invalid")
 		return "", fmt.Errorf("network probe should not have happened")
-	}
+	})
 	opml := `<?xml version="1.0"?><opml version="2.0"><body>
 <outline title="A" text="A" xmlUrl="https://a.example.com/feed"/>
 </body></opml>`
@@ -125,9 +120,9 @@ func TestImportRejectsUnknownRecipeBeforeProbe(t *testing.T) {
 // store (the withDB commit path is skipped entirely).
 func TestImportDryRunPrintsResolvedNoDBWrite(t *testing.T) {
 	setupEmptyDB(t)
-	resolveFeedURL = func(_ context.Context, url string) (string, error) {
+	stubResolve(t, func(_ context.Context, url string) (string, error) {
 		return url + "/feed.xml", nil // homepage → discovered feed URL
-	}
+	})
 	opml := `<?xml version="1.0"?><opml version="2.0"><body>
 <outline title="Good" text="Good" xmlUrl="https://good.example.com/home"/>
 </body></opml>`

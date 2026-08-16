@@ -3,7 +3,6 @@ package mod
 import (
 	"fmt"
 	"regexp"
-	"strconv"
 )
 
 // The article MATCHER — one compiled content predicate, shared syntax with
@@ -84,24 +83,15 @@ func ParseMatch(spec string) (*Match, error) {
 	}
 
 	m := &Match{minWords: -1}
-	for _, s := range []struct {
-		key string
-		dst **regexp.Regexp
-	}{
-		{"title", &m.title},
-		{"content", &m.content},
-		{"any", &m.any},
-	} {
-		if v, ok := p[s.key]; ok {
-			if *s.dst, err = parseRegexParam(s.key, v); err != nil {
-				return nil, err
-			}
-		}
+	if err = assignRegexParams(p, parseRegexParam,
+		regexSpec{"title", &m.title},
+		regexSpec{"content", &m.content},
+		regexSpec{"any", &m.any},
+	); err != nil {
+		return nil, err
 	}
-	if v, ok := p["min_words"]; ok {
-		if m.minWords, err = strconv.Atoi(v); err != nil || m.minWords < 0 {
-			return nil, fmt.Errorf("parameter min_words=%q: must be a non-negative integer", v)
-		}
+	if m.minWords, err = p.NonNegInt("min_words", -1); err != nil {
+		return nil, err
 	}
 	if v, ok := p["lang"]; ok {
 		// Same parser #filter's keep_lang uses, so a macrolanguage code admits
@@ -131,7 +121,7 @@ func (m *Match) Match(title, content, lang string) bool {
 		return false
 	case m.any != nil && !m.any.MatchString(title) && !m.any.MatchString(content):
 		return false
-	case m.minWords >= 0 && wordCount(content) < m.minWords:
+	case m.minWords >= 0 && !hasMinWords(content, m.minWords):
 		return false
 	case m.langs != nil && !m.langs[normalizeLang(lang)]:
 		// Fail-CLOSED, unlike #filter's langAllowed: an empty lang normalizes to

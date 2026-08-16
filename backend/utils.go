@@ -46,6 +46,22 @@ func maskSecret(v any) any {
 	return "********"
 }
 
+// printFieldNamed prints the single field displayed as name ("region",
+// "cache-dir"), reporting whether it was found. Note it does NOT mask
+// secret-tagged values the way printFields does: the listing masks because it
+// prints everything, whereas both callers here print exactly the one field the
+// operator named.
+func printFieldNamed(v reflect.Value, name string) bool {
+	t := v.Type()
+	for i := range t.NumField() {
+		if fieldName(t.Field(i)) == name {
+			fmt.Println(v.Field(i).Interface())
+			return true
+		}
+	}
+	return false
+}
+
 // printFields prints each field as "name: value", optionally annotated with the
 // env var that sets it. envName derives that name per field (the kong env: tag
 // for globals, the derived SRR_<SCHEME>_<FIELD> for backend configs); pass nil

@@ -164,9 +164,8 @@ func (o *InspectCmd) checkBoundsVsData(fetch keyGetter, core *DBCore, packs []*i
 
 	oob, mismatch := 0, 0
 	for chron := range core.TotalArticles {
-		n := packIdxFor(chron, len(packs))
-		pack := packs[n]
-		idxSub := int(pack.feedIDs[chron-n*idxPackSize])
+		pack := packAt(packs, chron)
+		idxSub := pack.feedIDAt(chron)
 		pid, offset := pack.getPackRef(chron)
 
 		entries := load(pid)
@@ -288,9 +287,9 @@ func (o *InspectCmd) checkDBMeta(fetch keyGetter, core *DBCore, packs []*idxPack
 		// counts (total_art - expired). An in-range but inconsistent pair
 		// silently skews every live count. Reuse-proof: a reused id's legacy
 		// entries sit below add_idx.
-		if idxLive[id] != sub.TotalArt-sub.Expired {
+		if idxLive[id] != sub.LiveArt() {
 			fmt.Fprintf(o.w(), "[db-meta] sub %d (%q): live entries=%d but total_art-expired=%d\n",
-				id, sub.Title, idxLive[id], sub.TotalArt-sub.Expired)
+				id, sub.Title, idxLive[id], sub.LiveArt())
 			issues++
 		}
 	}
@@ -399,34 +398,18 @@ func (o *InspectCmd) checkIdxSummary(fetch keyGetter, core *DBCore, packs []*idx
 		return 1
 	}
 	issues := 0
-	off := 0
-	for k := range core.hdrPacks() {
-		// The chunk stride is the header's own declared length — generated
-		// geometry (idx_layout.gen.go), so the walk cannot drift from the
-		// headers SyncIdxSummary concatenated.
-		span, err := idxHeaderSpan(buf[off:])
-		if err != nil {
-			fmt.Fprintf(o.w(), "[idx-summary] %s: truncated at chunk %d/%d (offset %d of %d): %v\n",
-				key, k, core.hdrPacks(), off, len(buf), err)
-			return issues + 1
-		}
-		end := off + span
-		// Header-only decode (packSize 0 ⇒ no entries parsed), so the
-		// ownFeedCounts slot width is irrelevant here.
-		hdr, err := parseIdxPack(buf[off:end], k, 0, 0)
-		if err != nil {
-			fmt.Fprintf(o.w(), "[idx-summary] pack %d chunk: %v\n", k, err)
+	consumed, werr := eachSummaryHeader(buf, core.hdrPacks(), func(k int, hdr *idxPack, perr error) error {
+		if perr != nil {
+			fmt.Fprintf(o.w(), "[idx-summary] pack %d chunk: %v\n", k, perr)
 			issues++
-			off = end
-			continue
+			return nil
 		}
-		off = end
 		p := packs[k]
 		if hdr.packIDBase != p.packIDBase || hdr.packOffBase != p.packOffBase {
 			fmt.Fprintf(o.w(), "[idx-summary] pack %d: summary bases (%d,%d) != header (%d,%d)\n", k,
 				hdr.packIDBase, hdr.packOffBase, p.packIDBase, p.packOffBase)
 			issues++
-			continue
+			return nil
 		}
 		slots := max(hdr.numSlots, p.numSlots)
 		mismatched := false
@@ -440,10 +423,15 @@ func (o *InspectCmd) checkIdxSummary(fetch keyGetter, core *DBCore, packs []*idx
 		if mismatched {
 			issues++
 		}
+		return nil
+	})
+	if werr != nil {
+		fmt.Fprintf(o.w(), "[idx-summary] %s: %v\n", key, werr)
+		return issues + 1
 	}
-	if off != len(buf) {
+	if consumed != len(buf) {
 		fmt.Fprintf(o.w(), "[idx-summary] %s: %d byte(s) consumed but buffer is %d (extra trailing data)\n",
-			key, off, len(buf))
+			key, consumed, len(buf))
 		issues++
 	}
 	if issues == 0 {
@@ -470,7 +458,7 @@ func (o *InspectCmd) checkMeta(fetch keyGetter, core *DBCore) int {
 	// tailCovered (not just TotalArticles) is corruption: delta-region cards
 	// are the resident chain's, never a shard's.
 	if core.MetaTail < 0 || core.MetaTail > metaPackSize ||
-		core.metaPacks()*metaPackSize+core.MetaTail > tailCovered(core) {
+		core.metaCoverage() > tailCovered(core) {
 		fmt.Fprintf(o.w(), "[meta] inconsistent coverage: mp=%d mt=%d tc=%d total_art=%d\n",
 			core.metaPacks(), core.MetaTail, tailCovered(core), core.TotalArticles)
 		return 1

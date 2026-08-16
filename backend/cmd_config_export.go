@@ -1,15 +1,13 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"maps"
-	"os"
 	"slices"
-
-	"srr/mod"
 )
 
 // Whole-configuration export/import. OPML (`srr feed export`) stays the
@@ -63,6 +61,46 @@ type configFeed struct {
 	DedupTitle bool     `json:"dedup_title,omitempty"`
 }
 
+// configFeedOf and view are the document's two edges, and the ONLY places this
+// file spells the writable field set. Everything past them rides feedView, so
+// the Feed side of both directions is writeFeedView/viewOf — the pair
+// TestWritableFeedFieldsRouteEverywhere and TestFeedViewCopiesRoundTrip pin.
+// That matters most on import, whose whole reason for existing (see the file
+// header) is that OPML restores the wrong config silently: a knob missing from
+// a hand-listed literal here restores as its zero value, which looks like a
+// successful restore.
+func configFeedOf(v *feedView) configFeed {
+	return configFeed{
+		Title:      v.Title,
+		URL:        v.URL,
+		Tag:        v.Tag,
+		Recipe:     v.Recipe,
+		Ingest:     v.Ingest,
+		Pipe:       v.Pipe,
+		Secrets:    v.Secrets,
+		NoTitle:    v.NoTitle,
+		ExpireDays: v.ExpireDays,
+		DedupDays:  v.DedupDays,
+		DedupTitle: v.DedupTitle,
+	}
+}
+
+func (f *configFeed) view() *feedView {
+	return &feedView{
+		Title:      f.Title,
+		URL:        f.URL,
+		Tag:        f.Tag,
+		Recipe:     f.Recipe,
+		Ingest:     f.Ingest,
+		Pipe:       f.Pipe,
+		Secrets:    f.Secrets,
+		NoTitle:    f.NoTitle,
+		ExpireDays: f.ExpireDays,
+		DedupDays:  f.DedupDays,
+		DedupTitle: f.DedupTitle,
+	}
+}
+
 // ExportAllCmd writes the whole store configuration as one JSON document.
 type ExportAllCmd struct{}
 
@@ -86,25 +124,10 @@ func (o *ExportAllCmd) Run() error {
 func buildConfigDoc(db *DB) configDoc {
 	feeds := make([]configFeed, 0, len(db.Feeds()))
 	for _, ch := range db.Feeds() {
-		feeds = append(feeds, configFeed{
-			Title:      ch.Title,
-			URL:        ch.URL,
-			Tag:        ch.Tag,
-			Recipe:     ch.Recipe,
-			Ingest:     ch.Ingest,
-			Pipe:       ch.Pipe,
-			Secrets:    ch.Secrets,
-			NoTitle:    ch.NoTitle,
-			ExpireDays: ch.ExpireDays,
-			DedupDays:  ch.DedupDays,
-			DedupTitle: ch.DedupTitle,
-		})
+		feeds = append(feeds, configFeedOf(viewOf(ch)))
 	}
 	slices.SortFunc(feeds, func(a, b configFeed) int {
-		if a.URL != b.URL {
-			return cmpString(a.URL, b.URL)
-		}
-		return cmpString(a.Title, b.Title)
+		return cmp.Or(cmp.Compare(a.URL, b.URL), cmp.Compare(a.Title, b.Title))
 	})
 	return configDoc{
 		Version:   configExportVersion,
@@ -116,16 +139,6 @@ func buildConfigDoc(db *DB) configDoc {
 	}
 }
 
-func cmpString(a, b string) int {
-	switch {
-	case a < b:
-		return -1
-	case a > b:
-		return 1
-	}
-	return 0
-}
-
 // ImportAllCmd restores a document written by `srr store export`.
 type ImportAllCmd struct {
 	File string `short:"f" type:"path" help:"Read JSON from PATH instead of stdin."`
@@ -134,22 +147,9 @@ type ImportAllCmd struct {
 }
 
 func (o *ImportAllCmd) Run() error {
-	src := o.in
-	if src == nil {
-		if o.File == "" || o.File == "-" {
-			src = os.Stdin
-		} else {
-			f, err := os.Open(o.File)
-			if err != nil {
-				return fmt.Errorf("open %s: %w", o.File, err)
-			}
-			defer f.Close()
-			src = f
-		}
-	}
-	data, err := io.ReadAll(src)
+	data, err := readInput(o.in, o.File)
 	if err != nil {
-		return fmt.Errorf("read input: %w", err)
+		return err
 	}
 	var doc configDoc
 	if err := json.Unmarshal(data, &doc); err != nil {
@@ -204,11 +204,8 @@ func applyConfigDoc(ctx context.Context, db *DB, doc *configDoc) error {
 			return fmt.Errorf("feed %q: duplicate url %q in the document", f.Title, f.URL)
 		}
 		seen[f.URL] = true
-		ch := &Feed{
-			Title: f.Title, URL: f.URL, Tag: f.Tag, Recipe: f.Recipe,
-			Ingest: f.Ingest, Pipe: f.Pipe, Secrets: f.Secrets, NoTitle: f.NoTitle,
-			ExpireDays: f.ExpireDays, DedupDays: f.DedupDays, DedupTitle: f.DedupTitle,
-		}
+		ch := &Feed{}
+		writeFeedView(ch, f.view())
 		if err := normalizeFeed(ch, recipes); err != nil {
 			return fmt.Errorf("feed %q: %w", f.Title, err)
 		}
@@ -226,11 +223,8 @@ func applyConfigDoc(ctx context.Context, db *DB, doc *configDoc) error {
 	// compile must fail the import, not land in config.gz and warn on every
 	// fetch cycle from then on.
 	for _, name := range slices.Sorted(maps.Keys(doc.Watch)) {
-		if err := validateWatchName(name); err != nil {
+		if err := validateWatchRule(name, doc.Watch[name]); err != nil {
 			return err
-		}
-		if _, err := mod.ParseMatch(doc.Watch[name]); err != nil {
-			return fmt.Errorf("watch rule %q: %w", name, err)
 		}
 	}
 
@@ -238,26 +232,10 @@ func applyConfigDoc(ctx context.Context, db *DB, doc *configDoc) error {
 	db.core.DedupDays = doc.DedupDays
 	db.core.Recipes = recipes
 	for _, name := range slices.Sorted(maps.Keys(doc.Watch)) {
-		// setWatchRule without its Commit: same no-op-on-unchanged rule, same
-		// apply-forward stamp at THIS store's head — an imported rule cannot
-		// claim a lane over articles it was never evaluated against, and the
-		// source store's floor means nothing here anyway.
-		if db.core.Watch[name] == doc.Watch[name] {
-			continue
-		}
-		// Guarded INDEPENDENTLY, like setWatchRule: the two maps live in two
-		// different objects (patterns in config.gz, floors in the manifest) and
-		// can legitimately arrive one without the other — a root pointed back at
-		// an older generation keeps the sidecar's rules while losing its roster.
-		// One guard covering both then wrote into a nil map and panicked.
-		if db.core.Watch == nil {
-			db.core.Watch = map[string]string{}
-		}
-		if db.core.WatchFrom == nil {
-			db.core.WatchFrom = map[string]int{}
-		}
-		db.core.Watch[name] = doc.Watch[name]
-		db.core.WatchFrom[name] = db.core.TotalArticles
+		// The shared apply-forward stamp (stampWatchRule): an imported rule
+		// cannot claim a lane over articles it was never evaluated against, and
+		// the source store's floor means nothing here anyway.
+		stampWatchRule(&db.core, name, doc.Watch[name])
 	}
 
 	byURL := map[string]*Feed{}
@@ -269,11 +247,10 @@ func applyConfigDoc(ctx context.Context, db *DB, doc *configDoc) error {
 		if ch, ok := byURL[want.URL]; ok {
 			// Same source ⇒ same feed: keep its id and all fetch state
 			// (setFeedURL no-ops on an unchanged URL).
-			writeFeedView(ch, &feedView{
-				Title: want.Title, URL: want.URL, Tag: want.Tag, Recipe: want.Recipe,
-				Ingest: want.Ingest, Pipe: want.Pipe, Secrets: want.Secrets, NoTitle: want.NoTitle,
-				ExpireDays: want.ExpireDays, DedupDays: want.DedupDays, DedupTitle: want.DedupTitle,
-			})
+			// viewOf carries the writable field set (plus read-only fields
+			// writeFeedView ignores by construction), so this cannot fall
+			// behind a newly added knob the way a hand-listed literal did.
+			writeFeedView(ch, viewOf(want))
 			updated++
 			continue
 		}

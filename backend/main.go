@@ -31,6 +31,15 @@ const (
 	defaultPackSize     = 200
 	defaultMaxFeedSize  = 5000
 	defaultMaxAssetSize = 25000
+
+	// The scoped-knob defaults seedScopedDefaults also seeds. They live here
+	// for the same reason as the three above: the kong tag and the seed are
+	// two consumers of one value, and nothing compares them — a default
+	// changed in the tag alone would give `srr fetch` one value and a
+	// non-embedding command that still reaches the writer another.
+	defaultCacheMaxAge     = 72 * time.Hour
+	defaultFetchBackoffMax = time.Hour
+	defaultNotifyAfter     = 5
 )
 
 type Globals struct {
@@ -227,8 +236,14 @@ func kongOptions(resolver kong.Resolver) []kong.Option {
 			"maxDeltaBytes": fmt.Sprint(maxDeltaBytesDefault),
 			"maxBatchBytes": fmt.Sprint(maxBatchBytesDefault),
 			"keepManifests": fmt.Sprint(keepManifests),
-			"cacheDir":      defaultCacheDir(),
-			"syncDir":       defaultSyncDir(),
+			// Rendered as whole hours, the form an operator writes and the
+			// form --help showed before these two moved here (Duration.String
+			// would print "72h0m0s").
+			"cacheMaxAge":     fmt.Sprintf("%dh", defaultCacheMaxAge/time.Hour),
+			"fetchBackoffMax": fmt.Sprintf("%dh", defaultFetchBackoffMax/time.Hour),
+			"notifyAfter":     fmt.Sprint(defaultNotifyAfter),
+			"cacheDir":        defaultCacheDir(),
+			"syncDir":         defaultSyncDir(),
 		},
 		kong.Name("srr"),
 		kong.Description("Static RSS Reader backend."),

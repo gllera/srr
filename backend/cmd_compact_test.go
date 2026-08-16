@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"srr/store"
 	"strings"
 	"testing"
 )
@@ -118,13 +119,17 @@ func dataLine(t *testing.T, db *DB, dir string, chron int) (string, ArticleData)
 	return lines[off], arts[off]
 }
 
-func mustValidate(t *testing.T, wantChronOK bool) string {
+// mustValidate runs `srr inspect --validate` and requires it to pass, including
+// the chron-permanence check (invariant M8) that is the gate on compaction —
+// the parameter that used to make that check optional was `true` at every one
+// of the call sites below.
+func mustValidate(t *testing.T) string {
 	t.Helper()
 	var buf bytes.Buffer
 	if err := (&InspectCmd{Chron: -1, Validate: true, out: &buf}).Run(); err != nil {
 		t.Fatalf("inspect --validate failed:\n%s\nerr: %v", buf.String(), err)
 	}
-	if wantChronOK && !strings.Contains(buf.String(), "[chron-permanence] chron addresses stable") {
+	if !strings.Contains(buf.String(), "[chron-permanence] chron addresses stable") {
 		t.Fatalf("chron-permanence check did not run/pass:\n%s", buf.String())
 	}
 	return buf.String()
@@ -132,7 +137,7 @@ func mustValidate(t *testing.T, wantChronOK bool) string {
 
 func TestCompactTombstonesExpiredAndKeepsChrons(t *testing.T) {
 	db, dir := buildExpiredStore(t)
-	mustValidate(t, true) // baseline is clean
+	mustValidate(t) // baseline is clean
 
 	// Re-create the asset ExpireArticles deleted, so THIS is the object compaction
 	// itself must reclaim (isolating compaction's own delete).
@@ -204,7 +209,7 @@ func TestCompactTombstonesExpiredAndKeepsChrons(t *testing.T) {
 	for i := range preStems {
 		if preStems[i] != postStems[i] {
 			changed++
-			old := filepath.Join(dir, fmt.Sprintf("%s/%d.gz", dataSeries, preStems[i]))
+			old := filepath.Join(dir, store.PackKey(dataSeries, preStems[i]))
 			if assetGone(t, old) {
 				t.Fatalf("old data stem %d was deleted immediately; the grace window must keep it", preStems[i])
 			}
@@ -217,7 +222,7 @@ func TestCompactTombstonesExpiredAndKeepsChrons(t *testing.T) {
 	}
 
 	// (6) The whole store is still consistent, including chron-permanence.
-	mustValidate(t, true)
+	mustValidate(t)
 }
 
 // TestCompactPreservesLiveDeltaChain compacts a store that still has a live
@@ -293,7 +298,7 @@ func TestCompactPreservesLiveDeltaChain(t *testing.T) {
 	if feed0.Expired == 0 {
 		t.Fatal("nothing expired in the consolidated region")
 	}
-	mustValidate(t, true)
+	mustValidate(t)
 
 	naBefore := db.core.DeltaArticles
 	deltasBefore := slices.Clone(db.core.Names.Deltas.Stems)
@@ -306,7 +311,7 @@ func TestCompactPreservesLiveDeltaChain(t *testing.T) {
 	if !slices.Equal(db.core.Names.Deltas.Stems, deltasBefore) {
 		t.Fatalf("delta stems changed: %v -> %v", deltasBefore, db.core.Names.Deltas.Stems)
 	}
-	mustValidate(t, true)
+	mustValidate(t)
 }
 
 // TestCompactMetaShardAndSummary crosses a 5,000-entry meta shard so compaction
@@ -362,7 +367,7 @@ func TestCompactMetaShardAndSummary(t *testing.T) {
 	if db.core.metaPacks() == 0 {
 		t.Fatal("test needs at least one finalized meta shard")
 	}
-	mustValidate(t, true)
+	mustValidate(t)
 
 	preSSum := db.core.Names.SSum.key()
 	if err := db.Compact(ctx, false); err != nil {
@@ -375,7 +380,7 @@ func TestCompactMetaShardAndSummary(t *testing.T) {
 	}
 	// checkMeta re-derives every shard's bloom from its surviving titles and
 	// checks summary==shard blooms; a clean validate proves the rebuild.
-	mustValidate(t, true)
+	mustValidate(t)
 }
 
 // TestCompactDryRun proves --dry-run writes nothing.
@@ -416,7 +421,7 @@ func TestCompactGraceWindowReclaimsOldStems(t *testing.T) {
 	if oldStem < 0 {
 		t.Fatal("no data pack was rewritten")
 	}
-	oldKey := filepath.Join(dir, fmt.Sprintf("%s/%d.gz", dataSeries, oldStem))
+	oldKey := filepath.Join(dir, store.PackKey(dataSeries, oldStem))
 	if assetGone(t, oldKey) {
 		t.Fatal("old stem swept while still inside the grace window")
 	}
@@ -434,7 +439,7 @@ func TestCompactGraceWindowReclaimsOldStems(t *testing.T) {
 	if !assetGone(t, oldKey) {
 		t.Fatalf("old stem %d not reclaimed after it left the grace window", oldStem)
 	}
-	mustValidate(t, true)
+	mustValidate(t)
 }
 
 // TestChronPermanenceDetectsRenumber proves the M8 check has teeth: a prior

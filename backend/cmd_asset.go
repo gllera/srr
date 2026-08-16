@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"mime"
 	"os"
@@ -69,12 +67,11 @@ func healAsset(ctx context.Context, be store.Backend, key, file, contentType str
 	// counter (see the accepted-skew note below), so both numbers belong in the
 	// log line and in the preview. (This used to be a body-carrying Get plus a
 	// Stat — two round-trips, the first pulling bytes only to drop them.)
-	oldSize, err := be.Stat(ctx, key)
-	exists := err == nil
+	oldSize, exists, err := store.StatOptional(ctx, be, key)
 	switch {
-	case exists:
-	case !errors.Is(err, fs.ErrNotExist):
+	case err != nil:
 		return fmt.Errorf("check %q: %w", key, err)
+	case exists:
 	case !create:
 		return fmt.Errorf("key %q does not exist — pass --create if an article really references it", key)
 	default:

@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"cmp"
-	"compress/gzip"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -144,11 +143,13 @@ func (p *seenPool) evict(today uint16, horizonFor func(feedID int) int, capPerFe
 	if p == nil {
 		return
 	}
-	type ent struct {
-		key  uint64
-		when uint16
-	}
-	perFeed := map[int][]ent{}
+	// First pass: liveness/age eviction plus a per-feed survivor count (and a
+	// per-feed horizon memo, so the Feeds map is not re-indexed per entry). The
+	// flood cap is rarely hit, so the sortable entry lists are built — in a
+	// second pass — only for the feeds that actually exceeded it, instead of
+	// materializing one entry struct per retained pool row every cycle.
+	horizon := map[int]int{}
+	count := map[int]int{}
 	for k, when := range p.m {
 		fid := int(uint16(k >> 32))
 		if _, ok := live[fid]; !ok {
@@ -156,18 +157,42 @@ func (p *seenPool) evict(today uint16, horizonFor func(feedID int) int, capPerFe
 			p.dirty = true
 			continue
 		}
-		h := horizonFor(fid)
+		h, ok := horizon[fid]
+		if !ok {
+			h = horizonFor(fid)
+			horizon[fid] = h
+		}
 		if h <= 0 || int(today)-int(when) > h {
 			delete(p.m, k) // disabled feed, or aged past its horizon
 			p.dirty = true
 			continue
 		}
-		perFeed[fid] = append(perFeed[fid], ent{k, when})
+		count[fid]++
+	}
+
+	type ent struct {
+		key  uint64
+		when uint16
+	}
+	var perFeed map[int][]ent
+	for fid, n := range count {
+		if n > capPerFeed {
+			if perFeed == nil {
+				perFeed = map[int][]ent{}
+			}
+			perFeed[fid] = make([]ent, 0, n)
+		}
+	}
+	if perFeed == nil {
+		return
+	}
+	for k, when := range p.m {
+		fid := int(uint16(k >> 32))
+		if ents, ok := perFeed[fid]; ok {
+			perFeed[fid] = append(ents, ent{k, when})
+		}
 	}
 	for _, ents := range perFeed {
-		if len(ents) <= capPerFeed {
-			continue
-		}
 		// Keep the newest capPerFeed by when; ties broken by key for
 		// determinism. A feed over the cap sacrifices only its own horizon.
 		slices.SortFunc(ents, func(a, b ent) int {
@@ -464,13 +489,8 @@ func (o *DB) loadSeen(ctx context.Context) *seenPool {
 // (rc == nil) returns (nil, false) so load falls through rather than treating
 // "absent" as a successful empty pool (which would mask the sibling).
 func (o *DB) tryLoadSeen(ctx context.Context, key string) (*seenPool, bool) {
-	rc, err := getOptional(ctx, o.Backend, key)
-	if err != nil || rc == nil {
-		return nil, false
-	}
-	data, err := gunzip(rc)
-	rc.Close()
-	if err != nil {
+	data, err := readGzOptional(ctx, o.Backend, key)
+	if err != nil || data == nil {
 		return nil, false
 	}
 	p, err := parseSeen(data)
@@ -499,21 +519,35 @@ func (o *DB) SyncSeen(ctx context.Context) error {
 	if !o.seen.dirty {
 		return nil
 	}
-	ref := StemRef{Series: seenSeries, Stem: o.core.Names.alloc(seenSeries)}
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	if _, err := gz.Write(o.seen.marshal()); err != nil {
+	body, err := gzipBytes(o.seen.marshal())
+	if err != nil {
 		return err
 	}
-	if err := gz.Close(); err != nil {
+	ref, err := o.putSingleton(ctx, body)
+	if err != nil {
 		return err
 	}
-	if err := o.AtomicPut(ctx, ref.key(), &buf, store.ObjectMeta{}); err != nil {
-		return err
-	}
-	o.core.Names.Seen = &ref
+	o.core.Names.Seen = ref
 	o.seen.dirty = false
 	return nil
+}
+
+// putSingleton writes one backend-only sidecar body under a FRESH stem of the
+// seen series and returns the reference — the shared half of SyncSeen and
+// SyncRefs, which are otherwise the same publish under two names.
+//
+// Fresh stem, never an overwrite: the manifest this cycle publishes names it,
+// so the batch and the state describing it become durable by ONE root flip
+// (§6.1), and a crash leaves an orphan rather than a half-written sidecar under
+// a name some older generation still points at. The caller assigns the name
+// only after this returns, so a failed Put can never leave the table naming an
+// object the store does not hold (M4).
+func (o *DB) putSingleton(ctx context.Context, body []byte) (*StemRef, error) {
+	ref := StemRef{Series: seenSeries, Stem: o.core.Names.alloc(seenSeries)}
+	if err := o.AtomicPut(ctx, ref.key(), bytes.NewReader(body), store.ObjectMeta{}); err != nil {
+		return nil, err
+	}
+	return &ref, nil
 }
 
 // commitState persists the seen sidecar and THEN publishes the store state,

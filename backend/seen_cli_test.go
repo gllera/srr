@@ -9,10 +9,10 @@ func boolPtr(b bool) *bool { return &b }
 func TestFeedAddStoresDedupOverrides(t *testing.T) {
 	setupEmptyDB(t)
 	cmd := &AddCmd{
-		Title:      strPtr("Deals"),
-		URL:        strPtr("https://d.example.com/rss"),
-		DedupDays:  intPtr(7),
-		DedupTitle: boolPtr(true),
+		Title:      "Deals",
+		URL:        "https://d.example.com/rss",
+		DedupDays:  7,
+		DedupTitle: true,
 	}
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Run: %v", err)

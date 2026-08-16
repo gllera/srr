@@ -1,7 +1,6 @@
 package mod
 
 import (
-	"context"
 	"regexp"
 	"strconv"
 	"strings"
@@ -36,16 +35,7 @@ import (
 // re-render). Place it BEFORE #sanitize (e.g. ["#unlazy", "#default"]) —
 // after it the data-* attributes holding the real URLs are gone.
 
-func init() {
-	RegisterDOM("unlazy", func() DOMProcessor {
-		return func(_ context.Context, p Params, _ *RawItem, body *html.Node) (bool, error) {
-			if err := p.only(); err != nil {
-				return false, err
-			}
-			return unlazyContent(body), nil
-		}
-	})
-}
+func init() { RegisterDOMBody("unlazy", unlazyContent) }
 
 // lazySrcAttrs are the attributes lazy-load libraries stash the real URL in,
 // in promotion priority order.
@@ -69,33 +59,29 @@ func unlazyContent(body *html.Node) bool {
 	changed := false
 	seen := map[string]bool{} // media file IDs visible after promotion
 	var noscripts []*html.Node
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
-		if n.Type == html.ElementNode {
-			switch n.Data {
-			case "img":
-				if promoteLazyImg(n) {
-					changed = true
-				}
-				if src := strings.TrimSpace(mediaAttr(n, "src")); src != "" {
-					seen[mediaFileID(src)] = true
-				}
-			case "video", "audio":
-				if c, _ := promoteLazyDataSrc(n); c {
-					changed = true
-				}
-				if hoistSourceSrc(n) {
-					changed = true
-				}
-			case "noscript":
-				noscripts = append(noscripts, n)
-			}
+	for n := range descend(body) {
+		if n.Type != html.ElementNode {
+			continue
 		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
+		switch n.Data {
+		case "img":
+			if promoteLazyImg(n) {
+				changed = true
+			}
+			if src := strings.TrimSpace(mediaAttr(n, "src")); src != "" {
+				seen[mediaFileID(src)] = true
+			}
+		case "video", "audio":
+			if c, _ := promoteLazyDataSrc(n); c {
+				changed = true
+			}
+			if hoistSourceSrc(n) {
+				changed = true
+			}
+		case "noscript":
+			noscripts = append(noscripts, n)
 		}
 	}
-	walk(body)
 	for _, ns := range noscripts {
 		if unwrapNoscript(ns, seen) {
 			changed = true
@@ -281,8 +267,7 @@ func unwrapNoscript(ns *html.Node, seen map[string]bool) bool {
 		return false
 	}
 	fresh := false
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
+	for n := range descend(frag) {
 		if n.Type == html.ElementNode && n.Data == "img" {
 			if src := strings.TrimSpace(mediaAttr(n, "src")); src != "" {
 				if id := mediaFileID(src); !seen[id] {
@@ -291,11 +276,7 @@ func unwrapNoscript(ns *html.Node, seen map[string]bool) bool {
 				}
 			}
 		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
-		}
 	}
-	walk(frag)
 	parent := ns.Parent
 	if fresh {
 		for frag.FirstChild != nil {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"sort"
 )
@@ -15,6 +16,11 @@ import (
 // keyGetter abstracts "fetch + gunzip a store key" so the same read path
 // works over a local store handle and a live HTTP CDN.
 type keyGetter func(key string) ([]byte, error)
+
+// fetcher adapts an open DB to the keyGetter the read-side parsers consume.
+func (o *DB) fetcher(ctx context.Context) keyGetter {
+	return func(key string) ([]byte, error) { return o.readGz(ctx, key) }
+}
 
 type idxBound struct {
 	packID     int
@@ -31,6 +37,15 @@ type idxPack struct {
 	numSlots      int
 	feedCounts    []uint32 // cumulative before this pack (len numSlots)
 	ownFeedCounts []uint32 // counted during parse (len = store high-water slots)
+}
+
+// feedIDAt returns the feed owning an ABSOLUTE chron, the sibling of
+// getPackRef's addressing: packIndex is this pack's position, so subtracting
+// its base chron is what turns a global address into a local entry index. It
+// exists so the one place that spells that arithmetic is the file that mirrors
+// the binary format (and frontend idx.ts), not each of its callers.
+func (p *idxPack) feedIDAt(chron int) int {
+	return int(p.feedIDs[chron-p.packIndex*idxPackSize])
 }
 
 // feedCount returns the cumulative count for id, 0 when id is beyond this
@@ -103,12 +118,22 @@ func parseDeltaChain(fetch keyGetter, core *DBCore) (*deltaChain, error) {
 	}
 	chain.Arts = make([]ArticleData, 0, core.DeltaArticles)
 	chain.Lines = make([][]byte, 0, core.DeltaArticles)
-	for _, key := range keys {
-		buf, err := fetch(key)
+	// The segments are independent objects and the chain is assembled in key
+	// order regardless of completion order, so they are fetched concurrently:
+	// serially this was --max-deltas (12 by default) round-trips of latency,
+	// paid once per cycle on the locked path and again per read-tool run.
+	bufs, err := gatherOrdered(len(keys), func(k int) ([]byte, error) {
+		buf, err := fetch(keys[k])
 		if err != nil {
-			return nil, fmt.Errorf("fetch %s: %w", key, err)
+			return nil, fmt.Errorf("fetch %s: %w", keys[k], err)
 		}
-		lines, entries, err := splitDataPack(buf)
+		return buf, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	for i, key := range keys {
+		lines, entries, err := splitDataPack(bufs[i])
 		if err != nil {
 			return nil, fmt.Errorf("parse %s: %w", key, err)
 		}
@@ -135,6 +160,19 @@ func loadDeltas(fetch keyGetter, core *DBCore) ([]ArticleData, error) {
 	return chain.Arts, nil
 }
 
+// idxTailKey names the tail idx object a store with a consolidated tail MUST
+// have. Past tc > 0 the tail holds 1..50000 entries, so an empty name is
+// name-table corruption, not an empty store — and the writer (checkTailIntact)
+// and the reader (loadLatestIdx) have to answer that identically, or the
+// writer sails past a store every reader is already failing to parse.
+func idxTailKey(core *DBCore, tc int) (string, error) {
+	key := core.Names.tailKey(idxSeries)
+	if key == "" {
+		return "", fmt.Errorf("the store consolidated %d article(s) but names no idx tail", tc)
+	}
+	return key, nil
+}
+
 // loadLatestIdx parses the physical tail idx pack (idx/L<tailGen>, covering
 // chrons [nf·50k, tailCovered)) and extends it with the delta articles' feed
 // ids, so every consumer sees ONE uniform latest pack spanning the whole tail
@@ -148,9 +186,9 @@ func loadLatestIdx(fetch keyGetter, core *DBCore, deltas []ArticleData, slots in
 	tc := tailCovered(core)
 	var pack *idxPack
 	if tc > 0 {
-		key := core.Names.tailKey(idxSeries)
-		if key == "" {
-			return nil, fmt.Errorf("the store consolidated %d article(s) but names no idx tail", tc)
+		key, err := idxTailKey(core, tc)
+		if err != nil {
+			return nil, err
 		}
 		buf, err := fetch(key)
 		if err != nil {
@@ -193,18 +231,34 @@ func loadIdxPacks(fetch keyGetter, core *DBCore) ([]*idxPack, []ArticleData, err
 	numFinalized := numFinalizedIdx(core.TotalArticles)
 	slots := feedSlots(core)
 	out := make([]*idxPack, numFinalized+1)
-	for p := 0; p < numFinalized; p++ {
+	// Names and sizes resolve first (pure arithmetic over the table, and a
+	// disagreement between the two should fail before any I/O), then the packs
+	// are fetched concurrently: one finalized pack per 50,000 articles means a
+	// serial walk is 20 round-trips at 1M articles, before `srr art` or the MCP
+	// list tool can emit anything.
+	keys := make([]string, numFinalized)
+	sizes := make([]int, numFinalized)
+	for p := range numFinalized {
 		key, size, err := idxKeyAndSize(core, p)
 		if err != nil {
 			return nil, nil, err
 		}
-		buf, err := fetch(key)
+		keys[p], sizes[p] = key, size
+	}
+	bufs, err := gatherOrdered(numFinalized, func(p int) ([]byte, error) {
+		buf, err := fetch(keys[p])
 		if err != nil {
-			return nil, nil, fmt.Errorf("fetch %s: %w", key, err)
+			return nil, fmt.Errorf("fetch %s: %w", keys[p], err)
 		}
-		pack, err := parseIdxPack(buf, p, size, slots)
+		return buf, nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	for p := range numFinalized {
+		pack, err := parseIdxPack(bufs[p], p, sizes[p], slots)
 		if err != nil {
-			return nil, nil, fmt.Errorf("parse %s: %w", key, err)
+			return nil, nil, fmt.Errorf("parse %s: %w", keys[p], err)
 		}
 		out[p] = pack
 	}
@@ -274,6 +328,12 @@ func (p *idxPack) getPackRef(chron int) (packID, offset int) {
 	}) - 1
 	b := p.bounds[idx]
 	return b.packID, chron - b.startChron
+}
+
+// packAt is packIdxFor's lookup form: the pack holding chron. Callers that
+// also need the position keep packIdxFor; the rest say what they mean.
+func packAt(packs []*idxPack, chron int) *idxPack {
+	return packs[packIdxFor(chron, len(packs))]
 }
 
 // packIdxFor mirrors frontend/src/js/data.ts packIdx(): the index of the

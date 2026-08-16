@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
+	"sync"
 
 	"srr/store"
 )
@@ -217,6 +219,65 @@ func namesFromLegacy(l *legacyCore) (*ManifestNames, []legacyObject) {
 // migration re-publishes it under.
 type legacyObject struct{ from, to string }
 
+// manifestMemo caches the decompressed body of the most recently read
+// generation manifest — the largest metadata read in the system, re-fetched on
+// every DB open (once per serve/MCP request, twice per fetch cycle) even
+// though the object is write-once and named by its generation (M2/M3). One
+// entry suffices: a process opens one store, and the entry refreshes at most
+// once per cycle.
+//
+// The key is the store target PLUS the exact root bytes ({v,m,t}), not just
+// the manifest number: a store rebuilt in place could reuse a generation
+// number with different bytes under a byte-identical root. This process's own
+// republishes (the orphan-overwrite path, a legacy migration) are covered by
+// publishManifest calling forget; a rebuild performed by ANOTHER process while
+// this one stays alive is detectable only through the root, which any real
+// generation advance rewrites. The cached bytes are shared read-only
+// (json.Unmarshal copies what it keeps).
+var manifestMemo manifestMemoState
+
+type manifestMemoState struct {
+	sync.Mutex
+	sig  string
+	key  string
+	body []byte
+}
+
+// forget clears the memo. publishManifest calls it before every manifest
+// write, since a republish can place new bytes under a key an earlier open of
+// this process cached.
+func (m *manifestMemoState) forget() {
+	m.Lock()
+	m.sig, m.key, m.body = "", "", nil
+	m.Unlock()
+}
+
+// memoManifestFetch wraps a keyGetter with the manifest memo. Only keys in the
+// manifest series are memoized; everything else passes through.
+func memoManifestFetch(storeTarget string, root []byte, fetch keyGetter) keyGetter {
+	sig := storeTarget + "\x00" + string(root)
+	return func(key string) ([]byte, error) {
+		if !strings.HasPrefix(key, manifestSeries+"/") {
+			return fetch(key)
+		}
+		manifestMemo.Lock()
+		hit := manifestMemo.sig == sig && manifestMemo.key == key
+		body := manifestMemo.body
+		manifestMemo.Unlock()
+		if hit {
+			return body, nil
+		}
+		body, err := fetch(key)
+		if err != nil {
+			return nil, err
+		}
+		manifestMemo.Lock()
+		manifestMemo.sig, manifestMemo.key, manifestMemo.body = sig, key, body
+		manifestMemo.Unlock()
+		return body, nil
+	}
+}
+
 // loadStore resolves the store root through whichever shape it carries and
 // returns the in-memory core, INCLUDING its object-name table. It is the single
 // root resolver: NewDB and the read-only tools (`srr inspect`, `srr art`)
@@ -226,6 +287,15 @@ type legacyObject struct{ from, to string }
 // The returned core carries no configuration for a v3 store — that lives in
 // config.gz, which only the callers that need it read (NewDB always; inspect
 // for its cross-check).
+// errFutureFormat refuses a store document from the future — the one-way door
+// the format cutover documents, stated once for every gzip-JSON document that
+// carries a `v` (the root, each manifest, the config sidecar). This binary
+// cannot represent fields it does not know, so reading one and later writing
+// it back is how skew silently truncates a store.
+func errFutureFormat(key string, v int) error {
+	return fmt.Errorf("%s was written by a newer srr (format v%d, this binary supports v%d)", key, v, dbFormatVersion)
+}
+
 func loadStore(fetch keyGetter) (*DBCore, error) {
 	data, err := fetch(dbFileKey)
 	if err != nil {
@@ -243,8 +313,7 @@ func parseStoreRoot(data []byte, fetch keyGetter) (*DBCore, error) {
 	// does not know, so opening it — even read-only, since any later Commit
 	// would write back the truncated state — is how skew silently loses data.
 	if root.Version > dbFormatVersion {
-		return nil, fmt.Errorf("%s was written by a newer srr (format v%d, this binary supports v%d) — refusing to open; update srr",
-			dbFileKey, root.Version, dbFormatVersion)
+		return nil, fmt.Errorf("%w — refusing to open; update srr", errFutureFormat(dbFileKey, root.Version))
 	}
 	if root.Version < dbFormatVersion {
 		// Only the PRE-manifest document is a legacy root this binary can read.
@@ -286,7 +355,7 @@ func parseStoreRoot(data []byte, fetch keyGetter) (*DBCore, error) {
 		return nil, fmt.Errorf("%s declares generation %d but %s names %d", key, man.Num, dbFileKey, root.ManifestNum)
 	}
 	if man.Version > dbFormatVersion {
-		return nil, fmt.Errorf("%s was written by a newer srr (format v%d, this binary supports v%d)", key, man.Version, dbFormatVersion)
+		return nil, errFutureFormat(key, man.Version)
 	}
 	c := &DBCore{
 		Version:             root.Version,

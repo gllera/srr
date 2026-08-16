@@ -1,9 +1,10 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"net/http"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -41,14 +42,23 @@ type overviewView struct {
 // forking it — the wire shape stays defined in exactly one place. The caller
 // owns the DB scope; this takes no lock and reads nothing from the store.
 func buildOverview(db *DB) overviewView {
-	// Project feeds to the UI list shape, sorted case-insensitively by title.
-	feeds := make([]feedListView, 0, len(db.Feeds()))
-	for _, ch := range db.Feeds() {
-		feeds = append(feeds, listViewOf(ch))
+	// Project feeds to the UI list shape, sorted case-insensitively by title —
+	// on one precomputed key per feed, not a ToLower per comparison (the
+	// console re-pulls this snapshot after every fetch stream).
+	type keyedView struct {
+		key  string
+		view feedListView
 	}
-	sort.Slice(feeds, func(i, j int) bool {
-		return strings.ToLower(feeds[i].Title) < strings.ToLower(feeds[j].Title)
-	})
+	rows := make([]keyedView, 0, len(db.Feeds()))
+	for _, ch := range db.Feeds() {
+		v := listViewOf(ch)
+		rows = append(rows, keyedView{strings.ToLower(v.Title), v})
+	}
+	slices.SortFunc(rows, func(a, b keyedView) int { return cmp.Compare(a.key, b.key) })
+	feeds := make([]feedListView, len(rows))
+	for i, r := range rows {
+		feeds[i] = r.view
+	}
 	// Aggregate feeds into tag buckets (tag "" = untagged), sorted by tag.
 	agg := map[string]*tagCount{}
 	for _, ch := range db.Feeds() {
@@ -60,13 +70,13 @@ func buildOverview(db *DB) overviewView {
 		tc.Feeds++
 		// Live count: TotalArt is all-time, Expired articles are gone from
 		// the store — the overview is a display projection.
-		tc.Articles += ch.TotalArt - ch.Expired
+		tc.Articles += ch.LiveArt()
 	}
 	tags := make([]tagCount, 0, len(agg))
 	for _, tc := range agg {
 		tags = append(tags, *tc)
 	}
-	sort.Slice(tags, func(i, j int) bool { return tags[i].Tag < tags[j].Tag })
+	slices.SortFunc(tags, func(a, b tagCount) int { return cmp.Compare(a.Tag, b.Tag) })
 	return overviewView{
 		Feeds:   feeds,
 		Tags:    tags,

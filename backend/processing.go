@@ -127,7 +127,10 @@ func processItem(ctx context.Context, processor *mod.Module, pipeline []string, 
 	// control-character strip just above, which cannot change a classification
 	// (control characters are not letters, and the detector folds whitespace).
 	if (i.Lang == "" || i.Lang == declaredLang) && (i.Title != preTitle || sess.Rev() != preRev) {
-		if code := mod.DetectLang(i.Title, i.Content); code != "" {
+		// Through the session, like the pre-pipe stamp: when the pipe ended in
+		// a DOM step the parse is already in hand, and when it did not, DOM()
+		// re-parses exactly what DetectLang would have.
+		if code := mod.DetectLangNode(i.Title, sess.DOM()); code != "" {
 			i.Lang = code
 		}
 	}

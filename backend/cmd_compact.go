@@ -9,8 +9,6 @@ import (
 	"maps"
 	"slices"
 
-	"golang.org/x/sync/errgroup"
-
 	"srr/store"
 )
 
@@ -90,8 +88,7 @@ func (o *DB) Compact(ctx context.Context, dryRun bool) error {
 		return nil
 	}
 
-	fetch := func(key string) ([]byte, error) { return o.readGz(ctx, key) }
-	packs, _, err := loadIdxPacks(fetch, c)
+	packs, _, err := loadIdxPacks(o.fetcher(ctx), c)
 	if err != nil {
 		return fmt.Errorf("compact: load idx packs: %w", err)
 	}
@@ -101,15 +98,13 @@ func (o *DB) Compact(ctx context.Context, dryRun bool) error {
 	// AddIdx) keeps its content — [DELETED] but still loadable, the existing
 	// tombstone.e2e contract.
 	tc := tailCovered(c)
-	metaCoverage := c.metaPacks()*metaPackSize + c.MetaTail
+	metaCoverage := c.metaCoverage()
 	dataExpired := map[int]map[int]bool{} // data packID  -> offset within pack -> expired
 	metaExpired := map[int]map[int]bool{} // meta shard    -> local position    -> expired
 	totalExpired := 0
 	for chron := 0; chron < tc; chron++ {
-		p := packIdxFor(chron, len(packs))
-		pack := packs[p]
-		feedID := int(pack.feedIDs[chron-p*idxPackSize])
-		f := c.Feeds[feedID]
+		pack := packAt(packs, chron)
+		f := c.Feeds[pack.feedIDAt(chron)]
 		if f == nil || chron >= f.AddIdx {
 			continue
 		}
@@ -342,19 +337,7 @@ func (o *DB) rebuildMetaSummary(ctx context.Context, c *DBCore, names *ManifestN
 	if nf == 0 {
 		return nil
 	}
-	stem := names.alloc(metaSeries)
-	sum := SummaryName{Series: metaSeries, Stem: stem, Covers: nf}
-	if err := o.saveSummary(ctx, nf, func(k int) ([]byte, error) {
-		key, err := names.key(metaSeries, k)
-		if err != nil {
-			return nil, err
-		}
-		return o.readPackHeader(ctx, key, searchBloomBytes)
-	}, sum.key()); err != nil {
-		return err
-	}
-	names.SSum = &sum
-	return nil
+	return o.syncMetaSummary(ctx, names, nf)
 }
 
 // rmAssets deletes the collected asset keys, bounded like ExpireArticles' own
@@ -383,15 +366,8 @@ func (o *DB) rmAssets(ctx context.Context, keys map[string]struct{}) (int, error
 	if len(dead) == 0 {
 		return 0, nil
 	}
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(max(1, globals.Workers))
-	for _, key := range dead {
-		g.Go(func() error {
-			if err := o.Rm(gctx, key); err != nil {
-				return fmt.Errorf("delete %s: %w", key, err)
-			}
-			return nil
-		})
+	if failed, err := store.RmAll(ctx, o.Backend, dead, rmParallel()); err != nil {
+		return 0, fmt.Errorf("delete %d of %d asset object(s): %w", len(failed), len(dead), err)
 	}
-	return len(dead), g.Wait()
+	return len(dead), nil
 }

@@ -67,22 +67,33 @@ type ArtCmd struct {
 // (ingest time), not published: it is chron-monotone, so a window is a
 // contiguous chron range.
 func (o *ArtCmd) window(now time.Time) (since, until *int64, err error) {
-	if o.Since != "" {
-		t, err := parseTimeBound(o.Since, now)
+	return parseWindow(o.Since, o.Until, now, "--since", "--until")
+}
+
+// parseWindow resolves a since/until pair into the half-open [since, until)
+// unix-second window, over the shared parseTimeBound grammar. Both bounds
+// resolve against ONE now, either may be open, and an empty window is refused
+// — the rules the CLI (`srr art`) and the MCP tool must answer identically,
+// stated here once. The labels are the caller's names for the two bounds
+// (`--since`/`--until` for the flags, `since`/`until` for the tool's fields),
+// which is the only thing that ever differed between the two.
+func parseWindow(sinceStr, untilStr string, now time.Time, sinceLabel, untilLabel string) (since, until *int64, err error) {
+	if sinceStr != "" {
+		t, err := parseTimeBound(sinceStr, now)
 		if err != nil {
-			return nil, nil, fmt.Errorf("--since: %w", err)
+			return nil, nil, fmt.Errorf("%s: %w", sinceLabel, err)
 		}
 		since = &t
 	}
-	if o.Until != "" {
-		t, err := parseTimeBound(o.Until, now)
+	if untilStr != "" {
+		t, err := parseTimeBound(untilStr, now)
 		if err != nil {
-			return nil, nil, fmt.Errorf("--until: %w", err)
+			return nil, nil, fmt.Errorf("%s: %w", untilLabel, err)
 		}
 		until = &t
 	}
 	if since != nil && until != nil && *since >= *until {
-		return nil, nil, fmt.Errorf("--since %q is not before --until %q: the window is empty", o.Since, o.Until)
+		return nil, nil, fmt.Errorf("%s %q is not before %s %q: the window is empty", sinceLabel, sinceStr, untilLabel, untilStr)
 	}
 	return since, until, nil
 }
@@ -274,9 +285,7 @@ func (o *ArtCmd) Run() error {
 }
 
 func readAllIdx(ctx context.Context, db *DB) ([]idxEntry, []ArticleData, error) {
-	packs, deltas, err := loadIdxPacks(func(key string) ([]byte, error) {
-		return db.readGz(ctx, key)
-	}, &db.core)
+	packs, deltas, err := loadIdxPacks(db.fetcher(ctx), &db.core)
 	if err != nil {
 		return nil, nil, err
 	}

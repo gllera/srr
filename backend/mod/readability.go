@@ -67,7 +67,7 @@ func init() {
 		// vary per pipeline position while sharing this client. The transport is
 		// SSRF-guarded: the Link comes from attacker-controlled feed content, so
 		// dials to private/loopback/link-local addresses are refused.
-		client := &http.Client{Transport: SafeTransport()}
+		client := safeClient()
 		// Compiled selector= values, keyed by their source string. Instances
 		// are per fetch worker (procPool), so no locking; a pipe reuses one
 		// selector across all its items, making this a one-entry cache in

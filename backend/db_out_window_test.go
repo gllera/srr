@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -107,18 +108,6 @@ func referenceWindow(t *testing.T, db *DB, include map[int]bool, limit int) []Ar
 	return matches
 }
 
-func sameArticles(a, b []ArticleData) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // The idx-driven window must return exactly what the full data scan returned —
 // same articles, same order — for a sparse selector, a dense one, and a
 // selector spanning both.
@@ -141,7 +130,7 @@ func TestResolveOutWindowMatchesFullScan(t *testing.T) {
 			if err != nil {
 				t.Fatalf("resolveOutWindow: %v", err)
 			}
-			if !sameArticles(got, want) {
+			if !slices.Equal(got, want) {
 				t.Errorf("window mismatch: got %d articles, want %d\ngot  %+v\nwant %+v",
 					len(got), len(want), got, want)
 			}
@@ -160,7 +149,7 @@ func TestResolveOutWindowSkipsExpired(t *testing.T) {
 		t.Fatalf("resolveOutWindow: %v", err)
 	}
 	want := referenceWindow(t, db, map[int]bool{sparse: true}, 50)
-	if !sameArticles(got, want) {
+	if !slices.Equal(got, want) {
 		t.Fatalf("got %d articles, want %d (the expired one must be excluded)", len(got), len(want))
 	}
 	if len(got) != 1 {

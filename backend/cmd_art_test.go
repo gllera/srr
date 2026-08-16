@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -145,21 +146,6 @@ func artTitles(out articlesOutput) []string {
 	return titles
 }
 
-func artEqualStrs(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		// gosec cannot carry the length guard above into the loop, so b[i] reads
-		// as unbounded to it.
-		//nolint:gosec // G602: len(a) == len(b) is established
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // TestArtListNewestFirst covers the un-filtered read path: articles come back
 // in descending chronIdx order (newest first) with content loaded, Total is the
 // full count, and no next_cursor is emitted when the page isn't full.
@@ -170,7 +156,7 @@ func TestArtListNewestFirst(t *testing.T) {
 	if out.Total != 5 {
 		t.Errorf("Total = %d, want 5", out.Total)
 	}
-	if want := []string{"a4", "a3", "a2", "a1", "a0"}; !artEqualStrs(artTitles(out), want) {
+	if want := []string{"a4", "a3", "a2", "a1", "a0"}; !slices.Equal(artTitles(out), want) {
 		t.Errorf("titles = %v, want %v (newest-first)", artTitles(out), want)
 	}
 	// Idx (chronIdx) strictly descending; content + link resolved from data packs.
@@ -206,7 +192,7 @@ func TestArtListFilters(t *testing.T) {
 
 	t.Run("by feed id", func(t *testing.T) {
 		out := artRun(t, &ArtCmd{ID: []int{1}, Limit: 50})
-		if want := []string{"a3", "a1"}; !artEqualStrs(artTitles(out), want) {
+		if want := []string{"a3", "a1"}; !slices.Equal(artTitles(out), want) {
 			t.Errorf("titles = %v, want %v (feed 1 only)", artTitles(out), want)
 		}
 		if out.Total != 2 {
@@ -216,7 +202,7 @@ func TestArtListFilters(t *testing.T) {
 
 	t.Run("by tag", func(t *testing.T) {
 		out := artRun(t, &ArtCmd{Tag: []string{"news"}, Limit: 50})
-		if want := []string{"a4", "a2", "a0"}; !artEqualStrs(artTitles(out), want) {
+		if want := []string{"a4", "a2", "a0"}; !slices.Equal(artTitles(out), want) {
 			t.Errorf("titles = %v, want %v (tag news = feed 0)", artTitles(out), want)
 		}
 		if out.Total != 3 {
@@ -238,7 +224,7 @@ func TestArtListAddIdxExpiredHidden(t *testing.T) {
 	}
 
 	out := artRun(t, &ArtCmd{Limit: 50})
-	if want := []string{"a4", "a3", "a2", "a1"}; !artEqualStrs(artTitles(out), want) {
+	if want := []string{"a4", "a3", "a2", "a1"}; !slices.Equal(artTitles(out), want) {
 		t.Errorf("titles = %v, want %v (a0 hidden by add_idx)", artTitles(out), want)
 	}
 	if out.Total != 4 {
@@ -260,7 +246,7 @@ func TestArtListCursorPagination(t *testing.T) {
 
 	// Page 1: newest two (chron 4,3). Full page → cursor = 3.
 	p1 := artRun(t, &ArtCmd{Limit: 2})
-	if want := []string{"a4", "a3"}; !artEqualStrs(artTitles(p1), want) {
+	if want := []string{"a4", "a3"}; !slices.Equal(artTitles(p1), want) {
 		t.Fatalf("page1 titles = %v, want %v", artTitles(p1), want)
 	}
 	if p1.Total != 5 {
@@ -272,7 +258,7 @@ func TestArtListCursorPagination(t *testing.T) {
 
 	// Page 2: chron 2,1. Full page → cursor = 1.
 	p2 := artRun(t, &ArtCmd{Limit: 2, Before: p1.NextCursor})
-	if want := []string{"a2", "a1"}; !artEqualStrs(artTitles(p2), want) {
+	if want := []string{"a2", "a1"}; !slices.Equal(artTitles(p2), want) {
 		t.Fatalf("page2 titles = %v, want %v", artTitles(p2), want)
 	}
 	if p2.NextCursor == nil || *p2.NextCursor != 1 {
@@ -281,7 +267,7 @@ func TestArtListCursorPagination(t *testing.T) {
 
 	// Page 3: chron 0 only. Not a full page → no cursor.
 	p3 := artRun(t, &ArtCmd{Limit: 2, Before: p2.NextCursor})
-	if want := []string{"a0"}; !artEqualStrs(artTitles(p3), want) {
+	if want := []string{"a0"}; !slices.Equal(artTitles(p3), want) {
 		t.Fatalf("page3 titles = %v, want %v", artTitles(p3), want)
 	}
 	if p3.NextCursor != nil {
@@ -296,7 +282,7 @@ func TestArtListFilteredTotalVsLimit(t *testing.T) {
 	artTestStore(t)
 
 	out := artRun(t, &ArtCmd{Tag: []string{"news"}, Limit: 2})
-	if want := []string{"a4", "a2"}; !artEqualStrs(artTitles(out), want) {
+	if want := []string{"a4", "a2"}; !slices.Equal(artTitles(out), want) {
 		t.Fatalf("titles = %v, want %v (news, first page of 2)", artTitles(out), want)
 	}
 	if out.Total != 3 {
@@ -367,7 +353,7 @@ func TestArtListSince(t *testing.T) {
 	artTimeStore(t)
 
 	out := artRun(t, &ArtCmd{Limit: 50, Since: artStamp(1)})
-	if want := []string{"c1", "c0", "b1", "b0"}; !artEqualStrs(artTitles(out), want) {
+	if want := []string{"c1", "c0", "b1", "b0"}; !slices.Equal(artTitles(out), want) {
 		t.Errorf("titles = %v, want %v (cycles 1-2, newest first)", artTitles(out), want)
 	}
 	if out.Total != 4 {
@@ -381,7 +367,7 @@ func TestArtListUntil(t *testing.T) {
 	artTimeStore(t)
 
 	out := artRun(t, &ArtCmd{Limit: 50, Until: artStamp(1)})
-	if want := []string{"a1", "a0"}; !artEqualStrs(artTitles(out), want) {
+	if want := []string{"a1", "a0"}; !slices.Equal(artTitles(out), want) {
 		t.Errorf("titles = %v, want %v (cycle 0 only, newest first)", artTitles(out), want)
 	}
 	if out.Total != 2 {
@@ -396,7 +382,7 @@ func TestArtListWindow(t *testing.T) {
 	artTimeStore(t)
 
 	out := artRun(t, &ArtCmd{Limit: 50, Since: artStamp(1), Until: artStamp(2)})
-	if want := []string{"b1", "b0"}; !artEqualStrs(artTitles(out), want) {
+	if want := []string{"b1", "b0"}; !slices.Equal(artTitles(out), want) {
 		t.Errorf("titles = %v, want %v (single cycle)", artTitles(out), want)
 	}
 	if out.Total != 2 {
@@ -424,7 +410,7 @@ func TestArtListWindowWithFilter(t *testing.T) {
 	artTimeStore(t)
 
 	out := artRun(t, &ArtCmd{Limit: 50, Tag: []string{"news"}, Since: artStamp(1)})
-	if want := []string{"c0", "b0"}; !artEqualStrs(artTitles(out), want) {
+	if want := []string{"c0", "b0"}; !slices.Equal(artTitles(out), want) {
 		t.Errorf("titles = %v, want %v (news feed within the window)", artTitles(out), want)
 	}
 	if out.Total != 2 {
@@ -438,7 +424,7 @@ func TestArtListWindowPaging(t *testing.T) {
 	artTimeStore(t)
 
 	p1 := artRun(t, &ArtCmd{Limit: 2, Since: artStamp(1)})
-	if want := []string{"c1", "c0"}; !artEqualStrs(artTitles(p1), want) {
+	if want := []string{"c1", "c0"}; !slices.Equal(artTitles(p1), want) {
 		t.Fatalf("page1 titles = %v, want %v", artTitles(p1), want)
 	}
 	if p1.Total != 4 {
@@ -449,7 +435,7 @@ func TestArtListWindowPaging(t *testing.T) {
 	}
 
 	p2 := artRun(t, &ArtCmd{Limit: 2, Since: artStamp(1), Before: p1.NextCursor})
-	if want := []string{"b1", "b0"}; !artEqualStrs(artTitles(p2), want) {
+	if want := []string{"b1", "b0"}; !slices.Equal(artTitles(p2), want) {
 		t.Fatalf("page2 titles = %v, want %v", artTitles(p2), want)
 	}
 
@@ -503,7 +489,7 @@ func TestArtListWindowBeforeAboveCeiling(t *testing.T) {
 
 	above := 6 // one past the newest chron in the store
 	out := artRun(t, &ArtCmd{Limit: 50, Until: artStamp(2), Before: &above})
-	if want := []string{"b1", "b0", "a1", "a0"}; !artEqualStrs(artTitles(out), want) {
+	if want := []string{"b1", "b0", "a1", "a0"}; !slices.Equal(artTitles(out), want) {
 		t.Errorf("titles = %v, want %v (cursor clamped to the --until ceiling)", artTitles(out), want)
 	}
 	if out.Total != 4 {
@@ -634,7 +620,7 @@ func TestArtListWindowAcrossDeltaSeam(t *testing.T) {
 	// Window spanning the seam: cycle 0 (packs) + cycle 1 (delta), with the
 	// exclusive --until sitting on cycle 2's stamp.
 	out := artRun(t, &ArtCmd{Limit: 50, Until: artStamp(2)})
-	if want := []string{"b1", "b0", "a1", "a0"}; !artEqualStrs(artTitles(out), want) {
+	if want := []string{"b1", "b0", "a1", "a0"}; !slices.Equal(artTitles(out), want) {
 		t.Errorf("titles = %v, want %v (across the pack/delta seam)", artTitles(out), want)
 	}
 	if out.Total != 4 {
@@ -649,7 +635,7 @@ func TestArtListWindowAcrossDeltaSeam(t *testing.T) {
 	// The --since search walks different indices than the --until one, so pin
 	// the lower bound landing inside the delta region too.
 	out = artRun(t, &ArtCmd{Limit: 50, Since: artStamp(2)})
-	if want := []string{"c1", "c0"}; !artEqualStrs(artTitles(out), want) {
+	if want := []string{"c1", "c0"}; !slices.Equal(artTitles(out), want) {
 		t.Errorf("titles = %v, want %v (--since inside the delta chain)", artTitles(out), want)
 	}
 	if out.Total != 2 {
@@ -705,14 +691,14 @@ func TestArtListQueryFold(t *testing.T) {
 	t.Run("accent and case insensitive", func(t *testing.T) {
 		out := artRun(t, &ArtCmd{Limit: 50, Query: "cafe"})
 		want := []string{"cafe latte", "Le Café noir", "CAFETERIA hours", "Café society"}
-		if !artEqualStrs(artTitles(out), want) {
+		if !slices.Equal(artTitles(out), want) {
 			t.Errorf("titles = %v, want %v", artTitles(out), want)
 		}
 		if out.Total != 4 {
 			t.Errorf("Total = %d, want 4 (matches, not the 6-article store)", out.Total)
 		}
 		// The needle folds too: an accented, upper-cased query is the same query.
-		if alt := artRun(t, &ArtCmd{Limit: 50, Query: "CAFÉ"}); !artEqualStrs(artTitles(alt), want) {
+		if alt := artRun(t, &ArtCmd{Limit: 50, Query: "CAFÉ"}); !slices.Equal(artTitles(alt), want) {
 			t.Errorf("titles for %q = %v, want %v (the needle folds as well)", "CAFÉ", artTitles(alt), want)
 		}
 	})
@@ -726,7 +712,7 @@ func TestArtListQueryFold(t *testing.T) {
 
 	t.Run("composes with the feed filter", func(t *testing.T) {
 		out := artRun(t, &ArtCmd{Limit: 50, Query: "cafe", Tag: []string{"news"}})
-		if want := []string{"CAFETERIA hours", "Café society"}; !artEqualStrs(artTitles(out), want) {
+		if want := []string{"CAFETERIA hours", "Café society"}; !slices.Equal(artTitles(out), want) {
 			t.Errorf("titles = %v, want %v (news feed only)", artTitles(out), want)
 		}
 		if out.Total != 2 {
@@ -738,7 +724,7 @@ func TestArtListQueryFold(t *testing.T) {
 		// Cycles 1-2 only: three of the store's four "cafe" articles.
 		out := artRun(t, &ArtCmd{Limit: 50, Query: "cafe", Since: artStamp(1)})
 		want := []string{"cafe latte", "Le Café noir", "CAFETERIA hours"}
-		if !artEqualStrs(artTitles(out), want) {
+		if !slices.Equal(artTitles(out), want) {
 			t.Errorf("titles = %v, want %v", artTitles(out), want)
 		}
 		if out.Total != 3 {
@@ -746,7 +732,7 @@ func TestArtListQueryFold(t *testing.T) {
 		}
 		// The exclusive --until half narrows it to a single cycle.
 		out = artRun(t, &ArtCmd{Limit: 50, Query: "cafe", Since: artStamp(1), Until: artStamp(2)})
-		if want := []string{"Le Café noir", "CAFETERIA hours"}; !artEqualStrs(artTitles(out), want) {
+		if want := []string{"Le Café noir", "CAFETERIA hours"}; !slices.Equal(artTitles(out), want) {
 			t.Errorf("titles = %v, want %v (single cycle)", artTitles(out), want)
 		}
 		if out.Total != 2 {
@@ -758,7 +744,7 @@ func TestArtListQueryFold(t *testing.T) {
 		// Total stays the full match count on every page, while the cursor
 		// skips the non-matching entries between two matches.
 		p1 := artRun(t, &ArtCmd{Limit: 2, Query: "cafe"})
-		if want := []string{"cafe latte", "Le Café noir"}; !artEqualStrs(artTitles(p1), want) {
+		if want := []string{"cafe latte", "Le Café noir"}; !slices.Equal(artTitles(p1), want) {
 			t.Fatalf("page1 titles = %v, want %v", artTitles(p1), want)
 		}
 		if p1.Total != 4 {
@@ -769,7 +755,7 @@ func TestArtListQueryFold(t *testing.T) {
 		}
 
 		p2 := artRun(t, &ArtCmd{Limit: 2, Query: "cafe", Before: p1.NextCursor})
-		if want := []string{"CAFETERIA hours", "Café society"}; !artEqualStrs(artTitles(p2), want) {
+		if want := []string{"CAFETERIA hours", "Café society"}; !slices.Equal(artTitles(p2), want) {
 			t.Fatalf("page2 titles = %v, want %v", artTitles(p2), want)
 		}
 		if p2.Total != 4 {
@@ -784,18 +770,18 @@ func TestArtListQueryFold(t *testing.T) {
 
 	t.Run("query composed with the window and paging", func(t *testing.T) {
 		p1 := artRun(t, &ArtCmd{Limit: 1, Query: "cafe", Since: artStamp(1)})
-		if want := []string{"cafe latte"}; !artEqualStrs(artTitles(p1), want) {
+		if want := []string{"cafe latte"}; !slices.Equal(artTitles(p1), want) {
 			t.Fatalf("page1 titles = %v, want %v", artTitles(p1), want)
 		}
 		if p1.Total != 3 {
 			t.Errorf("page1 Total = %d, want 3 (window matches)", p1.Total)
 		}
 		p2 := artRun(t, &ArtCmd{Limit: 1, Query: "cafe", Since: artStamp(1), Before: p1.NextCursor})
-		if want := []string{"Le Café noir"}; !artEqualStrs(artTitles(p2), want) {
+		if want := []string{"Le Café noir"}; !slices.Equal(artTitles(p2), want) {
 			t.Fatalf("page2 titles = %v, want %v", artTitles(p2), want)
 		}
 		p3 := artRun(t, &ArtCmd{Limit: 1, Query: "cafe", Since: artStamp(1), Before: p2.NextCursor})
-		if want := []string{"CAFETERIA hours"}; !artEqualStrs(artTitles(p3), want) {
+		if want := []string{"CAFETERIA hours"}; !slices.Equal(artTitles(p3), want) {
 			t.Fatalf("page3 titles = %v, want %v", artTitles(p3), want)
 		}
 		// Paging never walks below the --since bound to reach "Café society".
@@ -825,7 +811,7 @@ func TestArtListQueryDanglingEntry(t *testing.T) {
 
 	out := artRun(t, &ArtCmd{Limit: 50, Query: "cafe"})
 	want := []string{"Le Café noir", "CAFETERIA hours", "Café society"}
-	if !artEqualStrs(artTitles(out), want) {
+	if !slices.Equal(artTitles(out), want) {
 		t.Errorf("titles = %v, want %v (the unreadable entry is a non-match)", artTitles(out), want)
 	}
 	if out.Total != 3 {

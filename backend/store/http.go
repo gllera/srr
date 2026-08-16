@@ -158,6 +158,17 @@ func drainClose(rc io.ReadCloser) {
 	rc.Close()
 }
 
+// statusErr classifies a response's status: nil for 2xx, else the verb-tagged
+// error every op reports. The 2xx window is a predicate four ops shared by
+// retyping it — the shape that drifts when one of them quietly starts
+// tolerating a 3xx.
+func statusErr(op string, u *url.URL, resp *http.Response) error {
+	if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+		return nil
+	}
+	return fmt.Errorf("http %s %s: %s", op, u.Redacted(), resp.Status)
+}
+
 func (d *HTTP) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	u := d.keyURL("read", key)
 	var body io.ReadCloser
@@ -177,9 +188,9 @@ func (d *HTTP) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 			drainClose(resp.Body)
 			return errMissing("key not found on "+u.Redacted()+":", key)
 		}
-		if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		if err := statusErr("get", u, resp); err != nil {
 			drainClose(resp.Body)
-			return fmt.Errorf("http get %s: %s", u.Redacted(), resp.Status)
+			return err
 		}
 		body = resp.Body
 		return nil
@@ -271,10 +282,7 @@ func (d *HTTP) put(ctx context.Context, key string, r io.Reader, ignoreExisting 
 		if resp.StatusCode == http.StatusPreconditionFailed && !ignoreExisting {
 			return fmt.Errorf("key %q already exists on %s: %w", key, u.Redacted(), os.ErrExist)
 		}
-		if resp.StatusCode < 200 || resp.StatusCode > 299 {
-			return fmt.Errorf("http put %s: %s", u.Redacted(), resp.Status)
-		}
-		return nil
+		return statusErr("put", u, resp)
 	}
 
 	if !ignoreExisting {
@@ -330,8 +338,8 @@ func (d *HTTP) Stat(ctx context.Context, key string) (int64, error) {
 			slog.Debug("db not found", "key", u.Redacted())
 			return errMissing("http head "+u.Redacted()+":", key)
 		}
-		if resp.StatusCode < 200 || resp.StatusCode > 299 {
-			return fmt.Errorf("http head %s: %s", u.Redacted(), resp.Status)
+		if err := statusErr("head", u, resp); err != nil {
+			return err
 		}
 		// A server that omits Content-Length reports -1; clamp to 0. That is a
 		// PRESENT object of unknown size, not an absent one — the 404/410 arm above
@@ -347,6 +355,25 @@ func (d *HTTP) Stat(ctx context.Context, key string) (int64, error) {
 
 func (d *HTTP) Rm(ctx context.Context, key string) error {
 	u := d.keyURL("delete", key)
+	err := d.rmOnce(ctx, u)
+	if err == nil {
+		return nil
+	}
+	// Rm is contractually silent on a missing key, but a server may answer
+	// DELETE on an absent key with 405/403 rather than 404 — without this
+	// probe every warn-only reclaim path (the GC sweeps, inbox reap, lease
+	// release, expiration's asset deletes) wedges forever against such a
+	// server. Only fs.ErrNotExist is proof of absence (Stat reads a missing
+	// Content-Length as a PRESENT object of unknown size); a key that is
+	// present, or whose presence we cannot determine, keeps the original error.
+	if _, exists, serr := StatOptional(ctx, d, key); serr == nil && !exists {
+		slog.Debug("delete refused on an absent key; treating as removed", "key", u.Redacted(), "error", err)
+		return nil
+	}
+	return err
+}
+
+func (d *HTTP) rmOnce(ctx context.Context, u *url.URL) error {
 	return withRetry(ctx, func(int) error {
 		req, err := d.newRequest(ctx, http.MethodDelete, u, nil)
 		if err != nil {
@@ -365,10 +392,7 @@ func (d *HTTP) Rm(ctx context.Context, key string) error {
 			slog.Debug("db not found", "key", u.Redacted())
 			return nil
 		}
-		if resp.StatusCode < 200 || resp.StatusCode > 299 {
-			return fmt.Errorf("http delete %s: %s", u.Redacted(), resp.Status)
-		}
-		return nil
+		return statusErr("delete", u, resp)
 	})
 }
 

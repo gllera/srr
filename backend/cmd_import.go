@@ -1,15 +1,17 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"io"
 	"os"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"text/tabwriter"
+
+	"golang.org/x/sync/errgroup"
 )
 
 type ImportCmd struct {
@@ -83,8 +85,8 @@ type importWalker struct {
 }
 
 func (iw *importWalker) walk(nodes []*OPMLNode, prefix, indent string, groupPath []string, importAll bool) ([]*Feed, error) {
-	sort.Slice(nodes, func(i, j int) bool {
-		return strings.ToLower(nodes[i].Name) < strings.ToLower(nodes[j].Name)
+	slices.SortFunc(nodes, func(a, b *OPMLNode) int {
+		return cmp.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name))
 	})
 
 	var result []*Feed
@@ -199,22 +201,22 @@ func resolveImportFeeds(ctx context.Context, feeds []*Feed, recipes map[string]R
 	resolved := make([]string, len(feeds))
 	errs := make([]error, len(feeds))
 
-	sem := make(chan struct{}, max(1, globals.Workers))
-	var wg sync.WaitGroup
+	// errgroup like every other bounded fan-out here, and deliberately NOT
+	// WithContext: a URL that fails to resolve is one skipped feed, never a
+	// reason to cancel the probes of its siblings (store.RmAll's shape).
+	var g errgroup.Group
+	g.SetLimit(max(1, globals.Workers))
 	for i, c := range feeds {
 		if !resolvesFeed(recipes, c.Recipe, c.Ingest) {
 			resolved[i] = c.URL // external ingest: stored as-is, never probed
 			continue
 		}
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(i int, url string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			resolved[i], errs[i] = resolveFeedURL(ctx, url)
-		}(i, c.URL)
+		g.Go(func() error {
+			resolved[i], errs[i] = resolveFeedURL(ctx, c.URL)
+			return nil
+		})
 	}
-	wg.Wait()
+	_ = g.Wait()
 
 	for i, c := range feeds {
 		if errs[i] != nil {
@@ -235,7 +237,7 @@ func resolveImportFeeds(ctx context.Context, feeds []*Feed, recipes map[string]R
 func resolveImportBatch(ctx context.Context, newFeeds []*Feed, recipe, tag *string) ([]*Feed, []importFailure, error) {
 	applyImportDefaults(newFeeds, recipe, tag)
 
-	recipes, err := importRecipes(ctx)
+	recipes, err := loadRecipes(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -248,9 +250,10 @@ func resolveImportBatch(ctx context.Context, newFeeds []*Feed, recipe, tag *stri
 	return kept, failed, nil
 }
 
-// importRecipes reads the db.gz recipes map (read-only, unlocked) so
-// resolveImportFeeds can resolve each feed's recipe to gate #feed discovery.
-func importRecipes(ctx context.Context) (map[string]Recipe, error) {
+// loadRecipes reads the db.gz recipes map (read-only, unlocked) — what every
+// caller that must resolve a recipe outside a write scope needs: import (to
+// gate #feed discovery per feed) and preview (to render one).
+func loadRecipes(ctx context.Context) (map[string]Recipe, error) {
 	var recipes map[string]Recipe
 	err := withDBCtx(ctx, false, func(_ context.Context, db *DB) error {
 		recipes = db.core.Recipes

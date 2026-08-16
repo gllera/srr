@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,12 +12,9 @@ import (
 // captureOutput captures printJSON output by substituting stdout.
 func captureOutput(t *testing.T, fn func()) string {
 	t.Helper()
-	var buf bytes.Buffer
-	old := stdout
-	stdout = &buf
-	defer func() { stdout = old }()
+	out := captureCmdStdout(t)
 	fn()
-	return buf.String()
+	return out.String()
 }
 
 func TestSyndicateLsEmpty(t *testing.T) {
@@ -316,7 +311,7 @@ func TestSyndicateRmFailsWhenPresentFileCannotBeRemoved(t *testing.T) {
 				}
 			}
 
-			db.Backend = &rmFailBackend{Backend: db.Backend, key: tc.failKey}
+			db.Backend = &faultBackend{Backend: db.Backend, rm: failKey(tc.failKey)}
 			if err := removeOutFeed(ctx, db, "foo"); err == nil {
 				t.Fatalf("removeOutFeed returned nil though present %s could not be deleted", tc.failKey)
 			}
@@ -343,7 +338,7 @@ func TestSyndicateSetFailsWhenOldFormatFileCannotBeReaped(t *testing.T) {
 		t.Fatalf("seed rss: %v", err)
 	}
 
-	db.Backend = &rmFailBackend{Backend: db.Backend, key: "out/foo.rss"}
+	db.Backend = &faultBackend{Backend: db.Backend, rm: failKey("out/foo.rss")}
 	in := OutFeed{Name: "foo", Format: "json", Tags: []string{"news"}, Limit: 50}
 	if err := setOutFeed(ctx, db, in); err == nil {
 		t.Fatal("setOutFeed returned nil though the present out/foo.rss could not be reaped")
@@ -365,7 +360,7 @@ func TestSyndicateRmToleratesRmErrorOnAbsentFile(t *testing.T) {
 	}
 
 	// The sibling .json was never written; make its delete error anyway.
-	db.Backend = &rmFailBackend{Backend: db.Backend, key: "out/foo.json"}
+	db.Backend = &faultBackend{Backend: db.Backend, rm: failKey("out/foo.json")}
 	if err := removeOutFeed(ctx, db, "foo"); err != nil {
 		t.Fatalf("removeOutFeed wedged on an absent sibling: %v", err)
 	}
@@ -517,21 +512,6 @@ func TestSyndicateSetTransitions(t *testing.T) {
 const testRSSDoc = `<rss version="2.0"><channel><title>t</title></channel></rss>`
 const testJSONFeedDoc = `{"version":"https://jsonfeed.org/version/1.1","title":"t","items":[]}`
 
-// readStoreKey reads a raw store object for assertions.
-func readStoreKey(t *testing.T, db *DB, key string) string {
-	t.Helper()
-	rc, err := db.Get(ctx, key)
-	if err != nil {
-		t.Fatalf("read %s: %v", key, err)
-	}
-	defer rc.Close()
-	data, err := io.ReadAll(rc)
-	if err != nil {
-		t.Fatalf("read %s: %v", key, err)
-	}
-	return string(data)
-}
-
 func seedExternalOut(t *testing.T, format string) (*DB, *DBCore) {
 	t.Helper()
 	db, c, _ := setupTestDB(t)
@@ -547,7 +527,7 @@ func TestSyndicatePushRSSFromStdin(t *testing.T) {
 	if err := (&SyndicatePushCmd{Name: "x", in: strings.NewReader(testRSSDoc)}).Run(); err != nil {
 		t.Fatalf("push: %v", err)
 	}
-	if got := readStoreKey(t, db, "out/x.rss"); got != testRSSDoc {
+	if got := string(readKey(t, db.Backend, "out/x.rss")); got != testRSSDoc {
 		t.Errorf("out/x.rss = %q, want the pushed payload verbatim", got)
 	}
 }
@@ -561,7 +541,7 @@ func TestSyndicatePushJSONFromFile(t *testing.T) {
 	if err := (&SyndicatePushCmd{Name: "x", Path: path}).Run(); err != nil {
 		t.Fatalf("push: %v", err)
 	}
-	if got := readStoreKey(t, db, "out/x.json"); got != testJSONFeedDoc {
+	if got := string(readKey(t, db.Backend, "out/x.json")); got != testJSONFeedDoc {
 		t.Errorf("out/x.json = %q, want the pushed payload verbatim", got)
 	}
 }
@@ -570,7 +550,7 @@ func TestSyndicatePushJSONFromFile(t *testing.T) {
 // and it must not modify db.gz.
 func TestSyndicatePushLockFreeAndDBUntouched(t *testing.T) {
 	db, _ := seedExternalOut(t, "rss")
-	before := readStoreKey(t, db, "db.gz")
+	before := string(readKey(t, db.Backend, "db.gz"))
 
 	locker, err := NewDB(ctx, true)
 	if err != nil {
@@ -581,7 +561,7 @@ func TestSyndicatePushLockFreeAndDBUntouched(t *testing.T) {
 	if err := (&SyndicatePushCmd{Name: "x", in: strings.NewReader(testRSSDoc)}).Run(); err != nil {
 		t.Fatalf("push under a held lock: %v", err)
 	}
-	if after := readStoreKey(t, db, "db.gz"); after != before {
+	if after := string(readKey(t, db.Backend, "db.gz")); after != before {
 		t.Error("push modified db.gz")
 	}
 }

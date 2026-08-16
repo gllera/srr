@@ -65,14 +65,12 @@ func TestCreateFeedLockContention(t *testing.T) {
 func TestCreateFeedProbesOutsideLock(t *testing.T) {
 	_, _, dir := setupTestDB(t)
 	lock := dir + "/" + dbLockKey
-	prev := resolveFeedURL
-	t.Cleanup(func() { resolveFeedURL = prev })
 	var lockedDuringProbe bool
-	resolveFeedURL = func(_ context.Context, u string) (string, error) {
+	stubResolve(t, func(_ context.Context, u string) (string, error) {
 		_, err := os.Stat(lock)
 		lockedDuringProbe = err == nil
 		return u, nil
-	}
+	})
 
 	body := `{"title":"X","url":"https://x.example/feed"}`
 	rec := doReq(t, newMux(), "POST", "/api/feeds", body)

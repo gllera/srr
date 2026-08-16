@@ -35,11 +35,7 @@ func expectedEnv(scheme, name string) string {
 // is no need to print what the reader can derive. A hand-rolled tag that breaks
 // the convention is still returned so it stays visible.
 func globalEnvName(f reflect.StructField) string {
-	env := f.Tag.Get("env")
-	if env == expectedEnv("", fieldName(f)) {
-		return ""
-	}
-	return env
+	return unlessConventional("", f, f.Tag.Get("env"))
 }
 
 // backendEnvNameFor returns a per-field env-name deriver for a backend config
@@ -48,12 +44,19 @@ func globalEnvName(f reflect.StructField) string {
 // matches expectedEnv and is suppressed — backend env names are never printed.
 func backendEnvNameFor(scheme string) func(reflect.StructField) string {
 	return func(f reflect.StructField) string {
-		env := store.EnvName(scheme, f)
-		if env == expectedEnv(scheme, fieldName(f)) {
-			return ""
-		}
-		return env
+		return unlessConventional(scheme, f, store.EnvName(scheme, f))
 	}
+}
+
+// unlessConventional drops an env name the reader can derive from the field
+// name itself, keeping a hand-rolled one that breaks the convention visible.
+// The two derivers differ only in where the raw name comes from — a kong tag
+// or store.EnvName — so the suppression rule lives here once.
+func unlessConventional(scheme string, f reflect.StructField, env string) string {
+	if env == expectedEnv(scheme, fieldName(f)) {
+		return ""
+	}
+	return env
 }
 
 // printSecretScope prints one scope's secrets, sorted by name, with values
@@ -75,7 +78,6 @@ func printSecretEntries(indent string) {
 
 func (o *ConfigCmd) Run() error {
 	gv := reflect.ValueOf(*globals)
-	gt := gv.Type()
 
 	// Every registered backend section is printed regardless of the active store
 	// scheme, so unset (inactive-backend) configs are discoverable too. Sorted
@@ -119,11 +121,8 @@ func (o *ConfigCmd) Run() error {
 		}
 	}
 
-	for i := range gt.NumField() {
-		if fieldName(gt.Field(i)) == o.Key {
-			fmt.Println(gv.Field(i).Interface())
-			return nil
-		}
+	if printFieldNamed(gv, o.Key) {
+		return nil
 	}
 
 	// A whole backend section by scheme ("s3"), then a single field ("s3.region"),
@@ -135,13 +134,8 @@ func (o *ConfigCmd) Run() error {
 
 	if scheme, field, ok := strings.Cut(o.Key, "."); ok {
 		if cfg, ok := cfgs[scheme]; ok {
-			cv := reflect.ValueOf(cfg).Elem()
-			ct := cv.Type()
-			for i := range ct.NumField() {
-				if fieldName(ct.Field(i)) == field {
-					fmt.Println(cv.Field(i).Interface())
-					return nil
-				}
+			if printFieldNamed(reflect.ValueOf(cfg).Elem(), field) {
+				return nil
 			}
 		}
 	}

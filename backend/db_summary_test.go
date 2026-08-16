@@ -58,7 +58,7 @@ func TestSyncIdxSummaryAtBoundary(t *testing.T) {
 	}
 
 	sum := decompressGz(t, filepath.Join(dir, db.core.Names.hsumKey()))
-	pack0 := decompressGz(t, filepath.Join(dir, "idx/0.gz"))
+	pack0 := decompressGz(t, filepath.Join(dir, posK(&db.core, idxSeries, 0)))
 	// The idx header is variable-length: the fixed prefix plus numSlots×4
 	// cumulative counts, dense up to the high-water feed id.
 	numSlots := int(binary.LittleEndian.Uint32(pack0[idxStateSize:]))
@@ -67,7 +67,7 @@ func TestSyncIdxSummaryAtBoundary(t *testing.T) {
 		t.Fatalf("summary size = %d, want %d", len(sum), headerSize)
 	}
 	if !bytes.Equal(sum, pack0[:headerSize]) {
-		t.Error("summary bytes != idx/0.gz header bytes")
+		t.Error("summary bytes != finalized idx pack 0's header bytes")
 	}
 }
 

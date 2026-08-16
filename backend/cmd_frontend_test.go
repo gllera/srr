@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -226,32 +225,6 @@ func TestFrontendUpdateTagUsesTagEndpoint(t *testing.T) {
 	}
 }
 
-// failPutBackend fails AtomicPut for one chosen key, simulating an upload error.
-type failPutBackend struct {
-	store.Backend
-	failKey string
-}
-
-func (f *failPutBackend) AtomicPut(ctx context.Context, key string, r io.Reader, meta store.ObjectMeta) error {
-	if key == f.failKey {
-		return fmt.Errorf("injected upload failure for %q", key)
-	}
-	return f.Backend.AtomicPut(ctx, key, r, meta)
-}
-
-// failRmBackend fails Rm for one chosen key, simulating a delete error.
-type failRmBackend struct {
-	store.Backend
-	failKey string
-}
-
-func (f *failRmBackend) Rm(ctx context.Context, key string) error {
-	if key == f.failKey {
-		return fmt.Errorf("injected delete failure for %q", key)
-	}
-	return f.Backend.Rm(ctx, key)
-}
-
 func TestFrontendUpdateNoDanglingAcrossCrash(t *testing.T) {
 	// Mimic a crashed prior run: the pending superset manifest tracks a
 	// partially-uploaded file from an abandoned version, and that file is present.
@@ -280,7 +253,7 @@ func TestFrontendUpdateUploadFailureAborts(t *testing.T) {
 	putKey(t, inner, "old.11111111.js", "OLD")
 	putKey(t, inner, "index.html", "OLD")
 	putKey(t, inner, sitemapKey, "index.html\nold.11111111.js\n")
-	be := &failPutBackend{Backend: inner, failKey: "new.22222222.js"}
+	be := &faultBackend{Backend: inner, put: failKey("new.22222222.js")}
 
 	ghServer(t, "v2", map[string]string{"./index.html": "NEW", "./new.22222222.js": "NEW"})
 	err := frontendUpdate(context.Background(), be, http.DefaultClient, "test/repo", "")
@@ -304,7 +277,7 @@ func TestFrontendUpdateFailedDeleteStaysTracked(t *testing.T) {
 	putKey(t, inner, "stubborn.11111111.js", "OLD")
 	putKey(t, inner, "index.html", "OLD")
 	putKey(t, inner, sitemapKey, "index.html\nstubborn.11111111.js\n")
-	be := &failRmBackend{Backend: inner, failKey: "stubborn.11111111.js"}
+	be := &faultBackend{Backend: inner, rm: failKey("stubborn.11111111.js")}
 
 	ghServer(t, "v2", map[string]string{"./index.html": "NEW"})
 	if err := frontendUpdate(context.Background(), be, http.DefaultClient, "test/repo", ""); err != nil {
@@ -356,13 +329,6 @@ func TestFrontendUpdateListFindsUntrackedOrphans(t *testing.T) {
 	}
 }
 
-// noListStore is a store that cannot enumerate itself (plain HTTP's shape).
-type noListStore struct{ store.Backend }
-
-func (noListStore) List(context.Context, string) ([]string, error) {
-	return nil, errors.ErrUnsupported
-}
-
 // A store that cannot list keeps exactly the sitemap reconcile it always had —
 // the fallback is silent, not an error.
 func TestFrontendUpdateWithoutListUsesSitemap(t *testing.T) {
@@ -370,7 +336,7 @@ func TestFrontendUpdateWithoutListUsesSitemap(t *testing.T) {
 	putKey(t, inner, "old.11111111.js", "OLD")
 	putKey(t, inner, "untracked.33333333.js", "ORPHAN") // unfindable without List
 	putKey(t, inner, sitemapKey, "old.11111111.js\n")
-	be := noListStore{inner}
+	be := noListBackend{inner}
 
 	ghServer(t, "v2", map[string]string{"./index.html": "NEW"})
 	if err := frontendUpdate(context.Background(), be, http.DefaultClient, "test/repo", ""); err != nil {

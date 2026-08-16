@@ -3,17 +3,16 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
-
-	"srr/store"
 )
 
 func readManifest(t *testing.T, dir string, m int) Manifest {
@@ -161,9 +160,9 @@ func TestManifestMirrorsDBCoreState(t *testing.T) {
 		t.Fatal(err)
 	}
 	gz, _ := gzip.NewReader(bytes.NewReader(raw))
-	body, _ := readAllString(gz)
+	body, _ := io.ReadAll(gz)
 	for _, leaked := range []string{`"recipe"`, `"pipe"`, `"dd"`, `"dt"`, `"ingest"`} {
-		if strings.Contains(body, leaked) {
+		if bytes.Contains(body, []byte(leaked)) {
 			t.Errorf("manifest leaks backend-only config key %s: %s", leaked, body)
 		}
 	}
@@ -245,6 +244,123 @@ func TestManifestNamesRoundTrip(t *testing.T) {
 	}
 }
 
+// TestManifestSingletonsRouteEverywhere pins every singleton field of
+// ManifestNames against the FIVE places that must each know about it: the two
+// JSON halves, clone(), keys() — the GC's reachable set and --validate's M4
+// existence probe — and manifestNamesOf, the lenient shim the GC reads OLDER
+// generations through.
+//
+// The last one is why this test exists rather than a comment. A singleton's
+// {"s":…,"stem":…} parses cleanly as a series row naming ZERO objects, so a
+// field added to the struct and forgotten there does not fail, warn, or read as
+// unrecognised: the object simply stops being reachable, drops below the next
+// window's stem floor, and is swept while a generation naming it is still
+// restorable. The blast radius is a 404 on live readers, K generations after
+// the mistake.
+//
+// Every assertion is driven by REFLECTION over the struct, so a new singleton
+// is covered without anyone remembering to extend a list here.
+func TestManifestSingletonsRouteEverywhere(t *testing.T) {
+	full := newManifestNames()
+	full.Series[idxSeries] = &SeriesNames{Stems: []int{0, 1}, Tail: 1}
+	full.Deltas = DeltaNames{Series: dataSeries, Stems: []int{10, 11}}
+	full.Seen = &StemRef{Series: seenSeries, Stem: 20}
+	full.ARef = &StemRef{Series: seenSeries, Stem: 21}
+	full.HSum = &SummaryName{Series: idxSeries, Stem: 22, Covers: 1}
+	full.SSum = &SummaryName{Series: metaSeries, Stem: 23, Covers: 1}
+	full.Next = map[string]int{idxSeries: 24, dataSeries: 12, seenSeries: 22}
+
+	rt := reflect.TypeOf(*full)
+	// Series and Next are not object names: Series is the positional table the
+	// singletons sit beside, Next the stem counters. Everything else names an
+	// object and must reach all five places.
+	skip := map[string]bool{"Series": true, "Next": true}
+	var singletons []int
+	for i := range rt.NumField() {
+		f := rt.Field(i)
+		if !f.IsExported() || skip[f.Name] {
+			continue
+		}
+		if reflect.ValueOf(*full).Field(i).IsZero() {
+			t.Fatalf("ManifestNames.%s is a new singleton this test does not populate — add it to the fixture above", f.Name)
+		}
+		singletons = append(singletons, i)
+		if !slices.Contains(manifestSingletonKeys, strings.ToLower(f.Name)) {
+			// Not a hard rule (the field name need not equal the wire key), but
+			// every singleton so far spells it that way; a miss here is worth a
+			// look before it becomes a collision the MarshalJSON guard misses.
+			t.Logf("note: ManifestNames.%s has no same-named entry in manifestSingletonKeys", f.Name)
+		}
+	}
+
+	// clone() must deep-copy every one of them.
+	if got := full.clone(); !reflect.DeepEqual(got, full) {
+		t.Errorf("clone() dropped a singleton:\n got %+v\nwant %+v", got, full)
+	}
+	// Both JSON halves must carry every one of them.
+	body, err := json.Marshal(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back ManifestNames
+	if err := json.Unmarshal(body, &back); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(&back, full) {
+		t.Errorf("the JSON round trip dropped a singleton:\n got %+v\nwant %+v", &back, full)
+	}
+
+	// keys() and manifestNamesOf must each name every one of them. Proven per
+	// field by zeroing it and requiring the key set to shrink — an assertion no
+	// forgotten field can pass.
+	manifestOf := func(n *ManifestNames) []string {
+		doc, err := json.Marshal(struct {
+			Names *ManifestNames `json:"names"`
+		}{n})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _, err := manifestNamesOf(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	missing := func(before, after []string) []string {
+		gone := map[string]bool{}
+		for _, k := range before {
+			gone[k] = true
+		}
+		for _, k := range after {
+			delete(gone, k)
+		}
+		return slices.Sorted(maps.Keys(gone))
+	}
+	baseKeys, baseShim := full.keys(), manifestOf(full)
+	for _, i := range singletons {
+		cut := full.clone()
+		reflect.ValueOf(cut).Elem().Field(i).SetZero()
+		name := rt.Field(i).Name
+		if got := missing(baseKeys, cut.keys()); len(got) == 0 {
+			t.Errorf("keys() names nothing for %s — the GC's reachable set and --validate's M4 probe both skip it", name)
+		}
+		if got := missing(baseShim, manifestOf(cut)); len(got) == 0 {
+			t.Errorf("manifestNamesOf names nothing for %s — the GC sweeps it out from under an in-window generation", name)
+		}
+	}
+
+	// And the shim harvests a singleton it has never been taught, which is what
+	// makes the failure above a test failure rather than a deletion: a future
+	// sidecar's row must not read as "a series naming nothing".
+	future, _, err := manifestNamesOf([]byte(`{"names":{"future_sidecar":{"s":"seen","stem":99}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(future, "seen/99.gz") {
+		t.Errorf("manifestNamesOf dropped an unknown singleton: %v", future)
+	}
+}
+
 // TestManifestNamesRejectsSeriesNameCollision pins the one ambiguity the flat
 // encoding could have: a pack series called "deltas"/"seen"/"hsum"/"ssum"/"next".
 func TestManifestNamesRejectsSeriesNameCollision(t *testing.T) {
@@ -291,7 +407,7 @@ func TestPublishManifestRejectsRacingWriter(t *testing.T) {
 	}
 	peer.Close(ctx)
 
-	err = db.publishManifest(ctx)
+	err = db.publishManifest(ctx, db.buildManifest(0))
 	if err == nil {
 		t.Fatal("expected the racing publish to fail loudly")
 	}
@@ -318,7 +434,7 @@ func TestPublishManifestOverwritesOrphan(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := db.publishManifest(ctx); err != nil {
+	if err := db.publishManifest(ctx, db.buildManifest(0)); err != nil {
 		t.Fatalf("retry after a crash must overwrite the unreferenced orphan: %v", err)
 	}
 	if core.ManifestNum != 2 {
@@ -491,13 +607,6 @@ func TestGCListModeNeverTouchesOtherClasses(t *testing.T) {
 	}
 }
 
-// noListBackend is a store that cannot enumerate itself — plain HTTP's shape.
-type noListBackend struct{ store.Backend }
-
-func (noListBackend) List(context.Context, string) ([]string, error) {
-	return nil, errors.ErrUnsupported
-}
-
 // TestGCFallsBackToDrainWithoutList pins the other half of the two-shape sweep:
 // a backend that declines to list keeps the low-water drain it always had —
 // superseded generations still reclaim, one manifest read at a time — and the
@@ -565,7 +674,7 @@ func TestGCOrphanFailureKeepsTheLowWaterAndTheSuccesses(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db.Backend = &failRmBackend{Backend: db.Backend, failKey: stubborn}
+	db.Backend = &faultBackend{Backend: db.Backend, rm: failKey(stubborn)}
 	if err := db.GC(ctx, 0); err == nil {
 		t.Fatal("GC = nil, want the refused delete reported")
 	}
@@ -604,7 +713,7 @@ func TestGCGenerationFailureHoldsTheLowWater(t *testing.T) {
 	}
 
 	// The drain shape, so the generation loop is the one issuing the deletes.
-	db.Backend = noListBackend{&failRmBackend{Backend: db.Backend, failKey: gen2Idx}}
+	db.Backend = noListBackend{&faultBackend{Backend: db.Backend, rm: failKey(gen2Idx)}}
 	if err := db.GC(ctx, 0); err == nil {
 		t.Fatal("GC = nil, want the refused delete reported")
 	}
@@ -661,8 +770,7 @@ func TestConfigSidecarWrittenOnConfigChangeOnly(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		s, err := readAllString(gz)
-		return []byte(s), err
+		return io.ReadAll(gz)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -721,7 +829,7 @@ func TestMigrationFromLegacyRoot(t *testing.T) {
 
 	// Rewrite the store into the pre-cutover shape: a v1 root carrying every
 	// legacy field, with the tail packs under their L<gen> names.
-	writeLegacyStore(t, dir, total)
+	writeLegacyStore(t, dir)
 
 	// A READ-ONLY session must resolve the derived names in memory and publish
 	// nothing.
@@ -791,7 +899,7 @@ func TestMigrationFromLegacyRoot(t *testing.T) {
 // writeLegacyStore rewrites an already-built v2 store into the pre-cutover
 // shape: a v1 db.gz carrying every retired field, the tail packs renamed to
 // their L<gen> spellings, a db/ snapshot, and a seen ping/pong slot.
-func writeLegacyStore(t *testing.T, dir string, total int) {
+func writeLegacyStore(t *testing.T, dir string) {
 	t.Helper()
 	db, err := NewDB(ctx, false)
 	if err != nil {
@@ -851,22 +959,7 @@ func writeLegacyStore(t *testing.T, dir string, total int) {
 	if err := os.WriteFile(filepath.Join(dir, dbFileKey), body, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_ = total
 }
-
-func readAllString(r interface{ Read([]byte) (int, error) }) (string, error) {
-	var b bytes.Buffer
-	if _, err := b.ReadFrom(readerFunc(r.Read)); err != nil {
-		return "", err
-	}
-	return b.String(), nil
-}
-
-type readerFunc func([]byte) (int, error)
-
-func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
-
-var _ = context.Background
 
 // TestStaleConfigEntrySweptBeforeIDReuse pins the §6.4 fix: a config.gz entry
 // for a feed the manifest no longer has (what a removal's lost post-flip config

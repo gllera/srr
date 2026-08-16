@@ -2,14 +2,10 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
-
-	"srr/store"
 )
 
 // A version-1 seen.gz body (pre-bg-relocation) must still parse: the bg tail is
@@ -414,19 +410,6 @@ func TestNewDBCorruptSeenFallsBackToEmpty(t *testing.T) {
 	if db2.seen == nil || len(db2.seen.m) != 0 {
 		t.Errorf("corrupt %s: pool not empty, want empty fallback", seenLegacyKey)
 	}
-}
-
-// rmFailBackend fails Rm for one key, leaving every other operation intact.
-type rmFailBackend struct {
-	store.Backend
-	key string
-}
-
-func (f *rmFailBackend) Rm(ctx context.Context, key string) error {
-	if key == f.key {
-		return errors.New("injected rm failure")
-	}
-	return f.Backend.Rm(ctx, key)
 }
 
 // titleHash folds the title (foldSearchText) before hashing, so titles that

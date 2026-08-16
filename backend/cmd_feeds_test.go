@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -56,6 +55,19 @@ func wantErr(t *testing.T, err error, substr string) {
 // strPtr returns a pointer to its argument; useful for CLI flag-pointer fields.
 func strPtr(s string) *string { return &s }
 
+// stubResolve installs a subscribe-time discovery stub for one test and
+// restores the previous one afterwards. Restoring matters: resolveFeedURL is a
+// PRODUCTION var, so a test that leaves its own stub behind hands it to
+// whatever runs next — which passes under `go test ./...` (the next setup
+// helper re-stubs it) and behaves differently under `-run` in isolation, the
+// worst shape a test failure can have.
+func stubResolve(t *testing.T, fn func(context.Context, string) (string, error)) {
+	t.Helper()
+	prev := resolveFeedURL
+	t.Cleanup(func() { resolveFeedURL = prev })
+	resolveFeedURL = fn
+}
+
 // stubPassthroughResolve makes subscribe-time discovery an offline no-op (URL
 // stored verbatim), so cmd tests that aren't about resolution never hit the
 // network. Installed by the setup helpers; resolution tests override it.
@@ -67,10 +79,10 @@ func stubPassthroughResolve() {
 // repoints a homepage URL to its <link rel=alternate> feed.
 func TestFeedAddStoresDiscoveredURL(t *testing.T) {
 	setupEmptyDB(t)
-	resolveFeedURL = func(_ context.Context, _ string) (string, error) {
+	stubResolve(t, func(_ context.Context, _ string) (string, error) {
 		return "https://blog.example.com/feed.xml", nil
-	}
-	cmd := &AddCmd{Title: strPtr("News"), URL: strPtr("https://blog.example.com/")}
+	})
+	cmd := &AddCmd{Title: "News", URL: "https://blog.example.com/"}
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -83,10 +95,10 @@ func TestFeedAddStoresDiscoveredURL(t *testing.T) {
 // feed add hard-fails and stores nothing when no feed can be resolved.
 func TestFeedAddHardFailsWhenUnresolvable(t *testing.T) {
 	setupEmptyDB(t)
-	resolveFeedURL = func(_ context.Context, _ string) (string, error) {
+	stubResolve(t, func(_ context.Context, _ string) (string, error) {
 		return "", fmt.Errorf("no feed found")
-	}
-	wantErr(t, (&AddCmd{Title: strPtr("News"), URL: strPtr("https://blog.example.com/")}).Run(), "no feed found")
+	})
+	wantErr(t, (&AddCmd{Title: "News", URL: "https://blog.example.com/"}).Run(), "no feed found")
 	if n := len(reopenDB(t).Feeds()); n != 0 {
 		t.Errorf("Feeds len = %d, want 0 (add rejected)", n)
 	}
@@ -100,11 +112,11 @@ func TestFeedAddSkipsResolveForExternalIngest(t *testing.T) {
 		t.Fatalf("recipe set: %v", err)
 	}
 	called := false
-	resolveFeedURL = func(_ context.Context, rawURL string) (string, error) {
+	stubResolve(t, func(_ context.Context, rawURL string) (string, error) {
 		called = true
 		return rawURL, nil
-	}
-	cmd := &AddCmd{Title: strPtr("X"), URL: strPtr("https://x.example/"), Recipe: strPtr("ext")}
+	})
+	cmd := &AddCmd{Title: "X", URL: "https://x.example/", Recipe: "ext"}
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -119,11 +131,11 @@ func TestFeedAddSkipsResolveForExternalIngest(t *testing.T) {
 // to fail the test if it is ever called.
 func TestFeedAddRejectsUnknownRecipe(t *testing.T) {
 	setupEmptyDB(t)
-	resolveFeedURL = func(_ context.Context, _ string) (string, error) {
+	stubResolve(t, func(_ context.Context, _ string) (string, error) {
 		t.Error("resolveFeedURL must not run when the recipe ref is invalid")
 		return "", fmt.Errorf("network probe should not have happened")
-	}
-	cmd := &AddCmd{Title: strPtr("X"), URL: strPtr("https://x.example.com/feed"), Recipe: strPtr("nope")}
+	})
+	cmd := &AddCmd{Title: "X", URL: "https://x.example.com/feed", Recipe: "nope"}
 	wantErr(t, cmd.Run(), `recipe "nope" does not exist`)
 	if n := len(reopenDB(t).Feeds()); n != 0 {
 		t.Errorf("Feeds len = %d, want 0 (add rejected)", n)
@@ -133,9 +145,9 @@ func TestFeedAddRejectsUnknownRecipe(t *testing.T) {
 // feed upd -u resolves the new URL and stores the discovered feed URL.
 func TestFeedUpdResolvesNewURL(t *testing.T) {
 	setupFeedsTestDB(t)
-	resolveFeedURL = func(_ context.Context, _ string) (string, error) {
+	stubResolve(t, func(_ context.Context, _ string) (string, error) {
 		return "https://a.example.com/discovered.xml", nil
-	}
+	})
 	if err := (&UpdCmd{ID: 0, URL: strPtr("https://a.example.com/homepage")}).Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -148,9 +160,9 @@ func TestFeedUpdResolvesNewURL(t *testing.T) {
 // unresolvable.
 func TestFeedUpdHardFailsWhenUnresolvable(t *testing.T) {
 	setupFeedsTestDB(t)
-	resolveFeedURL = func(_ context.Context, _ string) (string, error) {
+	stubResolve(t, func(_ context.Context, _ string) (string, error) {
 		return "", fmt.Errorf("no feed found")
-	}
+	})
 	wantErr(t, (&UpdCmd{ID: 0, URL: strPtr("https://a.example.com/homepage")}).Run(), "no feed found")
 	if got := reopenDB(t).Feeds()[0].URL; got != "https://a.example.com/feed" {
 		t.Errorf("URL = %q, want unchanged after failed resolve", got)
@@ -161,10 +173,10 @@ func TestFeedUpdHardFailsWhenUnresolvable(t *testing.T) {
 func TestFeedUpdSkipsResolveWhenURLUnchanged(t *testing.T) {
 	setupFeedsTestDB(t)
 	called := false
-	resolveFeedURL = func(_ context.Context, u string) (string, error) {
+	stubResolve(t, func(_ context.Context, u string) (string, error) {
 		called = true
 		return u, nil
-	}
+	})
 	if err := (&UpdCmd{ID: 0, URL: strPtr("https://a.example.com/feed")}).Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -183,9 +195,9 @@ func setupEmptyDB(t *testing.T) {
 func TestFeedAddCreates(t *testing.T) {
 	setupEmptyDB(t)
 	cmd := &AddCmd{
-		Title: strPtr("News"),
-		URL:   strPtr("https://feed.example.com/rss"),
-		Tag:   strPtr("tech"),
+		Title: "News",
+		URL:   "https://feed.example.com/rss",
+		Tag:   "tech",
 	}
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -212,26 +224,26 @@ func TestFeedAddCreates(t *testing.T) {
 
 func TestFeedAddRequiresTitle(t *testing.T) {
 	setupEmptyDB(t)
-	cmd := &AddCmd{URL: strPtr("https://feed.example.com/rss")}
+	cmd := &AddCmd{URL: "https://feed.example.com/rss"}
 	wantErr(t, cmd.Run(), "title is required")
 }
 
 func TestFeedAddRequiresURL(t *testing.T) {
 	setupEmptyDB(t)
-	cmd := &AddCmd{Title: strPtr("News")}
+	cmd := &AddCmd{Title: "News"}
 	wantErr(t, cmd.Run(), "--url is required")
 }
 
 func TestFeedAddRejectsInvalidURL(t *testing.T) {
 	setupEmptyDB(t)
-	cmd := &AddCmd{Title: strPtr("News"), URL: strPtr("not-a-url")}
+	cmd := &AddCmd{Title: "News", URL: "not-a-url"}
 	wantErr(t, cmd.Run(), "invalid url")
 }
 
 func TestRmCmdRemovesFeeds(t *testing.T) {
 	setupFeedsTestDB(t)
 	// Add a second feed so we can verify only the requested one is removed.
-	if err := (&AddCmd{Title: strPtr("Other"), URL: strPtr("https://z.example.com/feed")}).Run(); err != nil {
+	if err := (&AddCmd{Title: "Other", URL: "https://z.example.com/feed"}).Run(); err != nil {
 		t.Fatalf("AddCmd: %v", err)
 	}
 	feeds := reopenDB(t).Feeds()
@@ -262,12 +274,9 @@ func TestLsCmdEmitsRecipe(t *testing.T) {
 			t.Fatalf("Run: %v", err)
 		}
 	}
-	mustRun(&AddCmd{Title: strPtr("A"), URL: strPtr("https://a.example.com/feed"), Recipe: strPtr("read")})
+	mustRun(&AddCmd{Title: "A", URL: "https://a.example.com/feed", Recipe: "read"})
 
-	var out bytes.Buffer
-	saved := stdout
-	stdout = &out
-	t.Cleanup(func() { stdout = saved })
+	out := captureCmdStdout(t)
 
 	if err := (&LsCmd{formatFlag: formatFlag{Format: "json"}}).Run(); err != nil {
 		t.Fatalf("LsCmd: %v", err)
@@ -285,13 +294,10 @@ func TestLsCmdFiltersByTag(t *testing.T) {
 			t.Fatalf("Run: %v", err)
 		}
 	}
-	mustRun(&AddCmd{Title: strPtr("A"), URL: strPtr("https://a.example.com/feed"), Tag: strPtr("tech")})
-	mustRun(&AddCmd{Title: strPtr("B"), URL: strPtr("https://b.example.com/feed"), Tag: strPtr("news")})
+	mustRun(&AddCmd{Title: "A", URL: "https://a.example.com/feed", Tag: "tech"})
+	mustRun(&AddCmd{Title: "B", URL: "https://b.example.com/feed", Tag: "news"})
 
-	var out bytes.Buffer
-	saved := stdout
-	stdout = &out
-	t.Cleanup(func() { stdout = saved })
+	out := captureCmdStdout(t)
 
 	if err := (&LsCmd{Tag: strPtr("tech"), formatFlag: formatFlag{Format: "json"}}).Run(); err != nil {
 		t.Fatalf("LsCmd: %v", err)
@@ -498,12 +504,11 @@ func TestFeedUpdRejectsUnknownPipeBuiltin(t *testing.T) {
 func TestFeedAddValidatesBeforeProbe(t *testing.T) {
 	setupEmptyDB(t)
 	called := false
-	resolveFeedURL = func(_ context.Context, u string) (string, error) {
+	stubResolve(t, func(_ context.Context, u string) (string, error) {
 		called = true
 		return u, nil
-	}
-	badExpire := -5
-	cmd := &AddCmd{Title: strPtr("X"), URL: strPtr("https://x.example/feed"), Expire: &badExpire}
+	})
+	cmd := &AddCmd{Title: "X", URL: "https://x.example/feed", Expire: -5}
 	if err := cmd.Run(); err == nil {
 		t.Fatal("feed add -e -5 should be rejected")
 	}
@@ -529,11 +534,11 @@ func TestFeedUpdRejectsUnknownIngestBuiltin(t *testing.T) {
 func TestFeedAddSkipsResolveForFeedIngestOverride(t *testing.T) {
 	setupEmptyDB(t)
 	called := false
-	resolveFeedURL = func(_ context.Context, rawURL string) (string, error) {
+	stubResolve(t, func(_ context.Context, rawURL string) (string, error) {
 		called = true
 		return rawURL, nil
-	}
-	cmd := &AddCmd{Title: strPtr("X"), URL: strPtr("https://x.example/"), Ingest: strPtr("my-fetcher")}
+	})
+	cmd := &AddCmd{Title: "X", URL: "https://x.example/", Ingest: "my-fetcher"}
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -553,10 +558,7 @@ func TestFeedUpdIDTooLarge(t *testing.T) {
 
 func TestFeedShowFound(t *testing.T) {
 	setupFeedsTestDB(t)
-	var out bytes.Buffer
-	saved := stdout
-	stdout = &out
-	t.Cleanup(func() { stdout = saved })
+	out := captureCmdStdout(t)
 
 	if err := (&ShowCmd{ID: 0, formatFlag: formatFlag{Format: "json"}}).Run(); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -580,10 +582,7 @@ func TestFeedShowMissing(t *testing.T) {
 
 func TestFeedShowYAML(t *testing.T) {
 	setupFeedsTestDB(t)
-	var out bytes.Buffer
-	saved := stdout
-	stdout = &out
-	t.Cleanup(func() { stdout = saved })
+	out := captureCmdStdout(t)
 
 	if err := (&ShowCmd{ID: 0, formatFlag: formatFlag{Format: "yaml"}}).Run(); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -600,18 +599,15 @@ func TestFeedShowEmitsRecipe(t *testing.T) {
 		t.Fatalf("recipe set: %v", err)
 	}
 	if err := (&AddCmd{
-		Title:  strPtr("P"),
-		URL:    strPtr("https://p.example.com/feed"),
-		Recipe: strPtr("read"),
+		Title:  "P",
+		URL:    "https://p.example.com/feed",
+		Recipe: "read",
 	}).Run(); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 	ch := reopenDB(t).Feeds()[0]
 
-	var out bytes.Buffer
-	saved := stdout
-	stdout = &out
-	t.Cleanup(func() { stdout = saved })
+	out := captureCmdStdout(t)
 
 	if err := (&ShowCmd{ID: ch.id, formatFlag: formatFlag{Format: "json"}}).Run(); err != nil {
 		t.Fatalf("ShowCmd: %v", err)
@@ -1052,7 +1048,7 @@ func TestNormalizeFeedRejectsHugeExpireDays(t *testing.T) {
 // articles must be refused outright.
 func TestFeedRmDryRunAndForceGuard(t *testing.T) {
 	setupEmptyDB(t)
-	if err := (&AddCmd{Title: strPtr("News"), URL: strPtr("https://n.example.com/rss"), Tag: strPtr("world")}).Run(); err != nil {
+	if err := (&AddCmd{Title: "News", URL: "https://n.example.com/rss", Tag: "world"}).Run(); err != nil {
 		t.Fatal(err)
 	}
 	// Give it stored articles (the irreversible case) via the db directly.
@@ -1113,7 +1109,7 @@ func TestFeedRmDryRunAndForceGuard(t *testing.T) {
 // guard exists for the irreversible case only.
 func TestFeedRmEmptyFeedNeedsNoForce(t *testing.T) {
 	setupEmptyDB(t)
-	if err := (&AddCmd{Title: strPtr("Fresh"), URL: strPtr("https://f.example.com/rss")}).Run(); err != nil {
+	if err := (&AddCmd{Title: "Fresh", URL: "https://f.example.com/rss"}).Run(); err != nil {
 		t.Fatal(err)
 	}
 	if err := (&RmCmd{ID: []int{0}}).Run(); err != nil {

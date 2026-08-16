@@ -290,6 +290,27 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = enc.Encode(v)
 }
 
+// writeErrStatus is the JSON error envelope, stated once. writeErr classifies
+// an error into a status and comes here; the handlers that already KNOW their
+// status (serve_sync's, which distinguish ours-vs-yours failures writeErr
+// deliberately cannot) call it directly instead of respelling the shape.
+func writeErrStatus(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// mutateStore is the shape every plain mutating endpoint has: run fn in a
+// LOCKED store scope on the request's context, answer the classified error, or
+// answer {"status": …}. The handlers that return a projection of what they
+// wrote (the feed save) keep their own tail; these are the ones whose entire
+// body was the ladder.
+func mutateStore(w http.ResponseWriter, r *http.Request, status string, fn func(context.Context, *DB) error) {
+	if err := withDBCtx(r.Context(), true, fn); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": status})
+}
+
 // msgLockContention is the operator-facing message when a mutating request can't
 // acquire the store lock. Shared with the SSE fetch handler, which can't go
 // through writeErr after its 200 headers are sent.
@@ -299,7 +320,7 @@ const msgLockContention = "store is locked by another srr process — the fetch 
 // "not found" → 404, everything else → 400. The message is always echoed.
 func writeErr(w http.ResponseWriter, err error) {
 	if errors.Is(err, os.ErrExist) {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": msgLockContention})
+		writeErrStatus(w, http.StatusConflict, msgLockContention)
 		return
 	}
 	// 404 is decided STRUCTURALLY: the true not-found producers (FeedByID) wrap
@@ -307,7 +328,7 @@ func writeErr(w http.ResponseWriter, err error) {
 	// error wording — a validation message that happens to contain "not found"
 	// can't silently become a 404, and a renamed message can't stop being one.
 	if errors.Is(err, fs.ErrNotExist) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		writeErrStatus(w, http.StatusNotFound, err.Error())
 		return
 	}
 	// Default 400: handler errors here are overwhelmingly validation rejections
@@ -315,7 +336,7 @@ func writeErr(w http.ResponseWriter, err error) {
 	// The rarer store-IO/open failure also surfaces as 400 but always carries its
 	// message in the body; without typed errors (repo forbids custom sentinels)
 	// validation and infra errors aren't distinguishable at this shared helper.
-	writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+	writeErrStatus(w, http.StatusBadRequest, err.Error())
 }
 
 // maxRequestBody caps every admin-API request body. The GUI is loopback/

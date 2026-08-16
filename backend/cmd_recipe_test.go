@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"slices"
 	"strings"
@@ -116,10 +115,7 @@ func TestRecipeLsAndShow(t *testing.T) {
 		t.Fatalf("recipe set: %v", err)
 	}
 
-	var out bytes.Buffer
-	saved := stdout
-	stdout = &out
-	t.Cleanup(func() { stdout = saved })
+	out := captureCmdStdout(t)
 
 	if err := (&RecipeLsCmd{formatFlag: formatFlag{Format: "json"}}).Run(); err != nil {
 		t.Fatalf("RecipeLsCmd: %v", err)

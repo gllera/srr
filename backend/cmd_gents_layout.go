@@ -133,8 +133,10 @@ func binGoElem(f binField) string {
 	return binWire(f)
 }
 
-// binOrder is the encoding/binary byte-order value for a field.
-func binOrder(binField) string { return "binary.LittleEndian" }
+// binOrderLE is the byte order every field uses: planLayout hard-errors on
+// anything but binLE (binCheckWidth), so this was a function whose parameter
+// could not change its answer.
+const binOrderLE = "binary.LittleEndian"
 
 // binVerb is the encoding/binary method suffix for a width ("Uint32").
 func binVerb(f binField) string { return "Uint" + fmt.Sprint(f.Width*8) }
@@ -155,28 +157,34 @@ func binConvOut(f binField, expr string) string {
 	return fmt.Sprintf("%s(%s)", binWire(f), expr)
 }
 
-// binGeoParams renders the geometry parameter list ("numSlots int, packSize int").
-func (p *layoutPlan) binGeoParams(extra ...binField) string {
-	var out []string
+// geoList renders the geometry list: every geo field, then the extras, each
+// named by name() and suffixed by decl (" int", ": number", or nothing for an
+// argument list). ONE function because the four renderers below must agree on
+// the ORDER — a params list and its args list disagreeing is an emitted parser
+// that reads the right bytes into the wrong variables, and that is not a
+// compile error on either side.
+func (p *layoutPlan) geoList(name func(binField) string, decl string, extra []binField) string {
+	out := make([]string, 0, len(p.geo)+len(extra))
 	for _, f := range p.geo {
-		out = append(out, binLowerFirst(f.Name)+" int")
+		out = append(out, name(f)+decl)
 	}
 	for _, f := range extra {
-		out = append(out, f.From+" int")
+		out = append(out, f.From+decl)
 	}
 	return strings.Join(out, ", ")
 }
 
+func binGeoName(f binField) string { return binLowerFirst(f.Name) }
+func tsGeoName(f binField) string  { return f.TS }
+
+// binGeoParams renders the geometry parameter list ("numSlots int, packSize int").
+func (p *layoutPlan) binGeoParams(extra ...binField) string {
+	return p.geoList(binGeoName, " int", extra)
+}
+
 // binGeoArgs renders the matching argument list ("numSlots, packSize").
 func (p *layoutPlan) binGeoArgs(extra ...binField) string {
-	var out []string
-	for _, f := range p.geo {
-		out = append(out, binLowerFirst(f.Name))
-	}
-	for _, f := range extra {
-		out = append(out, f.From)
-	}
-	return strings.Join(out, ", ")
+	return p.geoList(binGeoName, "", extra)
 }
 
 // binHeaderEndExpr is the header-length expression ("12 + numSlots*4").
@@ -209,7 +217,7 @@ func emitGoLayout(b *strings.Builder, p *layoutPlan) {
 			"\tif len(buf) < %d {\n\t\treturn 0, fmt.Errorf(\"short header: %%d < %%d\", len(buf), %d)\n\t}\n"+
 			"\treturn %s, nil\n}\n",
 			x, f.Name, f.TS, f.Doc, x, f.Name, p.prefix, p.prefix,
-			binConvIn(f, fmt.Sprintf("%s.%s(buf[%d:])", binOrder(f), binVerb(f), p.scalarOff[f.Name])))
+			binConvIn(f, fmt.Sprintf("%s.%s(buf[%d:])", binOrderLE, binVerb(f), p.scalarOff[f.Name])))
 	}
 
 	fmt.Fprintf(b, "\n// %sHeaderSpan is the byte length of the variable-length header starting at\n"+
@@ -258,17 +266,17 @@ func emitGoLayout(b *strings.Builder, p *layoutPlan) {
 		x, p.binGeoArgs(entry))
 	for _, f := range p.scalars {
 		fmt.Fprintf(b, "\traw.%s = %s\n", f.Name,
-			binConvIn(f, fmt.Sprintf("%s.%s(buf[%d:])", binOrder(f), binVerb(f), p.scalarOff[f.Name])))
+			binConvIn(f, fmt.Sprintf("%s.%s(buf[%d:])", binOrderLE, binVerb(f), p.scalarOff[f.Name])))
 	}
 	for _, f := range p.vars {
 		fmt.Fprintf(b, "\traw.%s = make([]%s, %s)\n\tfor i := range raw.%s {\n\t\traw.%s[i] = %s\n\t}\n",
 			f.Name, binGoElem(f), binLowerFirst(f.From), f.Name, f.Name,
-			binConvIn(f, fmt.Sprintf("%s.%s(buf[%d+i*%d:])", binOrder(f), binVerb(f), p.prefix, f.Width)))
+			binConvIn(f, fmt.Sprintf("%s.%s(buf[%d+i*%d:])", binOrderLE, binVerb(f), p.prefix, f.Width)))
 	}
 	fmt.Fprintf(b, "\toff := %sHeaderEnd(%s)\n\traw.%s = make([]%s, %s)\n"+
 		"\tfor i := range raw.%s {\n\t\traw.%s[i] = %s\n\t}\n",
 		x, p.binGeoArgs(), entry.Name, binGoElem(entry), entry.From, entry.Name, entry.Name,
-		binConvIn(entry, fmt.Sprintf("%s.%s(buf[off+i*%d:])", binOrder(entry), binVerb(entry), entry.Width)))
+		binConvIn(entry, fmt.Sprintf("%s.%s(buf[off+i*%d:])", binOrderLE, binVerb(entry), entry.Width)))
 	fmt.Fprintf(b, "\traw.%s = %sDecodeFooter(buf[%sEntriesEnd(%s):])\n\treturn raw, nil\n}\n",
 		footer.Name, x, x, p.binGeoArgs(entry))
 
@@ -277,7 +285,7 @@ func emitGoLayout(b *strings.Builder, p *layoutPlan) {
 		"func %sDecodeFooter(footer []byte) []%s {\n"+
 		"\tout := make([]%s, len(footer)/%d)\n\tfor i := range out {\n\t\tout[i] = %s\n\t}\n\treturn out\n}\n",
 		x, x, binGoElem(footer), binGoElem(footer), footer.Width,
-		binConvIn(footer, fmt.Sprintf("%s.%s(footer[i*%d:])", binOrder(footer), binVerb(footer), footer.Width)))
+		binConvIn(footer, fmt.Sprintf("%s.%s(footer[i*%d:])", binOrderLE, binVerb(footer), footer.Width)))
 
 	// Encoders. A scalar that another field's count comes from is NOT a
 	// parameter: it is len(that field), so an encoder cannot state a count the
@@ -305,23 +313,23 @@ func emitGoLayout(b *strings.Builder, p *layoutPlan) {
 				}
 			}
 		}
-		fmt.Fprintf(b, "\tdst = %s.Append%s(dst, %s)\n", binOrder(f), binVerb(f), binConvOut(f, val))
+		fmt.Fprintf(b, "\tdst = %s.Append%s(dst, %s)\n", binOrderLE, binVerb(f), binConvOut(f, val))
 	}
 	for _, f := range p.vars {
 		fmt.Fprintf(b, "\tfor _, v := range %s {\n\t\tdst = %s.Append%s(dst, %s)\n\t}\n",
-			binLowerFirst(f.Name), binOrder(f), binVerb(f), binConvOut(f, "v"))
+			binLowerFirst(f.Name), binOrderLE, binVerb(f), binConvOut(f, "v"))
 	}
 	b.WriteString("\treturn dst\n}\n")
 
 	fmt.Fprintf(b, "\n// %sAppendEntry appends one entry to dst.\nfunc %sAppendEntry(dst []byte, %s %s) []byte {\n"+
 		"\treturn %s.Append%s(dst, %s)\n}\n",
-		x, x, entry.One, binGoElem(entry), binOrder(entry), binVerb(entry), binConvOut(entry, entry.One))
+		x, x, entry.One, binGoElem(entry), binOrderLE, binVerb(entry), binConvOut(entry, entry.One))
 
 	fmt.Fprintf(b, "\n// %sAppendFooter appends the whole footer to dst.\n"+
 		"func %sAppendFooter(dst []byte, %s []%s) []byte {\n"+
 		"\tfor _, v := range %s {\n\t\tdst = %s.Append%s(dst, %s)\n\t}\n\treturn dst\n}\n",
 		x, x, binLowerFirst(footer.Name), binGoElem(footer), binLowerFirst(footer.Name),
-		binOrder(footer), binVerb(footer), binConvOut(footer, "v"))
+		binOrderLE, binVerb(footer), binConvOut(footer, "v"))
 }
 
 // tsReadExpr renders a little-endian element read. Width 2 is assembled from
@@ -339,25 +347,11 @@ func tsReadExpr(f binField, bytes, view, off string) string {
 func tsArray(f binField) string { return fmt.Sprintf("Uint%dArray", f.Width*8) }
 
 func (p *layoutPlan) tsGeoParams(extra ...binField) string {
-	var out []string
-	for _, f := range p.geo {
-		out = append(out, f.TS+": number")
-	}
-	for _, f := range extra {
-		out = append(out, f.From+": number")
-	}
-	return strings.Join(out, ", ")
+	return p.geoList(tsGeoName, ": number", extra)
 }
 
 func (p *layoutPlan) tsGeoArgs(extra ...binField) string {
-	var out []string
-	for _, f := range p.geo {
-		out = append(out, f.TS)
-	}
-	for _, f := range extra {
-		out = append(out, f.From)
-	}
-	return strings.Join(out, ", ")
+	return p.geoList(tsGeoName, "", extra)
 }
 
 // tsHeaderEndExpr is the header-length expression in TS spacing.

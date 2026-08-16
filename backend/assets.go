@@ -9,12 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -73,6 +73,9 @@ type assetFetcher struct {
 	// post-cycle age sweep (sweepAssetCache). Empty falls back to the OS temp
 	// dir (bare newAssetFetcher callers).
 	procDir string
+
+	// roots memoizes cacheDir -> its symlink-resolved real path; see cacheRoot.
+	roots sync.Map
 
 	// seen memoizes source-content-hash -> resolved store key for this run, so a
 	// marker reused across a feed's articles (or across feeds) skips the repeat
@@ -298,10 +301,7 @@ type capWriter struct {
 }
 
 func (w *capWriter) Write(p []byte) (int, error) {
-	if room := w.max - int64(len(w.buf)); room > 0 {
-		if room > int64(len(p)) {
-			room = int64(len(p))
-		}
+	if room := min(w.max-int64(len(w.buf)), int64(len(p))); room > 0 {
 		w.buf = append(w.buf, p[:room]...)
 	}
 	return len(p), nil
@@ -334,6 +334,23 @@ func (w *capWriter) Write(p []byte) (int, error) {
 // each stored object exactly once. (A leader that bails on its own ctx before
 // the shared body finishes leaves that upload unattributed — its feed is failing
 // anyway, and the next fetch dedups against the stored object.)
+// cacheRoot resolves a cache dir's symlinks once per run. The containment
+// check runs per asset REFERENCE while the dir itself is a run constant, so
+// this was three syscalls per reference for one unchanging answer. Keyed by
+// the dir (UploadCacheRef takes it as a parameter, so "there is only one" is
+// not this type's to assume); failures are deliberately not memoized.
+func (a *assetFetcher) cacheRoot(dir string) (string, error) {
+	if v, ok := a.roots.Load(dir); ok {
+		return v.(string), nil
+	}
+	root, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", err
+	}
+	a.roots.Store(dir, root)
+	return root, nil
+}
+
 func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname string) (string, int64, error) {
 	if localname == "" {
 		return "", 0, fmt.Errorf("empty asset reference: %w", errNotAsset)
@@ -354,7 +371,7 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 	// Containment: resolve symlinks on both sides and confirm the file stays
 	// under the cache dir, so neither a "../" reference nor a symlinked path
 	// component can point the upload at an arbitrary file.
-	root, err := filepath.EvalSymlinks(cacheDir)
+	root, err := a.cacheRoot(cacheDir)
 	if err != nil {
 		return "", 0, fmt.Errorf("resolve cache dir: %w", err)
 	}
@@ -507,13 +524,14 @@ func (a *assetFetcher) resolveAndUpload(ctx context.Context, full, localname str
 	// stored asset and an HTTP store that omits Content-Length both report 0 and
 	// are both present. That ambiguity is what used to force a second,
 	// body-carrying Get on EVERY first upload of every asset; it is gone.
-	switch _, err := a.be.Stat(ctx, key); {
-	case err == nil:
+	stored, err := store.Exists(ctx, a.be, key)
+	if err != nil {
+		return "", 0, fmt.Errorf("check asset %q: %w", key, err)
+	}
+	if stored {
 		slog.Debug("asset already stored, skipping process+upload", "asset", localname, "key", key)
 		a.seen.Store(sum, key)
 		return key, 0, nil
-	case !errors.Is(err, fs.ErrNotExist):
-		return "", 0, fmt.Errorf("check asset %q: %w", key, err)
 	}
 	slog.Debug("asset store miss, processing+uploading", "asset", localname, "key", key)
 
@@ -652,13 +670,7 @@ type peekResult struct {
 // capped-stdout hardening: a hung transcoder can't wedge the worker and runaway
 // output can't OOM it.
 func (a *assetFetcher) runProcess(ctx context.Context, full, localname string) (assetPayload, assetMeta, bool) {
-	hasOutput := false
-	for _, f := range a.proc {
-		if strings.Contains(f, outputToken) {
-			hasOutput = true
-			break
-		}
-	}
+	hasOutput := slices.ContainsFunc(a.proc, func(f string) bool { return strings.Contains(f, outputToken) })
 
 	// {output} mode: a fresh staging file the command writes its result to,
 	// under <cache-dir>/_processed (procDir; OS temp dir when unset). The

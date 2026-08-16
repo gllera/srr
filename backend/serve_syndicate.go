@@ -12,23 +12,13 @@ func putSyndicate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	entry.Name = r.PathValue("name") // the path is the authority for the name
-	err := withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
+	mutateStore(w, r, "ok", func(ctx context.Context, db *DB) error {
 		return setOutFeed(ctx, db, entry)
 	})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func deleteSyndicate(w http.ResponseWriter, r *http.Request) {
-	err := withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
+	mutateStore(w, r, "deleted", func(ctx context.Context, db *DB) error {
 		return removeOutFeed(ctx, db, r.PathValue("name"))
 	})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

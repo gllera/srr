@@ -1,8 +1,8 @@
 package main
 
 import (
+	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,6 +21,7 @@ import (
 
 	"srr/ingest"
 	"srr/mod"
+	"srr/store"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -175,24 +175,27 @@ func (f feedFilter) apply(all map[int]*Feed) (selected []*Feed, warnings []strin
 		}
 		return false
 	}
-	for _, t := range f.Tag {
-		if !tagExists(t) {
-			warnings = append(warnings, fmt.Sprintf("--tag %q matched no feeds", t))
+	// One warning rule per selector, over two tables rather than four loops, so
+	// a fifth selector is a row and the wording cannot drift between the
+	// include and exclude halves of the same axis.
+	for _, sel := range []struct {
+		flag string
+		tags []string
+	}{{"--tag", f.Tag}, {"--exclude-tag", f.ExcludeTag}} {
+		for _, t := range sel.tags {
+			if !tagExists(t) {
+				warnings = append(warnings, fmt.Sprintf("%s %q matched no feeds", sel.flag, t))
+			}
 		}
 	}
-	for _, id := range f.Feed {
-		if _, ok := all[id]; !ok {
-			warnings = append(warnings, fmt.Sprintf("--feed %d matched no feeds", id))
-		}
-	}
-	for _, t := range f.ExcludeTag {
-		if !tagExists(t) {
-			warnings = append(warnings, fmt.Sprintf("--exclude-tag %q matched no feeds", t))
-		}
-	}
-	for _, id := range f.ExcludeFeed {
-		if _, ok := all[id]; !ok {
-			warnings = append(warnings, fmt.Sprintf("--exclude-feed %d matched no feeds", id))
+	for _, sel := range []struct {
+		flag string
+		ids  []int
+	}{{"--feed", f.Feed}, {"--exclude-feed", f.ExcludeFeed}} {
+		for _, id := range sel.ids {
+			if _, ok := all[id]; !ok {
+				warnings = append(warnings, fmt.Sprintf("%s %d matched no feeds", sel.flag, id))
+			}
 		}
 	}
 	if len(selected) == 0 {
@@ -279,21 +282,9 @@ func (o *FetchCmd) spoolSlot() (string, error) {
 
 // validSpoolName keeps a producer name inside one store key segment — the name
 // is operator-supplied and lands in a store key, so it must not be able to
-// escape the inbox/ prefix.
-func validSpoolName(name string) bool {
-	if name == "" || name == "." || name == ".." {
-		return false
-	}
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-		case r == '-', r == '_', r == '.':
-		default:
-			return false
-		}
-	}
-	return true
-}
+// escape the inbox/ prefix. Same grammar as every other operator name that
+// lands in a key (validKeySegment).
+func validSpoolName(name string) bool { return validKeySegment(name) }
 
 // backoffActive gates the dormancy backoff to the unattended full-set loop:
 // one-shot runs (Interval == 0), the GUI single-feed path (o.only, which
@@ -318,10 +309,7 @@ func targetInterval(ch *Feed, now, base, maxT int64) int64 {
 	if t < base {
 		return base
 	}
-	if t > maxT {
-		return maxT
-	}
-	return t
+	return min(t, maxT)
 }
 
 // retryInterval is a failing feed's retry cadence: the loop base doubled once
@@ -329,17 +317,11 @@ func targetInterval(ch *Feed, now, base, maxT int64) int64 {
 // the shift can't run away). Never below base — a failing feed must not be
 // polled more eagerly than a healthy one.
 func retryInterval(streak int, base, maxT int64) int64 {
-	if streak > 10 {
-		streak = 10
-	}
-	t := base << streak
+	t := base << min(streak, 10)
 	if t <= 0 || t > maxT { // t <= 0 == shift overflow
 		t = maxT
 	}
-	if t < base {
-		return base
-	}
-	return t
+	return max(t, base)
 }
 
 // filterDue keeps the feeds whose target interval has elapsed since their last
@@ -683,7 +665,6 @@ func newFetchClient(workers int) *http.Client {
 // locked write phase still reports on (notify, asset counters, the progress
 // line, the cache dir for the post-commit sweep).
 type fetchResults struct {
-	feeds    []*Feed
 	fetched  []fetchedFeed
 	notify   *notifyState
 	assets   *assetFetcher
@@ -709,8 +690,8 @@ func checkStoreBusy(ctx context.Context, db *DB) error {
 	if err != nil || !present {
 		return nil
 	}
-	if held.Owner != "" && held.Owner != leaseOwner && !held.expired(leaseNow()) {
-		return fmt.Errorf("%s is held by %s until %s: %w", dbLockKey, held.Owner, held.until(), os.ErrExist)
+	if held.heldByPeer(leaseNow()) {
+		return held.heldErr(dbLockKey)
 	}
 	return nil
 }
@@ -774,12 +755,13 @@ func (o *FetchCmd) fetchPhase(ctx context.Context, db *DB, client *http.Client, 
 		// size: a spool that is present but reports 0 bytes (a store whose HEAD
 		// omits Content-Length) is still undrained, and treating it as drained
 		// would overwrite a cycle the consolidator has not folded in yet.
-		switch _, err := db.Stat(ctx, inboxKey(spoolName)); {
-		case err == nil:
+		undrained, err := store.Exists(ctx, db.Backend, inboxKey(spoolName))
+		if err != nil {
+			return fmt.Errorf("probe spool slot: %w", err)
+		}
+		if undrained {
 			slog.Info("previous spool not yet drained; skipping cycle", "producer", spoolName)
 			return nil
-		case !errors.Is(err, fs.ErrNotExist):
-			return fmt.Errorf("probe spool slot: %w", err)
 		}
 	} else if err := checkStoreBusy(ctx, db); err != nil {
 		return err
@@ -921,7 +903,6 @@ func (o *FetchCmd) fetchPhase(ctx context.Context, db *DB, client *http.Client, 
 		return nil
 	}
 
-	res.feeds = feeds
 	res.fetched = fetched
 	res.notify = notify
 	res.assets = assets
@@ -957,8 +938,8 @@ func (o *FetchCmd) commitPhase(ctx context.Context, db *DB, res *fetchResults) e
 	// same shape as the inbox drain above, including the per-feed dedup-stamp
 	// merge (single-threaded here, like the articles aggregation).
 	articles = append(articles, db.applyFetched(res.fetched, today)...)
-	sort.SliceStable(articles, func(i, j int) bool {
-		return articles[i].Published < articles[j].Published
+	slices.SortStableFunc(articles, func(a, b *Item) int {
+		return cmp.Compare(a.Published, b.Published)
 	})
 
 	// Age/cap/dead-feed eviction over the pool the folds above stamped. Runs
@@ -1096,22 +1077,24 @@ func (o *FetchCmd) commitPhase(ctx context.Context, db *DB, res *fetchResults) e
 
 	// Failure counting stays on the SNAPSHOT feeds — the fan-out's outcome is
 	// what this cycle did, whether or not every record survived the fold.
+	snapshot := make([]*Feed, len(res.fetched))
 	failed := 0
-	for _, ch := range res.feeds {
-		if ch.FetchError != "" {
+	for i, rec := range res.fetched {
+		snapshot[i] = rec.feed
+		if rec.feed.FetchError != "" {
 			failed++
 		}
 	}
 	res.progress.finish()
 	slog.Info("fetch complete",
 		"new_articles", len(articles),
-		"fetched", len(res.feeds)-failed,
+		"fetched", len(snapshot)-failed,
 		"failed", failed,
 	)
 	// Alert on the outages/recoveries this cycle produced. Last, after the
 	// batch is durable: an operator's notify command must never be able to
 	// affect what got stored. WithoutCancel so a shutdown mid-summary still
 	// delivers the alert the cycle already decided to send.
-	res.notify.fire(context.WithoutCancel(ctx), res.feeds)
+	res.notify.fire(context.WithoutCancel(ctx), snapshot)
 	return nil
 }

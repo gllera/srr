@@ -1263,3 +1263,17 @@ func TestNewDBFormatVersionGate(t *testing.T) {
 		t.Errorf("round-tripped Version = %d, want %d", db3.core.Version, dbFormatVersion)
 	}
 }
+
+// captureCmdStdout redirects the `stdout` command seam (not os.Stdout, which
+// utils_test.go's captureStdout covers) for one test, restoring it on cleanup.
+// Shared by every verb test that reads a command's printed output — the swap
+// was retyped at eight sites, one of which restored os.Stdout rather than
+// whatever it replaced.
+func captureCmdStdout(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var out bytes.Buffer
+	saved := stdout
+	stdout = &out
+	t.Cleanup(func() { stdout = saved })
+	return &out
+}

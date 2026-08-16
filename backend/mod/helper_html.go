@@ -1,6 +1,7 @@
 package mod
 
 import (
+	"iter"
 	"strings"
 	"unicode/utf8"
 
@@ -8,16 +9,38 @@ import (
 	"golang.org/x/net/html/atom"
 )
 
+// descend yields n and every node beneath it, in document order. It is the
+// recursion eight built-ins each wrote out by hand, where only the per-node
+// body ever differed. Callers that must skip a SUBTREE rather than stop
+// (extractText's script/style cut) still need their own walk: break here ends
+// the whole traversal, not one branch.
+func descend(n *html.Node) iter.Seq[*html.Node] {
+	return func(yield func(*html.Node) bool) {
+		var walk func(*html.Node) bool
+		walk = func(n *html.Node) bool {
+			if !yield(n) {
+				return false
+			}
+			for c := n.FirstChild; c != nil; c = c.NextSibling {
+				if !walk(c) {
+					return false
+				}
+			}
+			return true
+		}
+		walk(n)
+	}
+}
+
 // parseBodyHTML parses an article-content fragment into one synthetic <body>
 // node so callers can walk, remove, and reparent top-level nodes uniformly.
 // Returns nil when the fragment does not parse — the HTML-walking modules
 // treat that as "pass the content through untouched".
 func parseBodyHTML(content string) *html.Node {
-	nodes, err := html.ParseFragment(strings.NewReader(content), &html.Node{
-		Type:     html.ElementNode,
-		Data:     "body",
-		DataAtom: atom.Body,
-	})
+	// ParseBodyFragment owns the fragment CONTEXT node, and it decides how a
+	// top-level <td>/<li>/<tr> in feed content parses — so the session's DOM
+	// and the asset walks must not spell it twice and drift.
+	nodes, err := ParseBodyFragment(content)
 	if err != nil {
 		return nil
 	}

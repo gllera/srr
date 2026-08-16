@@ -183,8 +183,8 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 	if tc > 0 && names.series(dataSeries).Tail != core.NextPackID {
 		bad("M5 violated: the data tail sits at position %d but next_pid=%d", names.series(dataSeries).Tail, core.NextPackID)
 	}
-	if core.metaPacks()*metaPackSize+core.MetaTail > tc {
-		bad("meta coverage %d overclaims the consolidated region (tc=%d)", core.metaPacks()*metaPackSize+core.MetaTail, tc)
+	if core.metaCoverage() > tc {
+		bad("meta coverage %d overclaims the consolidated region (tc=%d)", core.metaCoverage(), tc)
 	}
 	if (len(names.Deltas.Stems) == 0) != (core.DeltaArticles == 0) {
 		bad("M6 violated: %d delta segment(s) named for %d delta article(s)", len(names.Deltas.Stems), core.DeltaArticles)
@@ -276,7 +276,7 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 	// root names, so a hole inside the window is a reader that cannot boot —
 	// and, because the GC's reachable set is read from the oldest in-window
 	// manifest, a hole also blinds the sweep.
-	from := max(core.GCManifest+1, core.ManifestNum-keepManifests+1, 1)
+	from := oldestLiveGen(core, keepManifests)
 	holes := 0
 	for g := from; g < core.ManifestNum; g++ {
 		if _, err := fetch(manifestKey(g)); err != nil {
@@ -438,7 +438,7 @@ func (o *InspectCmd) checkOrphans(fetch keyGetter, core *DBCore) int {
 	for _, k := range core.Names.keys() {
 		live[k] = true
 	}
-	from := max(core.GCManifest+1, core.ManifestNum-keepManifests+1, 1)
+	from := oldestLiveGen(core, keepManifests)
 	for g := from; g < core.ManifestNum; g++ {
 		buf, err := fetch(manifestKey(g))
 		if err != nil {
@@ -528,7 +528,7 @@ func (o *InspectCmd) checkChronPermanence(fetch keyGetter, core *DBCore) int {
 		return 0
 	}
 
-	from := max(core.GCManifest+1, core.ManifestNum-keepManifests+1, 1)
+	from := oldestLiveGen(core, keepManifests)
 	states := make([]chronState, 0, core.ManifestNum-from+1)
 	gens := make([]int, 0, core.ManifestNum-from+1)
 	for g := from; g < core.ManifestNum; g++ {

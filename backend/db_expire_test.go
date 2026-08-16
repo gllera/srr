@@ -1,13 +1,9 @@
 package main
 
 import (
-	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
-
-	"srr/store"
 )
 
 const (
@@ -390,15 +386,6 @@ func TestExpireSharedAssetDecrementsFirstReferent(t *testing.T) {
 	}
 }
 
-// statFailBackend fails every Stat, pinning the measure-then-delete order.
-type statFailBackend struct {
-	store.Backend
-}
-
-func (f *statFailBackend) Stat(context.Context, string) (int64, error) {
-	return 0, errors.New("injected stat failure")
-}
-
 // A Stat failure must abort the cycle BEFORE any asset is deleted (all
 // measuring happens up front), so the retry recomputes a clean window with
 // every object still in place — no decrement is ever lost to it.
@@ -415,7 +402,7 @@ func TestExpireStatFailureAbortsBeforeDeletes(t *testing.T) {
 		{Feed: ch, Title: "o1", Content: `<img src="` + key + `">`},
 	})
 
-	db.Backend = &statFailBackend{Backend: db.Backend}
+	db.Backend = &faultBackend{Backend: db.Backend, stat: failAll()}
 	if err := db.ExpireArticles(ctx, expNow); err == nil {
 		t.Fatal("want error from failing Stat")
 	}

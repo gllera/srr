@@ -12,6 +12,18 @@ import (
 	"time"
 )
 
+// withCdnURL sets the syndication CDN base for one test and restores the
+// PREVIOUS value, not the empty string: nineteen sites here restored to "" by
+// hand, which is the same mistake captureCmdStdout's comment records for
+// os.Stdout — correct only while every caller happens to start from the zero
+// value.
+func withCdnURL(t *testing.T, url string) {
+	t.Helper()
+	prev := globals.CdnURL
+	t.Cleanup(func() { globals.CdnURL = prev })
+	globals.CdnURL = url
+}
+
 // rssRoot is the minimal RSS 2.0 envelope for test parsing.
 type rssRoot struct {
 	XMLName xml.Name   `xml:"rss"`
@@ -82,8 +94,7 @@ func setupOutFeedDB(t *testing.T) (*DB, string, *Feed, *Feed) {
 // TestSyncOutFeedsNopWhenEmpty verifies SyncOutFeeds is a no-op when Out is nil.
 func TestSyncOutFeedsNopWhenEmpty(t *testing.T) {
 	db, dir, _, _ := setupOutFeedDB(t)
-	globals.CdnURL = "https://cdn.example.com"
-	defer func() { globals.CdnURL = "" }()
+	withCdnURL(t, "https://cdn.example.com")
 
 	if err := db.SyncOutFeeds(ctx); err != nil {
 		t.Fatalf("SyncOutFeeds (empty Out): %v", err)
@@ -97,7 +108,7 @@ func TestSyncOutFeedsNopWhenEmpty(t *testing.T) {
 // TestSyncOutFeedsNopWhenCdnURLUnset verifies SyncOutFeeds skips when CdnURL="".
 func TestSyncOutFeedsNopWhenCdnURLUnset(t *testing.T) {
 	db, dir, _, _ := setupOutFeedDB(t)
-	globals.CdnURL = "" // explicitly unset
+	withCdnURL(t, "") // explicitly unset
 
 	db.core.Out = []OutFeed{
 		{Name: "news", Format: "rss", Tags: []string{"news"}, Limit: 10},
@@ -126,8 +137,7 @@ func TestSyncOutFeedsReturnsErrorOnWriteFailure(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("PutArticles: %v", err)
 	}
-	globals.CdnURL = "https://cdn.example.com"
-	defer func() { globals.CdnURL = "" }()
+	withCdnURL(t, "https://cdn.example.com")
 
 	// Occupy "out" with a regular file so writing out/good.rss can't create the dir.
 	if err := os.WriteFile(filepath.Join(dir, "out"), nil, 0o644); err != nil {
@@ -156,8 +166,7 @@ func TestSyncOutFeedsUnsafeNameSkipped(t *testing.T) {
 		t.Fatalf("PutArticles: %v", err)
 	}
 
-	globals.CdnURL = "https://cdn.example.com"
-	defer func() { globals.CdnURL = "" }()
+	withCdnURL(t, "https://cdn.example.com")
 
 	// Inject an unsafe name directly into core.Out, bypassing the command gate.
 	// A local/SFTP backend would resolve "out/../../db.gz" outside out/ without
@@ -193,8 +202,7 @@ func TestSyncOutFeedsUnsafeNameSkipped(t *testing.T) {
 // matching tag), newest-first order, and Limit cap.
 func TestSyncOutFeedsRSS(t *testing.T) {
 	db, dir, _, _ := setupOutFeedDB(t)
-	globals.CdnURL = "https://cdn.example.com"
-	defer func() { globals.CdnURL = "" }()
+	withCdnURL(t, "https://cdn.example.com")
 
 	// "news" tag → feeds whose Tag == "news" → ch1 (id 0)
 	// Articles from ch1: Art1 (pub 1000), Art3 (pub 3000), Art5 (pub 5000)
@@ -243,8 +251,7 @@ func TestSyncOutFeedsRSS(t *testing.T) {
 // correct fields, newest-first order.
 func TestSyncOutFeedsJSONFeed(t *testing.T) {
 	db, dir, _, _ := setupOutFeedDB(t)
-	globals.CdnURL = "https://cdn.example.com"
-	defer func() { globals.CdnURL = "" }()
+	withCdnURL(t, "https://cdn.example.com")
 
 	// Use feed-id selector instead of tag, for ch2 (id 1): Art2, Art4.
 	db.core.Out = []OutFeed{
@@ -294,8 +301,7 @@ func TestSyncOutFeedsJSONFeed(t *testing.T) {
 // TestSyncOutFeedsTagAndFeedUnion verifies that tags and feeds are unioned.
 func TestSyncOutFeedsTagAndFeedUnion(t *testing.T) {
 	db, dir, _, _ := setupOutFeedDB(t)
-	globals.CdnURL = "https://cdn.example.com"
-	defer func() { globals.CdnURL = "" }()
+	withCdnURL(t, "https://cdn.example.com")
 
 	// Tags:"news" (ch1) ∪ FeedIDs:[1] (ch2) = all articles
 	db.core.Out = []OutFeed{
@@ -335,8 +341,7 @@ func TestSyncOutFeedsRSSEscapesHTML(t *testing.T) {
 		t.Fatalf("PutArticles: %v", err)
 	}
 
-	globals.CdnURL = "https://cdn.example.com"
-	defer func() { globals.CdnURL = "" }()
+	withCdnURL(t, "https://cdn.example.com")
 
 	db.core.Out = []OutFeed{
 		{Name: "esc", Format: "rss", Tags: []string{"esc"}, Limit: 10},
@@ -388,8 +393,7 @@ func TestSyncOutFeedsCDATATerminator(t *testing.T) {
 		t.Fatalf("PutArticles: %v", err)
 	}
 
-	globals.CdnURL = "https://cdn.example.com"
-	defer func() { globals.CdnURL = "" }()
+	withCdnURL(t, "https://cdn.example.com")
 
 	db.core.Out = []OutFeed{
 		{Name: "cdata", Format: "rss", Tags: []string{"cdata"}, Limit: 10},
@@ -473,8 +477,7 @@ func TestSyncOutFeedsWindowWidening(t *testing.T) {
 		t.Fatalf("from = %d, want >0: widen branch would not fire", from)
 	}
 
-	globals.CdnURL = "https://cdn.example.com"
-	defer func() { globals.CdnURL = "" }()
+	withCdnURL(t, "https://cdn.example.com")
 
 	db.core.Out = []OutFeed{
 		{Name: "rare", Format: "rss", Tags: []string{"rare"}, Limit: limit},
@@ -525,8 +528,7 @@ func TestSyncOutFeedsAtomSelfLink(t *testing.T) {
 		t.Fatalf("PutArticles: %v", err)
 	}
 
-	globals.CdnURL = "https://cdn.example.com"
-	defer func() { globals.CdnURL = "" }()
+	withCdnURL(t, "https://cdn.example.com")
 
 	db.core.Out = []OutFeed{
 		{Name: "atomtest", Format: "rss", Tags: []string{"atom"}, Limit: 10},
@@ -594,8 +596,7 @@ func TestSyncOutFeedsAbsoluteURLUnchanged(t *testing.T) {
 		t.Fatalf("PutArticles: %v", err)
 	}
 
-	globals.CdnURL = "https://cdn.example.com"
-	defer func() { globals.CdnURL = "" }()
+	withCdnURL(t, "https://cdn.example.com")
 
 	db.core.Out = []OutFeed{
 		{Name: "absfeed", Format: "rss", Tags: []string{"abs"}, Limit: 10},
@@ -662,8 +663,7 @@ func TestSyncOutFeedsSkipsExpired(t *testing.T) {
 	ch.AddIdx = 2
 	ch.Expired = 2
 
-	globals.CdnURL = "https://cdn.example.com"
-	defer func() { globals.CdnURL = "" }()
+	withCdnURL(t, "https://cdn.example.com")
 
 	db.core.Out = []OutFeed{
 		{Name: "exp", Format: "rss", Tags: []string{"exp"}, Limit: 10},
@@ -732,8 +732,7 @@ func TestSyncOutFeedsSkipsExpiredInWidenedWalk(t *testing.T) {
 	rare.AddIdx = 1
 	rare.Expired = 1
 
-	globals.CdnURL = "https://cdn.example.com"
-	defer func() { globals.CdnURL = "" }()
+	withCdnURL(t, "https://cdn.example.com")
 
 	db.core.Out = []OutFeed{
 		{Name: "rare", Format: "rss", Tags: []string{"rare"}, Limit: limit},
@@ -810,8 +809,7 @@ func TestOutFeedsSigChangesOnTag(t *testing.T) {
 // their own file in one call.
 func TestSyncOutFeedsMultipleOutputs(t *testing.T) {
 	db, dir, _, _ := setupOutFeedDB(t)
-	globals.CdnURL = "https://cdn.example.com"
-	defer func() { globals.CdnURL = "" }()
+	withCdnURL(t, "https://cdn.example.com")
 
 	db.core.Out = []OutFeed{
 		{Name: "news-rss", Format: "rss", Tags: []string{"news"}, Limit: 10},
@@ -847,8 +845,7 @@ func TestSyncOutFeedsLinklessGUID(t *testing.T) {
 		t.Fatalf("PutArticles: %v", err)
 	}
 
-	globals.CdnURL = "https://cdn.example.com"
-	defer func() { globals.CdnURL = "" }()
+	withCdnURL(t, "https://cdn.example.com")
 
 	db.core.Out = []OutFeed{
 		{Name: "rss", Format: "rss", Tags: []string{"micro"}, Limit: 10},
@@ -931,8 +928,7 @@ func TestSyncOutFeedsDatelessUsesFetchedAt(t *testing.T) {
 		t.Fatalf("PutArticles: %v", err)
 	}
 
-	globals.CdnURL = "https://cdn.example.com"
-	defer func() { globals.CdnURL = "" }()
+	withCdnURL(t, "https://cdn.example.com")
 
 	db.core.Out = []OutFeed{
 		{Name: "rss", Format: "rss", Tags: []string{"d"}, Limit: 10},
@@ -980,8 +976,7 @@ func TestSyncOutFeedsEmptyTagMatchesNothing(t *testing.T) {
 		t.Fatalf("PutArticles: %v", err)
 	}
 
-	globals.CdnURL = "https://cdn.example.com"
-	defer func() { globals.CdnURL = "" }()
+	withCdnURL(t, "https://cdn.example.com")
 
 	db.core.Out = []OutFeed{{Name: "empty", Format: "rss", Tags: []string{""}, Limit: 10}}
 	if err := db.SyncOutFeeds(ctx); err != nil {
@@ -1005,8 +1000,7 @@ func TestSyncOutFeedsNoMatchingFeedsSkips(t *testing.T) {
 		t.Fatalf("PutArticles: %v", err)
 	}
 
-	globals.CdnURL = "https://cdn.example.com"
-	defer func() { globals.CdnURL = "" }()
+	withCdnURL(t, "https://cdn.example.com")
 
 	// Only a tag selector (no explicit Feeds ids, which would populate the include
 	// set unconditionally) matching no feed → include stays empty → skip.
@@ -1023,8 +1017,7 @@ func TestSyncOutFeedsNoMatchingFeedsSkips(t *testing.T) {
 // owned. The managed sibling proves the cycle still ran.
 func TestSyncOutFeedsSkipsExternalEntries(t *testing.T) {
 	db, c, _ := setupTestDB(t)
-	globals.CdnURL = "https://cdn.example.com"
-	defer func() { globals.CdnURL = "" }()
+	withCdnURL(t, "https://cdn.example.com")
 	c.Feeds = map[int]*Feed{1: {id: 1, URL: "http://a", Tag: "news"}}
 	c.Out = []OutFeed{
 		{Name: "x", Format: "rss", External: true},
@@ -1057,7 +1050,7 @@ func TestSyncOutFeedsSkipsExternalEntries(t *testing.T) {
 // case — an idle cycle never rewrites anything.
 func TestSyncOutFeedsAllExternalIsNop(t *testing.T) {
 	db, c, _ := setupTestDB(t)
-	globals.CdnURL = "" // deliberately unset: must not matter
+	withCdnURL(t, "") // deliberately unset: must not matter
 	c.Out = []OutFeed{{Name: "x", Format: "rss", External: true}}
 
 	if err := db.SyncOutFeeds(ctx); err != nil {

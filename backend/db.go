@@ -13,6 +13,8 @@ import (
 	"os"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"srr/store"
 )
 
@@ -182,6 +184,59 @@ func gunzip(r io.Reader) ([]byte, error) {
 	return io.ReadAll(gz)
 }
 
+// readGzOptional is readGz for the objects whose absence is a legal state (the
+// getOptional set): (nil, nil) when the store genuinely does not have the key.
+// Every other error still propagates — in particular gzip damage, because a
+// present-but-corrupt object must never read as absent.
+func readGzOptional(ctx context.Context, b store.Backend, key string) ([]byte, error) {
+	rc, err := getOptional(ctx, b, key)
+	if rc == nil || err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	out, err := gunzip(rc)
+	if err != nil {
+		return nil, fmt.Errorf("decompress %s: %w", key, err)
+	}
+	return out, nil
+}
+
+// gatherOrdered runs fn for every k in [0, n) over a bounded worker pool and
+// returns the results in INDEX order — the shape every "read N small objects
+// whose concatenation or sequence is the answer" site in this backend needs:
+// the summary builders (one header per finalized pack), the delta-chain reader
+// (one object per live segment), the idx pack loader (one object per finalized
+// pack). Each of those was a serial loop whose length grows with total_art, so
+// each was N round-trips of pure latency against an object store — and two of
+// them run inside the locked write phase, against a lease whose TTL is a
+// correctness bound rather than headroom.
+//
+// The error returned is the LOWEST-index failure, not the first to happen:
+// these callers name the object in their message, so a deterministic one keeps
+// a failure reproducible and its wording stable. Results are written into
+// disjoint slots, so nothing here is shared but the backend, which every store
+// implementation already serves concurrently (RmAll and the asset fan-out
+// depend on it).
+func gatherOrdered(n int, fn func(k int) ([]byte, error)) ([][]byte, error) {
+	out := make([][]byte, n)
+	errs := make([]error, n)
+	var g errgroup.Group
+	g.SetLimit(rmParallel())
+	for k := range n {
+		g.Go(func() error {
+			out[k], errs[k] = fn(k)
+			return nil
+		})
+	}
+	_ = g.Wait() // every body returns nil; the per-index errors carry the answer
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 type DB struct {
 	store.Backend
 	core DBCore
@@ -252,6 +307,13 @@ type DB struct {
 	// whole chain from the store. nil until first load. See loadDeltaChain.
 	deltaMemo    *deltaChain
 	deltaMemoKey [2]int
+	// outCums / outCumsBuilt memoize outPackSkipper's parsed idx header
+	// summary per handle, so every sparse syndication output of one cycle
+	// shares a single summary read. Valid for the handle's lifetime: nothing
+	// republishes the summary between SyncIdxSummary (which runs before
+	// SyncOutFeeds) and Commit.
+	outCums      []*idxPack
+	outCumsBuilt bool
 }
 
 // deltaChain is the parsed live delta chain plus each entry's verbatim JSONL
@@ -561,19 +623,13 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 	// shared with the read-only tools, so the writer and the checkers can never
 	// disagree about what a store's objects are called. No db.gz at all is a
 	// fresh v3 store.
-	rc, err := getOptional(ctx, db.Backend, dbFileKey)
+	data, err := readGzOptional(ctx, db.Backend, dbFileKey)
 	if err != nil {
 		db.Close(ctx)
 		return nil, err
 	}
-	if rc != nil {
-		data, err := gunzip(rc)
-		rc.Close()
-		if err != nil {
-			db.Close(ctx)
-			return nil, fmt.Errorf("decompress %s: %w", dbFileKey, err)
-		}
-		core, err := parseStoreRoot(data, func(key string) ([]byte, error) { return db.readGz(ctx, key) })
+	if data != nil {
+		core, err := parseStoreRoot(data, memoManifestFetch(globals.Store, data, db.fetcher(ctx)))
 		if err != nil {
 			db.Close(ctx)
 			return nil, err
@@ -634,7 +690,7 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 	// carries, so the loaded public projection is intact here. Only a locked
 	// session ever commits, so only a locked session pays the signature.
 	if locked && db.core.legacyRoot == nil && db.core.ManifestNum > 0 {
-		sig, err := db.manifestSig()
+		_, sig, err := db.manifestSig()
 		if err != nil {
 			db.Close(ctx)
 			return nil, err
@@ -660,8 +716,10 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 	// snapshot too; config.gz is then bootstrapped NOT by a nil snapshot but by
 	// configChanged's configConfirmed+Stat backstop, which finds no sidecar and
 	// forces the first write. Only a read-only session still on a pre-cutover
-	// root leaves it nil — and such a session never commits.
-	if db.core.legacyRoot == nil {
+	// root leaves it nil — and such a session never commits. Only a locked
+	// session ever commits, so — like the manifest signature above — only a
+	// locked session pays the projection.
+	if locked && db.core.legacyRoot == nil {
 		db.configAtOpen = db.snapshotConfig()
 	}
 	return db, nil
@@ -729,12 +787,12 @@ func (o *DB) Commit(ctx context.Context) error {
 	// first publish. A feed removal or an expiration advance changes the feed
 	// projection, so those still publish; a config-only edit does not (readers
 	// never fetch config.gz).
-	sig, err := o.manifestSig()
+	man, sig, err := o.manifestSig()
 	if err != nil {
 		return err
 	}
 	if o.manifestSigAtOpen == nil || !bytes.Equal(o.manifestSigAtOpen, sig) {
-		if err := o.publishManifest(ctx); err != nil {
+		if err := o.publishManifest(ctx, man); err != nil {
 			return err
 		}
 	}

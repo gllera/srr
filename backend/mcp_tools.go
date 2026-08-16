@@ -1,12 +1,12 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
-	"sort"
+	"slices"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -40,9 +40,13 @@ const (
 // truncateRunes cuts s to at most maxRunes runes, never mid-rune, and reports
 // whether it cut. maxRunes <= 0 means "no limit".
 func truncateRunes(s string, maxRunes int) (string, bool) {
-	if maxRunes <= 0 || utf8.RuneCountInString(s) <= maxRunes {
+	if maxRunes <= 0 {
 		return s, false
 	}
+	// No length pre-check: the loop below reaches n == maxRunes only when a
+	// (maxRunes+1)-th rune starts, so a short string falls out of it uncut —
+	// and a full RuneCountInString scan of every previewed article's content
+	// just to learn that is the thing worth not doing.
 	n := 0
 	for i := range s {
 		if n == maxRunes {
@@ -54,28 +58,11 @@ func truncateRunes(s string, maxRunes int) (string, bool) {
 }
 
 // parseMCPWindow resolves the tool-level since/until strings into the same
-// half-open [since, until) unix-second window `srr art` uses, over the
-// shared parseTimeBound grammar. Its own wording (field names, not flag names)
-// keeps ArtCmd.window's test-pinned messages untouched.
+// half-open [since, until) unix-second window `srr art` uses — the one
+// parseWindow, labelled with the tool's field names rather than the CLI's flag
+// names, which keeps ArtCmd.window's test-pinned wording untouched.
 func parseMCPWindow(sinceStr, untilStr string, now time.Time) (since, until *int64, err error) {
-	if sinceStr != "" {
-		t, err := parseTimeBound(sinceStr, now)
-		if err != nil {
-			return nil, nil, fmt.Errorf("since: %w", err)
-		}
-		since = &t
-	}
-	if untilStr != "" {
-		t, err := parseTimeBound(untilStr, now)
-		if err != nil {
-			return nil, nil, fmt.Errorf("until: %w", err)
-		}
-		until = &t
-	}
-	if since != nil && until != nil && *since >= *until {
-		return nil, nil, fmt.Errorf("since %q is not before until %q: the window is empty", sinceStr, untilStr)
-	}
-	return since, until, nil
+	return parseWindow(sinceStr, untilStr, now, "since", "until")
 }
 
 // --- srr_list_articles ------------------------------------------------------
@@ -391,68 +378,34 @@ func mcpUpdateFeed(ctx context.Context, _ *mcp.CallToolRequest, in updateFeedIn)
 // empty value still clears it; that is exactly what the pointers buy — the
 // difference between "not mentioned" and "set to empty".
 func overlayUpdateFeed(v *feedView, in updateFeedIn) {
-	if in.Title != nil {
-		v.Title = *in.Title
-	}
-	if in.URL != nil {
-		v.URL = *in.URL
-	}
-	if in.Tag != nil {
-		v.Tag = *in.Tag
-	}
-	if in.Recipe != nil {
-		v.Recipe = *in.Recipe
-	}
-	if in.Ingest != nil {
-		v.Ingest = *in.Ingest
-	}
-	if in.Pipe != nil {
-		v.Pipe = *in.Pipe
-	}
-	if in.Secrets != nil {
-		v.Secrets = *in.Secrets
-	}
-	if in.NoTitle != nil {
-		v.NoTitle = *in.NoTitle
-	}
-	if in.ExpireDays != nil {
-		v.ExpireDays = *in.ExpireDays
-	}
-	if in.DedupDays != nil {
-		v.DedupDays = *in.DedupDays
-	}
-	if in.DedupTitle != nil {
-		v.DedupTitle = *in.DedupTitle
+	setIfPresent(&v.Title, in.Title)
+	setIfPresent(&v.URL, in.URL)
+	setIfPresent(&v.Tag, in.Tag)
+	setIfPresent(&v.Recipe, in.Recipe)
+	setIfPresent(&v.Ingest, in.Ingest)
+	setIfPresent(&v.Pipe, in.Pipe)
+	setIfPresent(&v.Secrets, in.Secrets)
+	setIfPresent(&v.NoTitle, in.NoTitle)
+	setIfPresent(&v.ExpireDays, in.ExpireDays)
+	setIfPresent(&v.DedupDays, in.DedupDays)
+	setIfPresent(&v.DedupTitle, in.DedupTitle)
+}
+
+// setIfPresent is the merge-on-absent rule itself: a nil pointer is "not
+// mentioned" and keeps dst, a non-nil one writes through even when it points
+// at a zero value ("set to empty" clears).
+func setIfPresent[T any](dst, src *T) {
+	if src != nil {
+		*dst = *src
 	}
 }
 
-// mcpSaveFeedView is the two-phase upsert both feed-writing tools share, the
-// same split handleFeedSave (serve_feeds.go) performs: resolve (networked,
-// unlocked) then save (locked), so a slow feed URL never holds .locked — which
-// would 409 the fetch loop and every other writer for the probe's duration.
-// build produces the target view inside phase 1's read-only scope, so an
-// update's merge base and its discovery probe come from ONE consistent db.gz
-// read. A nil view ID ⇒ create, non-nil ⇒ update.
+// mcpSaveFeedView adapts saveFeedTwoPhase (serve_feeds.go — resolve networked
+// and unlocked, then save locked) to the tool result shape both feed-writing
+// tools share. A nil view ID ⇒ create, non-nil ⇒ update.
 func mcpSaveFeedView(ctx context.Context, build func(db *DB) (*feedView, error)) (*mcp.CallToolResult, feedOut, error) {
-	// Phase 1 (no lock): build the view, validate it, run subscribe-time discovery.
-	var v *feedView
-	if err := withDBCtx(ctx, false, func(ctx context.Context, db *DB) error {
-		built, e := build(db)
-		if e != nil {
-			return e
-		}
-		v = built
-		return resolveFeedViewURL(ctx, db, v)
-	}); err != nil {
-		return nil, feedOut{}, mcpToolErr(err)
-	}
-	// Phase 2 (locked): apply the write with the already-resolved URL.
-	var saved *Feed
-	if err := withDBCtx(ctx, true, func(ctx context.Context, db *DB) error {
-		s, e := saveFeed(ctx, db, v)
-		saved = s
-		return e
-	}); err != nil {
+	saved, err := saveFeedTwoPhase(ctx, build)
+	if err != nil {
 		return nil, feedOut{}, mcpToolErr(err)
 	}
 	return nil, feedOut{Feed: listViewOf(saved)}, nil
@@ -500,7 +453,7 @@ func mcpFetch(ctx context.Context, _ *mcp.CallToolRequest, in fetchIn) (*mcp.Cal
 	if err != nil {
 		return nil, fetchOut{}, mcpToolErr(err)
 	}
-	sort.Slice(progress, func(i, j int) bool { return progress[i].ID < progress[j].ID })
+	slices.SortFunc(progress, func(a, b feedProgress) int { return cmp.Compare(a.ID, b.ID) })
 
 	out := fetchOut{Feeds: progress}
 	for _, p := range progress {

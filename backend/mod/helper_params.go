@@ -3,6 +3,7 @@ package mod
 import (
 	"fmt"
 	"math"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -97,6 +98,50 @@ func (p Params) only(allowed ...string) error {
 		if !slices.Contains(allowed, k) {
 			return fmt.Errorf("unknown parameter %q", k)
 		}
+	}
+	return nil
+}
+
+// NonNegInt returns the parsed integer for key, or def when key is absent. The
+// value must be a non-negative integer. The typed sibling of Duration/Bytes,
+// added because #filter's min_words and the watch predicate's were parsing and
+// rejecting it two ways — the one condition where the two shared vocabularies
+// literally disagreed on their own error text.
+func (p Params) NonNegInt(key string, def int) (int, error) {
+	v, ok := p[key]
+	if !ok {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("parameter %s=%q: must be a non-negative integer", key, v)
+	}
+	return n, nil
+}
+
+// regexSpec binds one regex-valued parameter name to where its compiled form
+// goes.
+type regexSpec struct {
+	key string
+	dst **regexp.Regexp
+}
+
+// assignRegexParams compiles each PRESENT regex parameter into its target,
+// leaving absent ones nil. The compile function is the caller's so #filter can
+// pass its per-Module memo while ParseMatch parses afresh; what is shared is
+// the dispatch table shape, so a new regex axis is one entry, not one entry in
+// each of two loops.
+func assignRegexParams(p Params, compile func(key, val string) (*regexp.Regexp, error), specs ...regexSpec) error {
+	for _, s := range specs {
+		v, ok := p[s.key]
+		if !ok {
+			continue
+		}
+		re, err := compile(s.key, v)
+		if err != nil {
+			return err
+		}
+		*s.dst = re
 	}
 	return nil
 }

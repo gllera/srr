@@ -19,8 +19,10 @@ import (
 // the yaml-resolution allowlist (configResolver routes exactly these to their
 // bare top-level srr.yaml key, so existing config files keep working at any
 // command depth) and the help-noise test's pin. Adding a field to any scoped
-// struct requires adding its flag name here — TestScopedFlagsAreNotGlobal
-// fails on the mismatch in either direction.
+// struct requires adding its flag name here — TestScopedFlagStructsAreListed
+// fails on the mismatch in either direction (TestScopedFlagsAreNotGlobal only
+// checks where the listed flags appear, so it cannot see a field missing from
+// this list).
 var scopedFlagNamesList = []string{
 	"pack-size", "max-deltas", "max-delta-bytes", "max-batch-bytes",
 	"max-asset-size", "asset-process", "asset-peek", "asset-workers",
@@ -43,10 +45,10 @@ type cycleFlags struct {
 	AssetWorkers        int           `env:"SRR_ASSET_WORKERS" default:"${nproc}" help:"Max assets processed concurrently across all feeds (peek/transcode/upload). Independent of --workers."`
 	AssetProcessTimeout time.Duration `env:"SRR_ASSET_PROCESS_TIMEOUT" default:"0" help:"Timeout for a single asset-process or asset-peek command invocation (Go duration). 0 (the default) means unlimited — no deadline, since media transcoding can run arbitrarily long; the command is still bounded by run cancellation (SIGINT/SIGTERM). The shared --cmd-timeout governs ingest/mod commands only and never affects asset processing."`
 	CacheDir            string        `default:"${cacheDir}"        env:"SRR_CACHE_DIR"     help:"Local download cache for external ingest media."`
-	CacheMaxAge         time.Duration `env:"SRR_CACHE_MAX_AGE" default:"72h" help:"Delete ingest-cache files unused for longer than this, swept after each fetch cycle. Downloads are consumed (uploaded to the store) within their cycle, and cache reuse refreshes a file's mtime, so old files are garbage. 0 disables the sweep."`
-	FetchBackoffMax     time.Duration `default:"1h" env:"SRR_FETCH_BACKOFF_MAX" help:"Loop-only: cap the adaptive per-feed poll interval a dormant feed drifts to (grows as time-since-last-new/8 from --interval). 0 disables backoff (poll every feed every cycle)."`
+	CacheMaxAge         time.Duration `env:"SRR_CACHE_MAX_AGE" default:"${cacheMaxAge}" help:"Delete ingest-cache files unused for longer than this, swept after each fetch cycle. Downloads are consumed (uploaded to the store) within their cycle, and cache reuse refreshes a file's mtime, so old files are garbage. 0 disables the sweep."`
+	FetchBackoffMax     time.Duration `default:"${fetchBackoffMax}" env:"SRR_FETCH_BACKOFF_MAX" help:"Loop-only: cap the adaptive per-feed poll interval a dormant feed drifts to (grows as time-since-last-new/8 from --interval). 0 disables backoff (poll every feed every cycle)."`
 	Notify              string        `env:"SRR_NOTIFY" help:"Shell command run when a feed crosses --notify-after consecutive failures, and again when it recovers. Context arrives as SRR_NOTIFY_EVENT (fail|recover), _FEED, _FEED_ID, _URL, _ERROR, _STREAK. Empty (default) disables alerting."`
-	NotifyAfter         int           `default:"5" env:"SRR_NOTIFY_AFTER" help:"Consecutive failures before --notify fires (the crossing alerts once per outage)."`
+	NotifyAfter         int           `default:"${notifyAfter}" env:"SRR_NOTIFY_AFTER" help:"Consecutive failures before --notify fires (the crossing alerts once per outage)."`
 }
 
 func (f *cycleFlags) AfterApply() error {
@@ -147,10 +149,10 @@ func seedScopedDefaults(g *Globals) {
 	g.AssetWorkers = envInt("SRR_ASSET_WORKERS", runtime.NumCPU())
 	g.AssetProcessTimeout = envDur("SRR_ASSET_PROCESS_TIMEOUT", 0)
 	g.CacheDir = envStr("SRR_CACHE_DIR", defaultCacheDir())
-	g.CacheMaxAge = envDur("SRR_CACHE_MAX_AGE", 72*time.Hour)
-	g.FetchBackoffMax = envDur("SRR_FETCH_BACKOFF_MAX", time.Hour)
+	g.CacheMaxAge = envDur("SRR_CACHE_MAX_AGE", defaultCacheMaxAge)
+	g.FetchBackoffMax = envDur("SRR_FETCH_BACKOFF_MAX", defaultFetchBackoffMax)
 	g.Notify = envStr("SRR_NOTIFY", "")
-	g.NotifyAfter = envInt("SRR_NOTIFY_AFTER", 5)
+	g.NotifyAfter = envInt("SRR_NOTIFY_AFTER", defaultNotifyAfter)
 	g.KeepManifests = envInt("SRR_KEEP_MANIFESTS", keepManifests)
 	g.MaxFeedSize = envInt("SRR_MAX_FEED_SIZE", defaultMaxFeedSize)
 	g.CmdTimeout = envDur("SRR_CMD_TIMEOUT", 0)

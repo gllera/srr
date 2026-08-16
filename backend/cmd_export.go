@@ -1,12 +1,12 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/xml"
 	"fmt"
 	"maps"
 	"slices"
-	"sort"
 	"strings"
 )
 
@@ -63,8 +63,8 @@ func newExportNode() *exportNode {
 }
 
 func buildOPML(feeds []*Feed) OPML {
-	sort.Slice(feeds, func(i, j int) bool {
-		return strings.ToLower(feeds[i].Title) < strings.ToLower(feeds[j].Title)
+	slices.SortFunc(feeds, func(a, b *Feed) int {
+		return cmp.Compare(strings.ToLower(a.Title), strings.ToLower(b.Title))
 	})
 	root := newExportNode()
 	for _, ch := range feeds {

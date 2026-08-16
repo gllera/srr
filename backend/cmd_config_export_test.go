@@ -1,22 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"slices"
 	"strings"
 	"testing"
 )
-
-// captureCmdStdout redirects the `stdout` command seam (not os.Stdout, which
-// utils_test.go's captureStdout covers) for one test.
-func captureCmdStdout(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	var out bytes.Buffer
-	saved := stdout
-	stdout = &out
-	t.Cleanup(func() { stdout = saved })
-	return &out
-}
 
 // The whole point of these verbs: OPML drops everything but title+url, so a
 // restore from it silently fetches the wrong content. Configure a store with
@@ -39,12 +27,12 @@ func TestConfigExportImportRoundTrip(t *testing.T) {
 	mustRun(&RecipeSetCmd{Name: "read", Pipe: []string{"#readability", "#default"}, Secrets: []string{"telegram"}})
 	mustRun(&DedupCmd{Days: intPtr(45)})
 	mustRun(&AddCmd{
-		Title: strPtr("Alpha"), URL: strPtr("https://a.example.com/feed"),
-		Tag: strPtr("news"), Recipe: strPtr("read"),
-		Ingest: strPtr("#feed"), Pipe: []string{"#minify"}, Secrets: []string{"telegram"},
-		Expire: intPtr(30), DedupDays: intPtr(7), DedupTitle: boolPtr(true),
+		Title: "Alpha", URL: "https://a.example.com/feed",
+		Tag: "news", Recipe: "read",
+		Ingest: "#feed", Pipe: []string{"#minify"}, Secrets: []string{"telegram"},
+		Expire: 30, DedupDays: 7, DedupTitle: true,
 	})
-	mustRun(&AddCmd{Title: strPtr("Beta"), URL: strPtr("https://b.example.com/feed")})
+	mustRun(&AddCmd{Title: "Beta", URL: "https://b.example.com/feed"})
 	mustRun(&SyndicateSetCmd{Name: "news", Format: "rss", Tags: []string{"news"}, Limit: 20})
 
 	out := captureCmdStdout(t)
@@ -151,7 +139,7 @@ func TestConfigExportImportRoundTrip(t *testing.T) {
 // the whole import is staged behind the validation pass.
 func TestConfigImportRejectsInvalidDocumentAtomically(t *testing.T) {
 	setupEmptyDB(t)
-	if err := (&AddCmd{Title: strPtr("Keep"), URL: strPtr("https://keep.example.com/feed")}).Run(); err != nil {
+	if err := (&AddCmd{Title: "Keep", URL: "https://keep.example.com/feed"}).Run(); err != nil {
 		t.Fatal(err)
 	}
 	cases := []struct{ name, doc, want string }{

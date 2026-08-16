@@ -105,12 +105,12 @@ func registerSync(mux *http.ServeMux) {
 // the rejection itself and reports false when the caller must stop.
 func syncBlobPath(w http.ResponseWriter, r *http.Request) (string, bool) {
 	if syncBlobDir == "" {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": msgSyncDisabled})
+		writeErrStatus(w, http.StatusNotFound, msgSyncDisabled)
 		return "", false
 	}
 	name := r.PathValue("name")
 	if !syncNameRe.MatchString(name) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid profile name %q", name)})
+		writeErrStatus(w, http.StatusBadRequest, fmt.Sprintf("invalid profile name %q", name))
 		return "", false
 	}
 	return filepath.Join(syncBlobDir, name+".json"), true
@@ -125,14 +125,14 @@ func getSyncProfile(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, fs.ErrNotExist) {
 		// 404 is a CONTRACT value here, not a failure: sync.ts reads it as
 		// "the endpoint holds nothing yet" and seeds it with its next push.
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no profile stored"})
+		writeErrStatus(w, http.StatusNotFound, "no profile stored")
 		return
 	}
 	if err != nil {
 		// A read failure on a file we own is OURS, not the caller's — hence 500
 		// rather than writeErr's shared 400 default, which exists because the
 		// older handlers cannot tell validation from infrastructure.
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeErrStatus(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -153,11 +153,10 @@ func putSyncProfile(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
-			writeJSON(w, http.StatusRequestEntityTooLarge,
-				map[string]string{"error": fmt.Sprintf("profile exceeds %d bytes", maxSyncBody)})
+			writeErrStatus(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("profile exceeds %d bytes", maxSyncBody))
 			return
 		}
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("read request body: %v", err)})
+		writeErrStatus(w, http.StatusBadRequest, fmt.Sprintf("read request body: %v", err))
 		return
 	}
 	// Validate it is a JSON OBJECT, and store the bytes VERBATIM. Decoding into
@@ -168,11 +167,11 @@ func putSyncProfile(w http.ResponseWriter, r *http.Request) {
 	// endpoint serving something every reader will then reject on every cycle.
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(body, &probe); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "profile must be a JSON object"})
+		writeErrStatus(w, http.StatusBadRequest, "profile must be a JSON object")
 		return
 	}
 	if err := writeSyncBlob(path, body); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeErrStatus(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

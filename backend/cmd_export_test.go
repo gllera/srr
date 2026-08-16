@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/xml"
 	"sort"
@@ -12,10 +11,7 @@ import (
 // runExport captures `feed export` output for the current globals.Store.
 func runExport(t *testing.T, cmd *ExportCmd) string {
 	t.Helper()
-	var out bytes.Buffer
-	saved := stdout
-	stdout = &out
-	t.Cleanup(func() { stdout = saved })
+	out := captureCmdStdout(t)
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("export: %v", err)
 	}

@@ -128,6 +128,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"srr/store"
 	"strconv"
 	"strings"
 	"testing"
@@ -1179,7 +1180,7 @@ func chaosSeriesBytes(t *testing.T, c *chaosRun, series string) [][]byte {
 	s := c.db.core.Names.series(series)
 	out := make([][]byte, 0, len(s.Stems))
 	for _, stem := range s.Stems {
-		name := fmt.Sprintf("%s/%d.gz", series, stem)
+		name := store.PackKey(series, stem)
 		raw, err := os.ReadFile(filepath.Join(c.dir, name))
 		if err != nil {
 			t.Fatalf("%s: read %s: %v", c.label, name, err)

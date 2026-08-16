@@ -1041,23 +1041,11 @@ func TestUploadCacheRefProcessStdoutEmptyFailsSoft(t *testing.T) {
 	}
 }
 
-// assetTStatFailBackend makes the store's existence-probe Stat return a
-// non-missing error; Get/Put/AtomicPut/Rm/Close promote from the embedded store.
-type assetTStatFailBackend struct {
-	store.Backend
-}
-
-var errAssetTStatProbe = errors.New("injected stat probe failure")
-
-func (assetTStatFailBackend) Stat(context.Context, string) (int64, error) {
-	return 0, errAssetTStatProbe
-}
-
 // A non-missing error from the existence-probe Stat must abort with a "check
 // asset" error — never a silent upload that races the real object.
 func TestUploadCacheRefStatProbeErrorAborts(t *testing.T) {
 	inner := tempStore(t)
-	be := assetTStatFailBackend{Backend: inner}
+	be := &faultBackend{Backend: inner, stat: failAll()}
 	af := newAssetFetcher(be, 1024, "")
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)

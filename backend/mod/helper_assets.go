@@ -175,23 +175,19 @@ func walkNode(n *html.Node, attrs map[string][]string, fn func(val string) (stri
 // visitNode applies fn to the attrs-listed attributes on n and its
 // descendants; the first error fn returns stops the walk.
 func visitNode(n *html.Node, attrs map[string][]string, fn func(a *html.Attribute) error) error {
-	if n.Type == html.ElementNode {
-		if names, ok := attrs[n.Data]; ok {
-			for _, name := range names {
-				for i := range n.Attr {
-					if n.Attr[i].Key != name {
-						continue
-					}
-					if err := fn(&n.Attr[i]); err != nil {
-						return err
-					}
+	for d := range descend(n) {
+		if d.Type != html.ElementNode {
+			continue
+		}
+		for _, name := range attrs[d.Data] {
+			for i := range d.Attr {
+				if d.Attr[i].Key != name {
+					continue
+				}
+				if err := fn(&d.Attr[i]); err != nil {
+					return err
 				}
 			}
-		}
-	}
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		if err := visitNode(c, attrs, fn); err != nil {
-			return err
 		}
 	}
 	return nil

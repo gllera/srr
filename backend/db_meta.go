@@ -72,10 +72,24 @@ func foldSearchText(s string) string {
 // words shorter than searchGram contribute nothing (verification still
 // enforces them on the reader side).
 func eachSearchGram(folded string, fn func(gram string)) {
-	for _, word := range strings.Fields(folded) {
-		runes := []rune(word)
-		for i := 0; i+searchGram <= len(runes); i++ {
-			fn(string(runes[i : i+searchGram]))
+	// A ring of the last searchGram rune-start offsets, so each window is a
+	// SUBSTRING of the word rather than a fresh string cut from a []rune copy.
+	// The bytes handed to fn are identical either way — folded text is valid
+	// UTF-8 — and the bloom is a function of exactly those bytes. It matters
+	// because this runs per word of every title: once per finalized shard, and
+	// over the whole store on `srr inspect --validate`.
+	var starts [searchGram]int
+	for word := range strings.FieldsSeq(folded) {
+		k := 0
+		for i := range word { // i is each rune's start offset
+			if k >= searchGram {
+				fn(word[starts[(k-searchGram)%searchGram]:i])
+			}
+			starts[k%searchGram] = i
+			k++
+		}
+		if k >= searchGram {
+			fn(word[starts[(k-searchGram)%searchGram]:])
 		}
 	}
 }
@@ -126,8 +140,7 @@ func (o *DB) walkArticles(ctx context.Context, from, to int, fn func(chron int, 
 	c := &o.core
 	tc := tailCovered(c)
 	slots := feedSlots(c)
-	var data []ArticleData
-	dataPackID := -1
+	cur := newDataPackCursor(o)
 	for pto := min(to, tc); from < pto; {
 		p := from / idxPackSize
 		key, size, err := idxKeyAndSize(c, p)
@@ -144,24 +157,11 @@ func (o *DB) walkArticles(ctx context.Context, from, to int, fn func(chron int, 
 		}
 		for end := min(pto, p*idxPackSize+size); from < end; from++ {
 			packID, off := pack.getPackRef(from)
-			if packID != dataPackID {
-				dataKey, err := dataKeyFor(c, packID)
-				if err != nil {
-					return err
-				}
-				raw, err := o.readGz(ctx, dataKey)
-				if err != nil {
-					return err
-				}
-				if data, err = parseDataPack(raw); err != nil {
-					return fmt.Errorf("parse %s: %w", dataKey, err)
-				}
-				dataPackID = packID
+			ad, err := cur.at(ctx, from, packID, off)
+			if err != nil {
+				return err
 			}
-			if off >= len(data) {
-				return fmt.Errorf("chron %d: offset %d beyond data pack %d (%d entries)", from, off, packID, len(data))
-			}
-			if err := fn(from, &data[off]); err != nil {
+			if err := fn(from, ad); err != nil {
 				return err
 			}
 		}
@@ -189,6 +189,13 @@ func numFinalizedMeta(totalArticles int) int {
 	}
 	return (totalArticles - 1) / metaPackSize
 }
+
+// metaCoverage is the chron the meta series reaches: full shards plus the tail
+// shard's entries. The predicate on top of it — coverage must equal
+// tailCovered, and may never exceed it — is the writer's self-heal trigger AND
+// what two `--validate` checks report as corruption, so the three have to agree
+// on the arithmetic or the checkers flag what the writer quietly heals.
+func (c *DBCore) metaCoverage() int { return c.metaPacks()*metaPackSize + c.MetaTail }
 
 // SyncMeta reconciles the meta/ series with the store whenever its
 // MetaPacks/MetaTail coverage lags TotalArticles: a normal append, a
@@ -266,7 +273,7 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 	}
 	nf := numFinalizedMeta(target)
 	mp := c.metaPacks()
-	if mp == nf && mp*metaPackSize+c.MetaTail == target {
+	if mp == nf && c.metaCoverage() == target {
 		return nil
 	}
 	// Every name + coverage change from here on is STAGED on this clone and
@@ -282,7 +289,7 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 	if mp > nf || metaTail < 0 || metaTail > metaPackSize || mp*metaPackSize+metaTail > target {
 		slog.Warn("inconsistent meta coverage, rebuilding from scratch",
 			"mp", mp, "mt", metaTail, "target", target)
-		names.truncate(metaSeries, 0)
+		names.truncate(metaSeries)
 		metaTail, mp = 0, 0
 	}
 	// The retired "stale-low MetaPacks" guard lived here. It existed because a
@@ -373,18 +380,9 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 		}
 
 		if pos != mp {
-			stem := names.alloc(metaSeries)
-			sum := SummaryName{Series: metaSeries, Stem: stem, Covers: pos}
-			if err := o.saveSummary(ctx, pos, func(k int) ([]byte, error) {
-				key, err := names.key(metaSeries, k)
-				if err != nil {
-					return nil, err
-				}
-				return o.readPackHeader(ctx, key, searchBloomBytes)
-			}, sum.key()); err != nil {
+			if err := o.syncMetaSummary(ctx, names, pos); err != nil {
 				return err
 			}
-			names.SSum = &sum
 		}
 
 		// Every save succeeded: adopt the staged names and the coverage they
@@ -512,6 +510,23 @@ func (o *DB) readMetaLines(ctx context.Context, key string) ([][]byte, error) {
 		}
 	}
 	return lines, nil
+}
+
+// syncMetaSummary republishes the meta bloom summary — the concatenation of
+// the first `covers` finalized shards' bloom headers — under a fresh stem, and
+// records it on the given (usually staged) name table. The one meta-summary
+// path: SyncMeta publishes it when a shard finalizes, compaction republishes it
+// when a shard's bloom is rebuilt over survivors, and both read the CURRENT
+// bloom of whatever the table names.
+func (o *DB) syncMetaSummary(ctx context.Context, names *ManifestNames, covers int) error {
+	sum, err := o.publishSummary(ctx, names, metaSeries, covers, func(key string) ([]byte, error) {
+		return o.readPackHeader(ctx, key, searchBloomBytes)
+	})
+	if err != nil {
+		return err
+	}
+	names.SSum = sum
+	return nil
 }
 
 // saveMetaShard writes finalized shard n: the bloom over every gram of

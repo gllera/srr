@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 
@@ -46,9 +46,7 @@ var resolveFeedURL = func(ctx context.Context, rawURL string) (string, error) {
 // recipe's, then default's) is the built-in #feed. External ingest strategies
 // own their own source and are stored as-is.
 func resolvesFeed(recipes map[string]Recipe, recipeName, feedIngest string) bool {
-	r := recipeFor(recipes, recipeName)
-	def := recipeFor(recipes, defaultRecipeName)
-	return ingest.Select(feedIngest, r.Ingest, def.Ingest) == ingest.Builtin
+	return effectiveRecipe(recipes, recipeName, Recipe{Ingest: feedIngest}).Ingest == ingest.Builtin
 }
 
 // resolveFeedProbe validates the recipe reference and — when the URL is new
@@ -198,49 +196,40 @@ func validateTag(tag string) error {
 type AddCmd struct {
 	Net netFlags `embed:"" group:"Network flags:"`
 
-	Title   *string  `short:"t" required:"" help:"Feed title."`
-	URL     *string  `short:"u" required:"" help:"Feed RSS url."`
-	Tag     *string  `short:"g" optional:"" help:"Feed tag."`
-	Recipe  *string  `short:"r" optional:"" help:"Recipe name (must exist). Empty inherits 'default'."`
-	Ingest  *string  `short:"i" optional:"" help:"Feed-level ingest override: built-in ('#feed') or shell command. Empty inherits the recipe's."`
+	// Plain value fields, unlike UpdCmd's pointers: on a strict CREATE, an
+	// absent flag and its zero value mean the same thing, so nil-vs-empty
+	// carries no information here.
+	Title   string   `short:"t" required:"" help:"Feed title."`
+	URL     string   `short:"u" required:"" help:"Feed RSS url."`
+	Tag     string   `short:"g" optional:"" help:"Feed tag."`
+	Recipe  string   `short:"r" optional:"" help:"Recipe name (must exist). Empty inherits 'default'."`
+	Ingest  string   `short:"i" optional:"" help:"Feed-level ingest override: built-in ('#feed') or shell command. Empty inherits the recipe's."`
 	Pipe    []string `short:"p" sep:"none" optional:"" help:"Feed-level pipeline step; repeat -p per step. Overrides the recipe's pipe; #default expands to the recipe's effective pipe."`
 	Secrets []string `name:"secrets" sep:"none" optional:"" help:"Secret scope granted to this feed's external commands; repeat per scope. Overrides the recipe's grant."`
-	Expire  *int     `short:"e" name:"expire-days" optional:"" help:"Expire articles after N days (0 = keep forever)."`
+	Expire  int      `short:"e" name:"expire-days" optional:"" help:"Expire articles after N days (0 = keep forever)."`
 	// DedupDays / DedupTitle tune the persistent seen.gz dedup pool per feed.
-	DedupDays  *int  `name:"dedup-days" optional:"" help:"Dedup horizon in days for this feed (0 = store default, -1 = disable the pool)."`
-	DedupTitle *bool `name:"dedup-title" optional:"" help:"Also dedup by folded title (catches a re-promotion with a fresh guid but the same headline)."`
+	DedupDays  int  `name:"dedup-days" optional:"" help:"Dedup horizon in days for this feed (0 = store default, -1 = disable the pool)."`
+	DedupTitle bool `name:"dedup-title" optional:"" help:"Also dedup by folded title (catches a re-promotion with a fresh guid but the same headline)."`
 }
 
 func (o *AddCmd) Run() error {
-	if o.Title == nil || *o.Title == "" {
+	if o.Title == "" {
 		return fmt.Errorf("title is required")
 	}
-	if o.URL == nil {
+	if o.URL == "" {
 		return fmt.Errorf("--url is required")
 	}
 	v := &feedView{
-		Title: *o.Title,
-		URL:   *o.URL,
-	}
-	if o.Tag != nil {
-		v.Tag = *o.Tag
-	}
-	if o.Recipe != nil {
-		v.Recipe = *o.Recipe
-	}
-	if o.Ingest != nil {
-		v.Ingest = *o.Ingest
-	}
-	v.Pipe = o.Pipe
-	v.Secrets = o.Secrets
-	if o.Expire != nil {
-		v.ExpireDays = *o.Expire
-	}
-	if o.DedupDays != nil {
-		v.DedupDays = *o.DedupDays
-	}
-	if o.DedupTitle != nil {
-		v.DedupTitle = *o.DedupTitle
+		Title:      o.Title,
+		URL:        o.URL,
+		Tag:        o.Tag,
+		Recipe:     o.Recipe,
+		Ingest:     o.Ingest,
+		Pipe:       o.Pipe,
+		Secrets:    o.Secrets,
+		ExpireDays: o.Expire,
+		DedupDays:  o.DedupDays,
+		DedupTitle: o.DedupTitle,
 	}
 	// Offline field checks before the store lock and the subscribe-time probe, so
 	// bad input never triggers a wasted fetch (the recipe ref is checked inside
@@ -447,7 +436,7 @@ func (o *RmCmd) Run() error {
 			// entries stay in the immutable packs as orphans forever, and its
 			// dedup/fetch state is purged. Require an explicit --force so a
 			// mistyped id cannot do that in one keystroke.
-			if live := ch.TotalArt - ch.Expired; live > 0 && !globals.Force {
+			if live := ch.LiveArt(); live > 0 && !globals.Force {
 				return fmt.Errorf("feed %d (%q) has %d stored article(s); removal is irreversible (its idx entries stay in the immutable packs). Re-run with --force, or preview with --dry-run", id, ch.Title, live)
 			}
 			if err := db.RemoveFeed(ctx, id); err != nil {
@@ -469,7 +458,7 @@ func (o *RmCmd) report(ctx context.Context, db *DB, id int) error {
 	fmt.Fprintf(stdout, "feed %d: %q\n", id, ch.Title)
 	fmt.Fprintf(stdout, "  url: %s\n", ch.URL)
 	fmt.Fprintf(stdout, "  live articles: %d (all-time %d, expired %d) — their idx entries stay in the immutable packs as orphans\n",
-		ch.TotalArt-ch.Expired, ch.TotalArt, ch.Expired)
+		ch.LiveArt(), ch.TotalArt, ch.Expired)
 
 	// Delta-chain membership decides whether removal must first consolidate the
 	// live chain (RemoveFeed's id-reuse guard) — the expensive, surprising half.
@@ -518,8 +507,8 @@ func (o *LsCmd) Run() error {
 			}
 			out = append(out, viewOf(ch))
 		}
-		sort.Slice(out, func(i, j int) bool {
-			return strings.ToLower(out[i].Title) < strings.ToLower(out[j].Title)
+		slices.SortFunc(out, func(a, b *feedView) int {
+			return cmp.Compare(strings.ToLower(a.Title), strings.ToLower(b.Title))
 		})
 		return printFormatted(o.Format, out)
 	})
@@ -546,24 +535,35 @@ type ApplyCmd struct {
 	in io.Reader // test seam; defaults to os.Stdin
 }
 
-func (o *ApplyCmd) Run() error {
-	src := o.in
+// readInput reads a command's document input: the test seam if one is set, else
+// the named file, else stdin ("" and "-" both mean stdin). The one place the
+// stdin-or-file convention the `--file` commands share is spelled — including
+// the scope-sensitive Close, which is the part a fourth copy gets subtly wrong.
+func readInput(seam io.Reader, path string) ([]byte, error) {
+	src := seam
 	if src == nil {
-		if o.File == "" || o.File == "-" {
+		if path == "" || path == "-" {
 			src = os.Stdin
 		} else {
-			f, err := os.Open(o.File)
+			f, err := os.Open(path)
 			if err != nil {
-				return fmt.Errorf("open %s: %w", o.File, err)
+				return nil, fmt.Errorf("open %s: %w", path, err)
 			}
 			defer f.Close()
 			src = f
 		}
 	}
-
 	data, err := io.ReadAll(src)
 	if err != nil {
-		return fmt.Errorf("read input: %w", err)
+		return nil, fmt.Errorf("read input: %w", err)
+	}
+	return data, nil
+}
+
+func (o *ApplyCmd) Run() error {
+	data, err := readInput(o.in, o.File)
+	if err != nil {
+		return err
 	}
 
 	views, err := parseApplyInput(data)

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 )
 
@@ -92,26 +91,17 @@ func init() {
 			// forever. Config errors have to be loud and up front.
 			var dropTitle, keepTitle, dropContent, keepContent *regexp.Regexp
 			var err error
-			for _, spec := range []struct {
-				key string
-				dst **regexp.Regexp
-			}{
-				{"drop_title", &dropTitle},
-				{"keep_title", &keepTitle},
-				{"drop_content", &dropContent},
-				{"keep_content", &keepContent},
-			} {
-				if v, ok := p[spec.key]; ok {
-					if *spec.dst, err = compiled(spec.key, v); err != nil {
-						return err
-					}
-				}
+			if err = assignRegexParams(p, compiled,
+				regexSpec{"drop_title", &dropTitle},
+				regexSpec{"keep_title", &keepTitle},
+				regexSpec{"drop_content", &dropContent},
+				regexSpec{"keep_content", &keepContent},
+			); err != nil {
+				return err
 			}
-			minWords := -1 // -1 = param absent
-			if v, ok := p["min_words"]; ok {
-				if minWords, err = strconv.Atoi(v); err != nil || minWords < 0 {
-					return fmt.Errorf("parameter min_words=%q: must be a non-negative integer", v)
-				}
+			minWords, err := p.NonNegInt("min_words", -1) // -1 = param absent
+			if err != nil {
+				return err
 			}
 			var langs map[string]bool
 			if v, ok := p["keep_lang"]; ok {
@@ -127,7 +117,7 @@ func init() {
 			case keepTitle != nil && !keepTitle.MatchString(i.Title):
 			case dropContent != nil && dropContent.MatchString(i.Content):
 			case keepContent != nil && !keepContent.MatchString(i.Content):
-			case minWords >= 0 && wordCount(i.Content) < minWords:
+			case minWords >= 0 && !hasMinWords(i.Content, minWords):
 			case langs != nil && !langAllowed(langs, i.Lang):
 			default:
 				return nil
@@ -173,11 +163,26 @@ func parseRegexParam(key, val string) (*regexp.Regexp, error) {
 	return re, nil
 }
 
-// wordCount counts whitespace-separated words in s. HTML tags and attributes
-// are included in the count as plain text, which is acceptable for a rough
-// word-count filter and avoids a dependency on an HTML parser here.
-func wordCount(s string) int {
-	return len(strings.Fields(s))
+// hasMinWords reports whether s holds at least n whitespace-separated words.
+// HTML tags and attributes count as plain text, which is acceptable for a
+// rough word-count filter and avoids a dependency on an HTML parser here.
+//
+// It answers the predicate rather than the count because that is all either
+// caller asks (#filter's min_words, and the watch predicate's) — and the count
+// form allocated a []string header per word only to compare its length, on a
+// path that runs per article per cycle, and per article PER WATCH RULE inside
+// SyncWatch's locked phase.
+func hasMinWords(s string, n int) bool {
+	if n <= 0 {
+		return true
+	}
+	for range strings.FieldsSeq(s) {
+		n--
+		if n == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // parseKeepLangs parses a comma-separated ISO 639-1 code list ("en,es") into

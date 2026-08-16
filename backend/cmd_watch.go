@@ -85,6 +85,21 @@ func (o *WatchSetCmd) Run() error {
 	})
 }
 
+// validateWatchRule is what a rule must satisfy before it may be stored: a name
+// the object grammar accepts, and a spec mod.ParseMatch can compile. Both entry
+// points check it — `srr watch set` and `srr store import` — and the import path
+// is the one that writes straight into config.gz, where an uncompilable spec
+// would warn on every fetch cycle from then on instead of failing the command.
+func validateWatchRule(name, spec string) error {
+	if err := validateWatchName(name); err != nil {
+		return err
+	}
+	if _, err := mod.ParseMatch(spec); err != nil {
+		return fmt.Errorf("watch rule %q: %w", name, err)
+	}
+	return nil
+}
+
 // setWatchRule validates and upserts, then commits. The whole point of doing it
 // under the store lock — rather than as a config-only edit like `srr store dedup` —
 // is the coverage stamp: WatchFrom rides the MANIFEST, so the rule and the
@@ -97,24 +112,12 @@ func (o *WatchSetCmd) Run() error {
 // rule. Older objects keep their now-meaningless planes; nothing reads below
 // the floor, and §7's sweep reclaims them as the regions get rewritten.
 func setWatchRule(ctx context.Context, db *DB, name, spec string) error {
-	if err := validateWatchName(name); err != nil {
+	if err := validateWatchRule(name, spec); err != nil {
 		return err
 	}
-	if _, err := mod.ParseMatch(spec); err != nil {
-		return fmt.Errorf("watch rule %q: %w", name, err)
-	}
-	c := &db.core
-	if cur, ok := c.Watch[name]; ok && cur == spec {
+	if !stampWatchRule(&db.core, name, spec) {
 		return nil
 	}
-	if c.Watch == nil {
-		c.Watch = map[string]string{}
-	}
-	if c.WatchFrom == nil {
-		c.WatchFrom = map[string]int{}
-	}
-	c.Watch[name] = spec
-	c.WatchFrom[name] = c.TotalArticles
 	return db.Commit(ctx)
 }
 

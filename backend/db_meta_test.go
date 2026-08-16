@@ -163,14 +163,14 @@ func TestSyncMetaAtBoundary(t *testing.T) {
 		t.Fatalf("coverage = (%d, %d), want (1, 1)", c.metaPacks(), c.MetaTail)
 	}
 
-	shard := decompressGz(t, filepath.Join(dir, "meta/0.gz"))
+	shard := decompressGz(t, filepath.Join(dir, posK(c, metaSeries, 0)))
 	bloom := shard[:searchBloomBytes]
 	for _, gram := range []string{"a49", "999"} { // grams of folded "A4999"
 		if !bloomHas(bloom, gram) {
 			t.Errorf("shard bloom missing gram %q", gram)
 		}
 	}
-	entries := readMetaEntries(t, dir, "meta/0.gz", true)
+	entries := readMetaEntries(t, dir, posK(c, metaSeries, 0), true)
 	if len(entries) != metaPackSize {
 		t.Fatalf("shard entries = %d, want %d", len(entries), metaPackSize)
 	}
@@ -199,13 +199,24 @@ func TestSyncMetaNoopWhenCurrent(t *testing.T) {
 	if err := db.SyncMeta(ctx, nil); err != nil {
 		t.Fatalf("SyncMeta: %v", err)
 	}
-	for _, key := range []string{"meta/0.gz", "meta/L2.gz", "meta/s1.gz"} {
+	// The names the store ACTUALLY published, resolved from the table. Spelled
+	// by hand this read "meta/0.gz", "meta/L2.gz", "meta/s1.gz" — and the last
+	// two are pre-cutover kind-lettered names no store writes any more, so the
+	// removal removed nothing and the absence assertion asserted nothing: two
+	// thirds of this test's claim (the tail and the summary are not rewritten)
+	// was vacuous.
+	c := &db.core
+	keys := []string{posK(c, metaSeries, 0), tailK(c, metaSeries), c.Names.ssumKey()}
+	for _, key := range keys {
+		if key == "" {
+			t.Fatalf("the boundary fixture published no name for one of shard 0 / tail / summary: %v", keys)
+		}
 		os.Remove(filepath.Join(dir, key))
 	}
 	if err := db.SyncMeta(ctx, nil); err != nil {
 		t.Fatalf("SyncMeta (noop): %v", err)
 	}
-	for _, key := range []string{"meta/0.gz", "meta/L2.gz", "meta/s1.gz"} {
+	for _, key := range keys {
 		assertKey(t, dir, key, false)
 	}
 }
@@ -327,7 +338,7 @@ func TestSyncMetaStaleLowCoverageDoesNotOverwriteFinalizedShard(t *testing.T) {
 	// Simulate the post-saveSummary-failure state: the finalized shard and the
 	// shifted tail are durable, but coverage never advanced past 0. MetaTail (1)
 	// still equals the on-disk tail's entry count, so a count-only trust fires.
-	c.Names.truncate(metaSeries, 0)
+	c.Names.truncate(metaSeries)
 
 	// A later cycle adds one article; its read-back tail (meta/L2, 1 entry)
 	// matches the stale MetaTail.
@@ -343,12 +354,12 @@ func TestSyncMetaStaleLowCoverageDoesNotOverwriteFinalizedShard(t *testing.T) {
 	}
 
 	// The immutable finalized shard must still hold its original chron range.
-	entries := readMetaEntries(t, dir, "meta/0.gz", true)
+	entries := readMetaEntries(t, dir, posK(&db.core, metaSeries, 0), true)
 	if len(entries) != metaPackSize {
 		t.Fatalf("shard entries = %d, want %d", len(entries), metaPackSize)
 	}
 	if entries[0].Title != "A0" || entries[metaPackSize-1].Title != fmt.Sprintf("A%d", metaPackSize-1) {
-		t.Fatalf("meta/0.gz overwritten with wrong chron range: [0]=%q [last]=%q, want A0 / A%d",
+		t.Fatalf("finalized meta shard 0 overwritten with wrong chron range: [0]=%q [last]=%q, want A0 / A%d",
 			entries[0].Title, entries[metaPackSize-1].Title, metaPackSize-1)
 	}
 }
@@ -375,24 +386,12 @@ func TestSyncMetaInconsistentCoverageRebuilds(t *testing.T) {
 	}
 }
 
-// metaTPutFailBackend fails every Put/AtomicPut while promoting reads, so a test
-// can inject a store-write failure partway through a sync that still needs to
-// read packs.
-type metaTPutFailBackend struct {
-	store.Backend
-}
-
+// errMetaTPutFail is the sentinel the COUNTING fake below returns, so a test
+// can tell an injected write failure from a real one. The all-writes-fail fake
+// that used to live here was faultBackend{put: failAll()} with a different
+// error string — the two call sites only assert that SyncMeta surfaced an
+// error, so they now use the shared fake (fakes_test.go).
 var errMetaTPutFail = errors.New("injected meta put failure")
-
-func (metaTPutFailBackend) Put(context.Context, string, io.Reader, bool) error {
-	return errMetaTPutFail
-}
-
-// Pack saves route through AtomicPut (the fsync path), so the injection has to
-// cover it too or a save failure never reaches the code under test.
-func (metaTPutFailBackend) AtomicPut(context.Context, string, io.Reader, store.ObjectMeta) error {
-	return errMetaTPutFail
-}
 
 // SyncMeta is warn-only, but it must set the mp/mt coverage fields ONLY after
 // every save succeeds — a mid-sync save failure must leave coverage untouched so
@@ -404,7 +403,7 @@ func TestSyncMetaSaveFailureLeavesCoverageUnchanged(t *testing.T) {
 	c := &db.core
 	// Reads (the walk) keep working through the promoted backend; the first meta
 	// save — finalizing shard 0 at the metaPackSize boundary — fails.
-	db.Backend = metaTPutFailBackend{Backend: db.Backend}
+	db.Backend = &faultBackend{Backend: db.Backend, put: failAll()}
 
 	if err := db.SyncMeta(ctx, nil); err == nil {
 		t.Fatal("SyncMeta should surface the injected Put failure")
@@ -441,7 +440,7 @@ func TestSyncMetaInconsistentCoverageFailureKeepsNames(t *testing.T) {
 	// backend makes that rebuild error on its first shard save.
 	c.MetaTail = metaPackSize + 5
 	metaTailMemo.reset()
-	db.Backend = metaTPutFailBackend{Backend: db.Backend}
+	db.Backend = &faultBackend{Backend: db.Backend, put: failAll()}
 
 	if err := db.SyncMeta(ctx, nil); err == nil {
 		t.Fatal("SyncMeta should surface the injected rebuild failure")
@@ -456,7 +455,7 @@ func TestSyncMetaInconsistentCoverageFailureKeepsNames(t *testing.T) {
 
 // metaCountPutBackend counts the meta/ writes a sync attempts and can fail the
 // nth of them, so a test can interrupt a sync PARTWAY — after some shards are
-// already durable — instead of at its very first write (metaTPutFailBackend).
+// already durable — instead of at its very first write.
 // Pack saves route through AtomicPut, so that is the only method to intercept.
 type metaCountPutBackend struct {
 	store.Backend

@@ -1,7 +1,6 @@
 package mod
 
 import (
-	"context"
 	"regexp"
 	"strings"
 
@@ -31,14 +30,7 @@ import (
 // <img> still carrying a lazy data-src URL, so the order is belt-and-braces).
 
 func init() {
-	RegisterDOM("untrack", func() DOMProcessor {
-		return func(_ context.Context, p Params, _ *RawItem, body *html.Node) (bool, error) {
-			if err := p.only(); err != nil {
-				return false, err
-			}
-			return untrackContent(body), nil
-		}
-	})
+	RegisterDOMBody("untrack", untrackContent)
 }
 
 // trackingParams are query parameters that only ever identify the reader or
@@ -70,27 +62,23 @@ var untrackAttrs = map[string][]string{
 func untrackContent(body *html.Node) bool {
 	changed := false
 	var pixels []*html.Node
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
-		if n.Type == html.ElementNode {
-			if n.Data == "img" && isTrackerPixel(n) {
-				pixels = append(pixels, n)
-			} else {
-				for _, key := range untrackAttrs[n.Data] {
-					if v := mediaAttr(n, key); v != "" {
-						if cleaned, ok := stripTrackingParams(v); ok {
-							setNodeAttr(n, key, cleaned)
-							changed = true
-						}
-					}
+	for n := range descend(body) {
+		if n.Type != html.ElementNode {
+			continue
+		}
+		if n.Data == "img" && isTrackerPixel(n) {
+			pixels = append(pixels, n)
+			continue
+		}
+		for _, key := range untrackAttrs[n.Data] {
+			if v := mediaAttr(n, key); v != "" {
+				if cleaned, ok := stripTrackingParams(v); ok {
+					setNodeAttr(n, key, cleaned)
+					changed = true
 				}
 			}
 		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
-		}
 	}
-	walk(body)
 
 	for _, n := range pixels {
 		parent := n.Parent
@@ -124,13 +112,7 @@ func isTrackerPixel(n *html.Node) bool {
 
 // declaredPx parses a numeric width/height attribute; ok=false when the
 // attribute is absent or does not start with a digit.
-func declaredPx(s string) (int, bool) {
-	s = strings.TrimSpace(s)
-	if s == "" || s[0] < '0' || s[0] > '9' {
-		return 0, false
-	}
-	return pxDim(s), true
-}
+func declaredPx(s string) (int, bool) { return pxDimOK(strings.TrimSpace(s)) }
 
 // stripTrackingParams removes tracking query parameters from an http(s) URL,
 // preserving the remaining query verbatim (order and encoding). ok reports
@@ -194,15 +176,10 @@ func removeWPTrailer(body *html.Node) bool {
 // nodeText concatenates the text nodes under n.
 func nodeText(n *html.Node) string {
 	var b strings.Builder
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
-		if n.Type == html.TextNode {
-			b.WriteString(n.Data)
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
+	for d := range descend(n) {
+		if d.Type == html.TextNode {
+			b.WriteString(d.Data)
 		}
 	}
-	walk(n)
 	return b.String()
 }

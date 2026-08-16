@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"os"
 	"regexp"
@@ -17,17 +16,21 @@ import (
 	"srr/store"
 )
 
-// outNameRe is the allowlist for syndication output feed names: one or more
-// alphanumeric, dot, underscore, or hyphen characters. "." and ".." are
-// explicitly rejected after the regex check so names like "." never escape
-// the out/ prefix via path.Join / filepath.Join.
-var outNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+// keySegmentRe is the allowlist for operator-supplied names that land in a
+// store key: one or more alphanumeric, dot, underscore, or hyphen characters.
+var keySegmentRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
-// validOutName reports whether name is a safe syndication output feed name:
-// it must match outNameRe and must not be "." or "..".
-func validOutName(name string) bool {
-	return outNameRe.MatchString(name) && name != "." && name != ".."
+// validKeySegment reports whether an operator-supplied name is safe as one
+// store key segment: it must match keySegmentRe, and "." / ".." are explicitly
+// rejected so a name can never escape the prefix it lands under (out/, inbox/)
+// via path.Join / filepath.Join. The one grammar behind validOutName and
+// validSpoolName.
+func validKeySegment(name string) bool {
+	return keySegmentRe.MatchString(name) && name != "." && name != ".."
 }
+
+// validOutName reports whether name is a safe syndication output feed name.
+func validOutName(name string) bool { return validKeySegment(name) }
 
 // outDefaultLimit is the default item count for a syndication output feed when
 // the caller does not specify --limit (or specifies 0).
@@ -252,7 +255,7 @@ func validateOutPayload(format string, data []byte) error {
 // duplicating — and drifting from — these rules.
 func validateOutShape(in OutFeed) error {
 	if !validOutName(in.Name) {
-		return fmt.Errorf("syndication name %q must match [A-Za-z0-9._-] and not be '.' or '..'", in.Name)
+		return errBadOutName(in.Name)
 	}
 	if in.Format != "rss" && in.Format != "json" {
 		return fmt.Errorf("format %q is invalid; must be rss or json", in.Format)
@@ -328,7 +331,7 @@ func setOutFeed(ctx context.Context, db *DB, in OutFeed) error {
 // entry by name. Shared by `srr syndicate rm` and the DELETE handler.
 func removeOutFeed(ctx context.Context, db *DB, name string) error {
 	if !validOutName(name) {
-		return fmt.Errorf("syndication name %q must match [A-Za-z0-9._-] and not be '.' or '..'", name)
+		return errBadOutName(name)
 	}
 	// Delete the output files BEFORE the Commit that forgets the entry: once
 	// the config no longer names them, nothing can ever delete them (the store
@@ -348,7 +351,7 @@ func removeOutFeed(ctx context.Context, db *DB, name string) error {
 	// forever, which is precisely what the files-before-Commit order exists to
 	// prevent. rmMissingOK asks the store instead of guessing.
 	for _, ext := range []string{".rss", ".json"} {
-		if err := rmIfPresent(ctx, db, "out/"+name+ext); err != nil {
+		if err := rmIfPresent(ctx, db, outKey(name, ext)); err != nil {
 			return err
 		}
 	}
@@ -380,21 +383,33 @@ func rmIfPresent(ctx context.Context, db *DB, key string) error {
 	if rmErr == nil {
 		return nil
 	}
-	if _, statErr := db.Stat(ctx, key); errors.Is(statErr, fs.ErrNotExist) {
+	if _, exists, statErr := store.StatOptional(ctx, db.Backend, key); statErr == nil && !exists {
 		slog.Warn("ignoring delete failure for absent syndication output file", "key", key, "error", rmErr)
 		return nil
 	}
 	return fmt.Errorf("remove output file %s: %w", key, rmErr)
 }
 
-// outFileKey returns the store key for an OutFeed's output file.
+// errBadOutName is the one rejection for a name the grammar refuses. The
+// grammar itself is validKeySegment's; only its description lived at two call
+// sites, where a widening would have left one of them claiming the old rule.
+func errBadOutName(name string) error {
+	return fmt.Errorf("syndication name %q must match [A-Za-z0-9._-] and not be '.' or '..'", name)
+}
+
+// outKey names a syndication output file. The sweep that deletes the files and
+// the writer that creates them must agree byte-for-byte on this, so neither
+// spells it inline.
+func outKey(name, ext string) string { return "out/" + name + ext }
+
+// outFileKey returns the store key for an OutFeed's output file. Anything that
+// is not "json" resolves to .rss, so an entry stored with an empty format
+// names the file the writer actually produces.
 func outFileKey(o OutFeed) string {
-	switch o.Format {
-	case "json":
-		return "out/" + o.Name + ".json"
-	default:
-		return "out/" + o.Name + ".rss"
+	if o.Format == "json" {
+		return outKey(o.Name, ".json")
 	}
+	return outKey(o.Name, ".rss")
 }
 
 // outContentType returns the HTTP Content-Type for an OutFeed's output file, so

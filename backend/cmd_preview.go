@@ -90,9 +90,7 @@ func previewFetch(ctx context.Context, recipes map[string]Recipe, recipeName, in
 	defer release()
 	engine := ingest.New()
 
-	r := recipeFor(recipes, recipeName)
-	def := recipeFor(recipes, defaultRecipeName)
-	name := ingest.Select(ingestOverride, r.Ingest, def.Ingest)
+	name := effectiveRecipe(recipes, recipeName, Recipe{Ingest: ingestOverride}).Ingest
 	result, err := engine.Fetch(ctx, name, resolveClient(), buf, ingest.Request{URL: rawURL, MaxSize: len(buf) - 1})
 	if err != nil {
 		return ingest.Result{}, fmt.Errorf("ingest %q: %w", name, err)
@@ -113,9 +111,7 @@ func renderPreview(ctx context.Context, recipes map[string]Recipe, recipeName st
 	processor := mod.New()
 	ctx = grantSecrets(ctx, recipes, recipeName, secretsOverride)
 
-	r := recipeFor(recipes, recipeName)
-	def := recipeFor(recipes, defaultRecipeName)
-	pipe := resolvePipe(resolvePipe(def.Pipe, r.Pipe), pipeOverride)
+	pipe := effectiveRecipe(recipes, recipeName, Recipe{Pipe: pipeOverride}).Pipe
 	if err := processor.Validate(ctx, pipe); err != nil {
 		return nil, fmt.Errorf("invalid pipeline %v: %w", pipe, err)
 	}
@@ -146,15 +142,12 @@ func renderPreview(ctx context.Context, recipes map[string]Recipe, recipeName st
 }
 
 func (o *PreviewCmd) Run() error {
-	var recipes map[string]Recipe
-	if err := withDB(false, func(_ context.Context, db *DB) error {
-		recipes = db.core.Recipes
-		return nil
-	}); err != nil {
+	ctx := context.Background()
+	recipes, err := loadRecipes(ctx)
+	if err != nil {
 		return err
 	}
 
-	ctx := context.Background()
 	articles, err := renderPreview(ctx, recipes, o.Recipe, o.Pipe, o.Ingest, o.Secrets, o.URL.String())
 	if err != nil {
 		return err

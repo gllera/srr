@@ -1,16 +1,11 @@
 package main
 
 import (
-	"context"
-	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
-
-	"srr/store"
 )
 
 const (
@@ -538,19 +533,6 @@ func TestRefsNotPublishedAreNotAdopted(t *testing.T) {
 	}
 }
 
-// putFailBackend refuses every AtomicPut under a key prefix.
-type putFailBackend struct {
-	store.Backend
-	prefix string
-}
-
-func (f *putFailBackend) AtomicPut(ctx context.Context, key string, r io.Reader, m store.ObjectMeta) error {
-	if strings.HasPrefix(key, f.prefix) {
-		return errors.New("injected put failure")
-	}
-	return f.Backend.AtomicPut(ctx, key, r, m)
-}
-
 // SyncRefs is fatal, like SyncSeen: a batch whose counts could not be published
 // must not reach the root, or every one of its keys stays undercounted forever.
 func TestSyncRefsFailureIsFatal(t *testing.T) {
@@ -560,7 +542,7 @@ func TestSyncRefsFailureIsFatal(t *testing.T) {
 		t.Fatal(err)
 	}
 	putExpireBatch(t, db, fresh1d, []*Item{{Feed: a, Title: "a1", Content: img(refKeyA)}})
-	db.Backend = &putFailBackend{Backend: db.Backend, prefix: seenSeries + "/"}
+	db.Backend = &faultBackend{Backend: db.Backend, put: failPrefix(seenSeries + "/")}
 	if err := db.SyncRefs(ctx); err == nil {
 		t.Fatal("want an error: an unwritable refcount sidecar must abort the cycle")
 	}
@@ -655,7 +637,7 @@ func TestExpireFailureLeavesRefsUntouched(t *testing.T) {
 	mustWriteAsset(t, dir, refKeyA)
 	putExpireBatch(t, db, old20d, []*Item{{Feed: ch, Title: "o1", Content: img(refKeyA)}})
 
-	db.Backend = &statFailBackend{Backend: db.Backend}
+	db.Backend = &faultBackend{Backend: db.Backend, stat: failAll()}
 	if err := db.ExpireArticles(ctx, expNow); err == nil {
 		t.Fatal("want error from failing Stat")
 	}

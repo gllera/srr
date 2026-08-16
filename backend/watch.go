@@ -116,6 +116,31 @@ func validateWatchName(name string) error {
 	return nil
 }
 
+// stampWatchRule upserts one VALIDATED rule with its apply-forward coverage
+// stamp, reporting whether anything changed. An unchanged spec is a NO-OP —
+// re-declaring a rule must not restart its lane — while a changed one
+// re-stamps the floor at THIS store's head. The two maps are guarded
+// INDEPENDENTLY: patterns live in config.gz and floors in the manifest, and a
+// root pointed back at an older generation can legitimately carry one without
+// the other (one guard covering both once wrote into a nil map and panicked).
+// Callers validate the name and spec first and own the Commit — `srr watch
+// set` (setWatchRule) and the config import (applyConfigDoc) share exactly
+// this stamp.
+func stampWatchRule(c *DBCore, name, spec string) bool {
+	if cur, ok := c.Watch[name]; ok && cur == spec {
+		return false
+	}
+	if c.Watch == nil {
+		c.Watch = map[string]string{}
+	}
+	if c.WatchFrom == nil {
+		c.WatchFrom = map[string]int{}
+	}
+	c.Watch[name] = spec
+	c.WatchFrom[name] = c.TotalArticles
+	return true
+}
+
 // watchDoc is one stride region's bitmap object: gzipped JSON, one base64 plane
 // per rule that has at least one hit in the region.
 //
@@ -474,36 +499,4 @@ func (o *DB) reconcileWatchRoster(rules map[string]*mod.Match) (map[string]int, 
 		from[name] = min(f, c.TotalArticles)
 	}
 	return from, unstamped
-}
-
-// loadWatchRegion reads the bitmap object covering a chron and reports which
-// rules claim it. Read-side helper for `srr inspect` and the tests — the writer
-// above never needs it, since it only ever extends the region it is already
-// holding.
-func (o *DB) loadWatchRegion(ctx context.Context, chron int) (watchPlanes, int, error) {
-	c := &o.core
-	p := chron / watchPackSize
-	key, err := c.Names.key(watchSeries, p)
-	if err != nil {
-		return nil, 0, err
-	}
-	buf, err := o.readGz(ctx, key)
-	if err != nil {
-		return nil, 0, err
-	}
-	base := p * watchPackSize
-	n := min(c.TotalArticles-base, watchPackSize)
-	planes, err := parseWatchDoc(buf, base, n)
-	return planes, base, err
-}
-
-// watched reports whether a rule's plane claims a chron. The coverage gate is
-// the caller's: a chron outside [WatchFrom[rule], WatchCovered) has no answer
-// here, and a zero bit there means "never evaluated", not "no match".
-func (p watchPlanes) watched(rule string, offset int) bool {
-	plane := p[rule]
-	if plane == nil || offset < 0 || offset>>3 >= len(plane) {
-		return false
-	}
-	return plane[offset>>3]&(1<<(offset&7)) != 0
 }

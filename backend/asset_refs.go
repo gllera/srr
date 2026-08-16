@@ -1,15 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"maps"
 	"slices"
-
-	"srr/store"
 )
 
 // The asset reference sidecar — docs/MANIFEST-SPEC.md §4.7.
@@ -345,15 +342,15 @@ func (o *DB) SyncRefs(ctx context.Context) error {
 	if o.refs == nil || !o.refs.dirty {
 		return nil
 	}
-	ref := StemRef{Series: seenSeries, Stem: o.core.Names.alloc(seenSeries)}
 	body, err := gzipJSON(o.refs.doc())
 	if err != nil {
 		return err
 	}
-	if err := o.AtomicPut(ctx, ref.key(), bytes.NewReader(body), store.ObjectMeta{}); err != nil {
+	ref, err := o.putSingleton(ctx, body)
+	if err != nil {
 		return err
 	}
-	o.core.Names.ARef = &ref
+	o.core.Names.ARef = ref
 	o.refs.dirty = false
 	return nil
 }

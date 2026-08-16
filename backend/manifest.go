@@ -131,10 +131,15 @@ func (o *DB) buildManifest(m int) Manifest {
 //
 // The encoding is deterministic (Go sorts map keys; the names table's runs and
 // the feed projection are order-free), so equal content yields equal bytes.
-func (o *DB) manifestSig() ([]byte, error) {
+//
+// The zeroed projection rides back alongside the signature so Commit publishes
+// the very manifest it compared (after stamping Num/FetchedAt) instead of
+// projecting the core a second time.
+func (o *DB) manifestSig() (Manifest, []byte, error) {
 	m := o.buildManifest(0)
 	m.FetchedAt = 0
-	return json.Marshal(m)
+	sig, err := json.Marshal(m)
+	return m, sig, err
 }
 
 // publishManifest writes manifest/<ManifestNum+1>.gz and, on success, advances
@@ -154,9 +159,12 @@ func (o *DB) manifestSig() ([]byte, error) {
 // provably unreferenced garbage — its own listed objects are unreferenced
 // too — and may be overwritten. A collision against a root that HAS advanced is
 // a real peer writer, and that is fatal for the cycle.
-func (o *DB) publishManifest(ctx context.Context) error {
+func (o *DB) publishManifest(ctx context.Context, man Manifest) error {
+	manifestMemo.forget()
 	m := o.core.ManifestNum + 1
-	body, err := gzipJSON(o.buildManifest(m))
+	man.Num = m
+	man.FetchedAt = o.core.FetchedAt
+	body, err := gzipJSON(man)
 	if err != nil {
 		return fmt.Errorf("encode manifest %d: %w", m, err)
 	}
@@ -188,17 +196,9 @@ func (o *DB) publishManifest(ctx context.Context) error {
 // counter. Used only on the exclusive-create collision path, so the extra GET
 // costs nothing in steady state. A store with no db.gz yet reads as 0.
 func (o *DB) readRootManifestNum(ctx context.Context) (int, error) {
-	rc, err := getOptional(ctx, o.Backend, dbFileKey)
-	if err != nil {
+	data, err := readGzOptional(ctx, o.Backend, dbFileKey)
+	if err != nil || data == nil {
 		return 0, err
-	}
-	if rc == nil {
-		return 0, nil
-	}
-	defer rc.Close()
-	data, err := gunzip(rc)
-	if err != nil {
-		return 0, fmt.Errorf("decompress %s: %w", dbFileKey, err)
 	}
 	var root RootState
 	if err := json.Unmarshal(data, &root); err != nil {
@@ -266,14 +266,12 @@ func (o *DB) GC(ctx context.Context, keep int) error {
 	for _, k := range c.Names.keys() {
 		live[k] = true
 	}
-	// Floor the window at the oldest generation that can still EXIST. `cutoff+1`
-	// alone is not that: a sweep deletes the manifests it clears and records how
-	// far it got in `gcm`, so everything at or below `gcm` is already gone. Raise
-	// --keep-manifests past the number of surviving generations and cutoff+1 dives
-	// below `gcm`, this read 404s, and — since the call site is warn-only — the
-	// store silently stops being swept for good. Same clamp the three
-	// cmd_inspect_manifest.go walks already apply, for the same reason.
-	oldest := min(max(cutoff+1, c.GCManifest+1, 1), c.ManifestNum)
+	// Floor the window at the oldest generation that can still EXIST
+	// (oldestLiveGen). `cutoff+1` alone is not that: raise --keep-manifests past
+	// the number of surviving generations and cutoff+1 dives below `gcm`, this
+	// read 404s, and — since the call site is warn-only — the store silently
+	// stops being swept for good.
+	oldest := min(oldestLiveGen(c, keep), c.ManifestNum)
 	keys, floor, err := o.manifestObjectKeys(ctx, oldest)
 	if err != nil {
 		// Nothing may be reclaimed on incomplete knowledge of what is still
@@ -324,8 +322,6 @@ func (o *DB) GC(ctx context.Context, keep int) error {
 // listing reports errors.ErrUnsupported with the store untouched and GC falls
 // back to the drain.
 func (o *DB) gcSweepList(ctx context.Context, cutoff int, live map[string]bool, floor map[string]int) error {
-	c := &o.core
-
 	var orphans []string
 	present := map[int]bool{} // the generation manifests the store actually holds
 	for _, s := range store.PackSeries {
@@ -380,50 +376,36 @@ func (o *DB) gcSweepList(ctx context.Context, cutoff int, live map[string]bool, 
 		return fmt.Errorf("gc: reclaiming %d of %d unreferenced object(s): %w", len(failed), len(orphans), err)
 	}
 
-	// The superseded generations, oldest first. Each is read before it is
-	// dropped, for the one thing the listing above cannot cover: a manifest may
-	// name an object OUTSIDE the pack grammar — an S32-era manifest still inside
-	// the window lists the retired kind-lettered tails, delta segments and
+	// The superseded generations, oldest first. Each present one is read before
+	// it is dropped, for the one thing the listing above cannot cover: a manifest
+	// may name an object OUTSIDE the pack grammar — an S32-era manifest still
+	// inside the window lists the retired kind-lettered tails, delta segments and
 	// summaries (§10.1) — and that is the only chance anything has to reclaim
 	// them. Its pack-grammar names need no second pass: a generation at or below
 	// the cutoff drew every stem it holds below the floor, so the orphan sweep
-	// already covered them.
-	swept := c.GCManifest
-	from := max(c.GCManifest+1, 1)
-	to := min(cutoff, from+gcMaxSweep-1)
-	for g := from; g <= to; g++ {
-		if present[g] {
-			keys, _, err := o.manifestObjectKeys(ctx, g)
-			if err != nil {
-				slog.Warn("gc: superseded manifest unreadable; its pack objects still reclaim by listing, any legacy names it held do not",
-					"generation", g, "error", err)
-			}
-			var legacy []string
-			for _, k := range keys {
-				if live[k] {
-					continue
-				}
-				if _, _, isPack := store.ParsePackKey(k); isPack {
-					continue
-				}
-				legacy = append(legacy, k)
-			}
-			if _, err := store.RmAll(ctx, o.Backend, legacy, rmParallel()); err != nil {
-				// A generation only counts as cleared when EVERY name it holds
-				// is gone: leave gcm below it so the next run retries exactly
-				// this generation.
-				c.GCManifest = swept
-				return fmt.Errorf("gc generation %d: %w", g, err)
-			}
-			if err := o.Rm(ctx, manifestKey(g)); err != nil {
-				c.GCManifest = swept
-				return fmt.Errorf("gc manifest %d: %w", g, err)
-			}
+	// already covered them. An absent generation was cleared by an earlier run;
+	// the drain just advances over it.
+	return o.drainGenerations(ctx, cutoff, func(g int) ([]string, bool) {
+		if !present[g] {
+			return nil, false
 		}
-		swept = g
-	}
-	c.GCManifest = swept
-	return nil
+		keys, _, err := o.manifestObjectKeys(ctx, g)
+		if err != nil {
+			slog.Warn("gc: superseded manifest unreadable; its pack objects still reclaim by listing, any legacy names it held do not",
+				"generation", g, "error", err)
+		}
+		var legacy []string
+		for _, k := range keys {
+			if live[k] {
+				continue
+			}
+			if _, _, isPack := store.ParsePackKey(k); isPack {
+				continue
+			}
+			legacy = append(legacy, k)
+		}
+		return legacy, true
+	})
 }
 
 // gcSweepDrain is the sweep for a backend that cannot list: a LOW-WATER drain
@@ -438,15 +420,7 @@ func (o *DB) gcSweepList(ctx context.Context, cutoff int, live map[string]bool, 
 // manifest leaves behind — is unreachable from here and stays in the store
 // forever.
 func (o *DB) gcSweepDrain(ctx context.Context, cutoff int, live map[string]bool) error {
-	c := &o.core
-	from := max(c.GCManifest+1, 1)
-	to := min(cutoff, from+gcMaxSweep-1)
-	if to < from {
-		return nil
-	}
-
-	swept := c.GCManifest
-	for g := from; g <= to; g++ {
+	return o.drainGenerations(ctx, cutoff, func(g int) ([]string, bool) {
 		keys, _, err := o.manifestObjectKeys(ctx, g)
 		if err != nil {
 			// An unreadable superseded manifest is reclaimed as itself: its
@@ -460,20 +434,50 @@ func (o *DB) gcSweepDrain(ctx context.Context, cutoff int, live map[string]bool)
 				dead = append(dead, k)
 			}
 		}
-		if _, err := store.RmAll(ctx, o.Backend, dead, rmParallel()); err != nil {
-			// Same rule as the list shape: a generation with a surviving name is
-			// not cleared, so gcm stays where the last clean run left it.
-			c.GCManifest = swept
-			return fmt.Errorf("gc generation %d: %w", g, err)
-		}
-		if err := o.Rm(ctx, manifestKey(g)); err != nil {
-			c.GCManifest = swept
-			return fmt.Errorf("gc manifest %d: %w", g, err)
+		return dead, true
+	})
+}
+
+// drainGenerations walks the superseded generations oldest-first — from just
+// above the low-water mark, capped at gcMaxSweep per run — removing each
+// generation's dead keys and then the generation manifest itself. deadKeys
+// answers, for one generation, which keys to delete and whether the generation
+// still needs deleting at all (false = an earlier run already cleared it; the
+// walk just advances over it). Both sweep shapes share this skeleton so the
+// one correctness rule of the sweep is maintained once: a generation counts as
+// cleared only when EVERY delete for it landed, and `gcm` advances only over
+// cleared generations — a partial failure leaves the generation uncleared for
+// the next run without discarding the deletes that did land.
+func (o *DB) drainGenerations(ctx context.Context, cutoff int, deadKeys func(g int) ([]string, bool)) error {
+	c := &o.core
+	swept := c.GCManifest
+	from := max(c.GCManifest+1, 1)
+	to := min(cutoff, from+gcMaxSweep-1)
+	for g := from; g <= to; g++ {
+		if dead, drop := deadKeys(g); drop {
+			if _, err := store.RmAll(ctx, o.Backend, dead, rmParallel()); err != nil {
+				c.GCManifest = swept
+				return fmt.Errorf("gc generation %d: %w", g, err)
+			}
+			if err := o.Rm(ctx, manifestKey(g)); err != nil {
+				c.GCManifest = swept
+				return fmt.Errorf("gc manifest %d: %w", g, err)
+			}
 		}
 		swept = g
 	}
 	c.GCManifest = swept
 	return nil
+}
+
+// oldestLiveGen is "the oldest generation that can still EXIST" under a keep
+// window of `keep`: the sweep deletes the manifests it clears and records how
+// far it got in `gcm`, so everything at or below `gcm` is already gone, and
+// the window itself floors at 1. GC and the three cmd_inspect_manifest.go
+// walks all state their windows in this one clamp — drift at any one of them
+// reintroduces the raised --keep-manifests 404 bug the `gcm` floor closed.
+func oldestLiveGen(c *DBCore, keep int) int {
+	return max(c.ManifestNum-keep+1, c.GCManifest+1, 1)
 }
 
 // manifestObjectKeys lists every object generation g names, plus that
@@ -576,16 +580,29 @@ func manifestNamesOf(buf []byte) ([]string, map[string]int, error) {
 			if json.Unmarshal(raw, &s) == nil {
 				add(s.key())
 			}
-		default: // a pack series
+		default: // a pack series — or a singleton this shim has not been taught
 			var row struct {
 				Runs [][2]int `json:"r"`
 				Tail string   `json:"t"` // the retired S32 tail shape
 			}
-			if json.Unmarshal(raw, &row) != nil {
-				continue
+			if json.Unmarshal(raw, &row) == nil {
+				stems(key, row.Runs)
+				add(row.Tail)
 			}
-			stems(key, row.Runs)
-			add(row.Tail)
+			// A singleton's {"s":…,"stem":…} parses cleanly as a series row with
+			// no runs and no tail, i.e. as ZERO keys — so a new singleton added
+			// to ManifestNames and forgotten here would not merely be
+			// unrecognised, it would be reported as naming nothing, drop out of
+			// the GC's reachable set, and be swept while the generation naming
+			// it is still restorable. (`aref` carries a hand-written "it MUST be
+			// listed here" comment because that is exactly the trap it walked
+			// past.) Trying the singleton shape on every unknown key can only ADD
+			// to the reachable set, which is the safe direction for a delete
+			// decision: a leaked object is reclaimable, a swept live one is not.
+			var ref StemRef
+			if json.Unmarshal(raw, &ref) == nil && ref.Series != "" {
+				add(ref.key())
+			}
 		}
 	}
 	return out, next, nil
@@ -594,11 +611,19 @@ func manifestNamesOf(buf []byte) ([]string, map[string]int, error) {
 // gzipJSON encodes v as gzipped JSON with the same settings every other SRR
 // JSON object uses (no HTML escaping, stdlib gzip).
 func gzipJSON(v any) ([]byte, error) {
+	data, err := jsonEncode(v)
+	if err != nil {
+		return nil, err
+	}
+	return gzipBytes(data)
+}
+
+// gzipBytes wraps raw bytes in the same stdlib gzip framing gzipJSON uses —
+// for the writer's non-JSON objects (the binary seen sidecar).
+func gzipBytes(data []byte) ([]byte, error) {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
-	enc := json.NewEncoder(gz)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
+	if _, err := gz.Write(data); err != nil {
 		return nil, err
 	}
 	if err := gz.Close(); err != nil {

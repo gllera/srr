@@ -54,6 +54,22 @@ func RegisterDOM(name string, init func() DOMProcessor) {
 	domRegistry[name] = init
 }
 
+// RegisterDOMBody registers the common shape: a parameterless built-in that
+// walks the body and reports whether it changed anything. The "takes no
+// parameters" contract (p.only) is then the engine's, stated once, instead of
+// being restated by each such module's identical six-line wrapper. Built-ins
+// that DO take parameters, or that need the item, use RegisterDOM directly.
+func RegisterDOMBody(name string, fn func(body *html.Node) bool) {
+	RegisterDOM(name, func() DOMProcessor {
+		return func(_ context.Context, p Params, _ *RawItem, body *html.Node) (bool, error) {
+			if err := p.only(); err != nil {
+				return false, err
+			}
+			return fn(body), nil
+		}
+	})
+}
+
 // builtinStep is a resolved built-in pipeline token: exactly one of str/dom is
 // non-nil, plus the parameters parsed off the token.
 type builtinStep struct {
@@ -63,21 +79,51 @@ type builtinStep struct {
 	params Params
 }
 
-// resolveStep resolves a pipeline token to its built-in step. ok=false means
-// the token names no built-in and belongs to the shell path — that includes a
-// shell command whose first word merely contains spaces or "=", which is why
-// the params are only parsed once a built-in name matched. An error is a
-// parameter error (bad value, unknown key) and is always a hard one; ok is
-// true then, so the caller can attribute it to the step by name.
+// resolvedStep is one memoized resolveStep answer.
+type resolvedStep struct {
+	st  builtinStep
+	ok  bool
+	err error
+}
+
+// resolveStep resolves a pipeline token to its built-in step, memoized by the
+// raw token: a feed's pipe is a per-feed constant, so Session.Process would
+// otherwise re-tokenize the same token and re-parse its params once per item
+// per step. Per-Module like everything else on it (one goroutine at a time),
+// and Params are read-only by contract, so one parsed map is safely shared
+// across items. The size cap only matters to a long-lived pooled Module fed
+// ad-hoc preview tokens; config pipes never approach it.
 func (o *Module) resolveStep(args string) (builtinStep, bool, error) {
+	if r, hit := o.steps[args]; hit {
+		return r.st, r.ok, r.err
+	}
+	st, ok, err := o.resolveStepUncached(args)
+	if o.steps == nil || len(o.steps) >= 256 {
+		o.steps = map[string]resolvedStep{}
+	}
+	o.steps[args] = resolvedStep{st, ok, err}
+	return st, ok, err
+}
+
+// resolveStepUncached is the actual resolution. ok=false means the token names
+// no built-in and belongs to the shell path — that includes a shell command
+// whose first word merely contains spaces or "=", which is why the params are
+// only parsed once a built-in name matched. An error is a parameter error (bad
+// value, unknown key) and is always a hard one; ok is true then, so the caller
+// can attribute it to the step by name.
+func (o *Module) resolveStepUncached(args string) (builtinStep, bool, error) {
 	trimmed := strings.TrimSpace(args)
 	fields := strings.Fields(trimmed)
 	if len(fields) == 0 {
 		return builtinStep{}, false, nil
 	}
+	// The NAME rides along even when the token is not a built-in: it is the one
+	// thing every caller needs on that path (Validate asks whether it starts
+	// with "#"), and returning a zeroed step made Validate re-tokenize the step
+	// twice more to recover what this function had already computed.
 	st := builtinStep{name: fields[0], str: o.processors[fields[0]], dom: o.domProcessors[fields[0]]}
 	if st.str == nil && st.dom == nil {
-		return builtinStep{}, false, nil
+		return builtinStep{name: fields[0]}, false, nil
 	}
 	pfields, err := splitParamFields(trimmed[len(st.name):])
 	if err != nil {

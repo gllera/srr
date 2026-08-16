@@ -73,8 +73,7 @@ func prependEnclosures(raw RawFeedItem, body *html.Node) bool {
 	if len(cands) == 0 {
 		return false
 	}
-	present := contentMediaIDs(body)
-	refs := contentRefs(body)
+	refs, present := scanContent(body)
 	fresh := func(u string) bool {
 		return !strings.Contains(refs, u) && !present[mediaFileID(u)]
 	}
@@ -214,9 +213,8 @@ func enclosureKind(typ, medium, u string) string {
 	if typ != "" && typ != "application/octet-stream" {
 		return ""
 	}
-	switch strings.ToLower(strings.TrimSpace(medium)) {
-	case "image", "audio", "video":
-		return strings.ToLower(strings.TrimSpace(medium))
+	if kind := strings.ToLower(strings.TrimSpace(medium)); kind == "image" || kind == "audio" || kind == "video" {
+		return kind
 	}
 	if uu, err := url.Parse(u); err == nil {
 		if i := strings.LastIndex(uu.Path, "."); i >= 0 {
@@ -235,16 +233,21 @@ func betterEnclosureImage(a, b *enclosureCand) bool {
 	return a.area > b.area
 }
 
-// contentRefs concatenates every place a candidate URL could already be named
-// — each attribute value, each text and comment node — so "is it already in
-// the article?" stays the plain substring test the string-form version ran.
-// DOM values are UNESCAPED, which is why one search now covers what used to
-// need a second pass over html.EscapeString(u): an &amp;-carrying URL in the
-// markup reads back here as the URL itself.
-func contentRefs(body *html.Node) string {
+// scanContent answers both halves of "does the article already show this?" in
+// ONE descent, since both were full walks of the same body back to back.
+//
+// refs concatenates every place a candidate URL could be named — each attribute
+// value, each text and comment node — so the test stays the plain substring
+// search the string-form version ran. DOM values are UNESCAPED, which is why
+// one search covers what used to need a second pass over html.EscapeString(u):
+// an &amp;-carrying URL in the markup reads back here as the URL itself.
+//
+// mediaIDs is the same question at file identity (mediaFileID), which catches a
+// resized or proxied copy of the enclosure that refs cannot.
+func scanContent(body *html.Node) (refs string, mediaIDs map[string]bool) {
 	var b strings.Builder
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
+	ids := map[string]bool{}
+	for n := range descend(body) {
 		switch n.Type {
 		case html.TextNode, html.CommentNode:
 			b.WriteString(n.Data)
@@ -254,30 +257,12 @@ func contentRefs(body *html.Node) string {
 				b.WriteString(a.Val)
 				b.WriteByte('\n')
 			}
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
-		}
-	}
-	walk(body)
-	return b.String()
-}
-
-// contentMediaIDs collects the file identities of media already visible in
-// the body, keyed like #dedupmedia's groups.
-func contentMediaIDs(body *html.Node) map[string]bool {
-	ids := map[string]bool{}
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
-		if n.Type == html.ElementNode && dedupMediaTags[n.Data] {
-			if src := strings.TrimSpace(mediaAttr(n, "src")); src != "" {
-				ids[mediaFileID(src)] = true
+			if dedupMediaTags[n.Data] {
+				if src := strings.TrimSpace(mediaAttr(n, "src")); src != "" {
+					ids[mediaFileID(src)] = true
+				}
 			}
 		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
-		}
 	}
-	walk(body)
-	return ids
+	return b.String(), ids
 }

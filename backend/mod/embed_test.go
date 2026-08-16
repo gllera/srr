@@ -1,34 +1,13 @@
 package mod
 
 import (
-	"context"
 	"strings"
 	"testing"
-	"time"
 )
-
-// runEmbed processes content through #embed and returns the result,
-// asserting the immutable fields and the pipeline contract survived.
-func runEmbed(t *testing.T, content string) string {
-	t.Helper()
-	m := New()
-	now := time.Now()
-	item := &RawItem{GUID: 7, Title: "T", Content: content, Link: "http://e.com", Published: &now}
-	if err := m.Process(context.Background(), "#embed", item); err != nil {
-		t.Fatalf("Process: %v", err)
-	}
-	if item.GUID != 7 || item.Published == nil || !item.Published.Equal(now) {
-		t.Fatal("GUID/Published mutated")
-	}
-	if item.Title != "T" || item.Link != "http://e.com" {
-		t.Fatal("Title/Link mutated")
-	}
-	return item.Content
-}
 
 // A YouTube embed becomes a linked thumbnail plus a text link.
 func TestEmbedYouTube(t *testing.T) {
-	got := runEmbed(t,
+	got := runMod(t, "#embed",
 		`<p><iframe src="https://www.youtube.com/embed/dQw4w9WgXcQ" width="560" height="315"></iframe></p>`)
 	if strings.Contains(got, "<iframe") {
 		t.Fatalf("iframe should be replaced, got %q", got)
@@ -50,7 +29,7 @@ func TestEmbedYouTubeVariants(t *testing.T) {
 		"//www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
 		"https://www.youtube.com/shorts/dQw4w9WgXcQ",
 	} {
-		got := runEmbed(t, `<iframe src="`+src+`"></iframe>`)
+		got := runMod(t, "#embed", `<iframe src="`+src+`"></iframe>`)
 		if !strings.Contains(got, "watch?v=dQw4w9WgXcQ") {
 			t.Errorf("src %q: watch link missing, got %q", src, got)
 		}
@@ -59,7 +38,7 @@ func TestEmbedYouTubeVariants(t *testing.T) {
 
 // The iframe title labels the link when present.
 func TestEmbedTitleUsedAsLabel(t *testing.T) {
-	got := runEmbed(t,
+	got := runMod(t, "#embed",
 		`<iframe src="https://www.youtube.com/embed/dQw4w9WgXcQ" title="Never Gonna"></iframe>`)
 	if !strings.Contains(got, "▶ Never Gonna") {
 		t.Fatalf("iframe title should label the link, got %q", got)
@@ -68,7 +47,7 @@ func TestEmbedTitleUsedAsLabel(t *testing.T) {
 
 // Vimeo has no derivable thumbnail: text link only.
 func TestEmbedVimeo(t *testing.T) {
-	got := runEmbed(t, `<iframe src="https://player.vimeo.com/video/76979871?h=8272103f6e"></iframe>`)
+	got := runMod(t, "#embed", `<iframe src="https://player.vimeo.com/video/76979871?h=8272103f6e"></iframe>`)
 	if !strings.Contains(got, `href="https://vimeo.com/76979871"`) || strings.Contains(got, "<img") {
 		t.Fatalf("want text-only vimeo link, got %q", got)
 	}
@@ -80,7 +59,7 @@ func TestEmbedDailymotion(t *testing.T) {
 		"https://www.dailymotion.com/embed/video/x8abc12",
 		"https://geo.dailymotion.com/player.html?video=x8abc12",
 	} {
-		got := runEmbed(t, `<iframe src="`+src+`"></iframe>`)
+		got := runMod(t, "#embed", `<iframe src="`+src+`"></iframe>`)
 		if !strings.Contains(got, `href="https://www.dailymotion.com/video/x8abc12"`) {
 			t.Errorf("src %q: link missing, got %q", src, got)
 		}
@@ -92,7 +71,7 @@ func TestEmbedDailymotion(t *testing.T) {
 
 // A Spotify embed folds back to its open.spotify.com page.
 func TestEmbedSpotify(t *testing.T) {
-	got := runEmbed(t, `<iframe src="https://open.spotify.com/embed/track/4uLU6hMCjMI75M1A2tKUQC"></iframe>`)
+	got := runMod(t, "#embed", `<iframe src="https://open.spotify.com/embed/track/4uLU6hMCjMI75M1A2tKUQC"></iframe>`)
 	if !strings.Contains(got, `href="https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"`) {
 		t.Fatalf("spotify link missing, got %q", got)
 	}
@@ -109,7 +88,7 @@ func TestEmbedTikTok(t *testing.T) {
 		"https://www.tiktok.com/embed/7112233445566778899",
 		"https://m.tiktok.com/player/v1/7112233445566778899",
 	} {
-		got := runEmbed(t, `<iframe src="`+src+`"></iframe>`)
+		got := runMod(t, "#embed", `<iframe src="`+src+`"></iframe>`)
 		if !strings.Contains(got, `href="https://www.tiktok.com/embed/v2/7112233445566778899"`) {
 			t.Errorf("src %q: player link missing, got %q", src, got)
 		}
@@ -127,7 +106,7 @@ func TestEmbedTwitch(t *testing.T) {
 		{"//player.twitch.tv/?channel=some_streamer", "https://www.twitch.tv/some_streamer"},
 		{"https://clips.twitch.tv/embed?clip=TenaciousBlithePorcupine", "https://clips.twitch.tv/TenaciousBlithePorcupine"},
 	} {
-		got := runEmbed(t, `<iframe src="`+tc.src+`"></iframe>`)
+		got := runMod(t, "#embed", `<iframe src="`+tc.src+`"></iframe>`)
 		if !strings.Contains(got, `href="`+tc.want+`"`) {
 			t.Errorf("src %q: want link %q, got %q", tc.src, tc.want, got)
 		}
@@ -139,7 +118,7 @@ func TestEmbedTwitch(t *testing.T) {
 
 // The SoundCloud widget's public page rides its url= param.
 func TestEmbedSoundCloud(t *testing.T) {
-	got := runEmbed(t,
+	got := runMod(t, "#embed",
 		`<iframe src="https://w.soundcloud.com/player/?url=https%3A%2F%2Fsoundcloud.com%2Fartist%2Ftrack&amp;color=%23ff5500"></iframe>`)
 	if !strings.Contains(got, `href="https://soundcloud.com/artist/track"`) {
 		t.Fatalf("track link missing, got %q", got)
@@ -156,7 +135,7 @@ func TestEmbedStreamable(t *testing.T) {
 		"https://streamable.com/o/moo9v2",
 		"//streamable.com/s/moo9v2",
 	} {
-		got := runEmbed(t, `<iframe src="`+src+`"></iframe>`)
+		got := runMod(t, "#embed", `<iframe src="`+src+`"></iframe>`)
 		if !strings.Contains(got, `href="https://streamable.com/moo9v2"`) {
 			t.Errorf("src %q: link missing, got %q", src, got)
 		}
@@ -175,7 +154,7 @@ func TestEmbedBandcamp(t *testing.T) {
 		{"https://bandcamp.com/EmbeddedPlayer/track=987654/size=small/",
 			"https://bandcamp.com/EmbeddedPlayer/track=987654/"},
 	} {
-		got := runEmbed(t, `<iframe src="`+tc.src+`"></iframe>`)
+		got := runMod(t, "#embed", `<iframe src="`+tc.src+`"></iframe>`)
 		if !strings.Contains(got, `href="`+tc.want+`"`) {
 			t.Errorf("src %q: want link %q, got %q", tc.src, tc.want, got)
 		}
@@ -204,7 +183,7 @@ func TestEmbedUnrecognizedTargetsUntouched(t *testing.T) {
 		"https://streamable.com/x/moo9v2",
 	} {
 		in := `<p>x</p><iframe src="` + src + `"></iframe>`
-		got := runEmbed(t, in)
+		got := runMod(t, "#embed", in)
 		if got != in {
 			t.Errorf("src %q must pass through verbatim, got %q", src, got)
 		}
@@ -217,7 +196,7 @@ func TestEmbedUnrecognizedTargetsUntouched(t *testing.T) {
 // Unknown iframes are not converted; the content returns verbatim.
 func TestEmbedUnknownIframeVerbatim(t *testing.T) {
 	in := `<p>x</p><iframe src="https://ads.example.com/frame"></iframe>`
-	if got := runEmbed(t, in); got != in {
+	if got := runMod(t, "#embed", in); got != in {
 		t.Fatalf("unknown iframe must pass through verbatim, got %q", got)
 	}
 }
@@ -225,7 +204,7 @@ func TestEmbedUnknownIframeVerbatim(t *testing.T) {
 // A playlist embed has no single watch URL and is left alone.
 func TestEmbedYouTubePlaylistUntouched(t *testing.T) {
 	in := `<iframe src="https://www.youtube.com/embed/videoseries?list=PL123"></iframe>`
-	if got := runEmbed(t, in); got != in {
+	if got := runMod(t, "#embed", in); got != in {
 		t.Fatalf("playlist embed must pass through, got %q", got)
 	}
 }
@@ -233,7 +212,7 @@ func TestEmbedYouTubePlaylistUntouched(t *testing.T) {
 // No iframe at all: verbatim, odd quoting preserved.
 func TestEmbedNoOpVerbatim(t *testing.T) {
 	in := `<p ><a href='https://x.org'>a &amp; b</a></p >`
-	if got := runEmbed(t, in); got != in {
+	if got := runMod(t, "#embed", in); got != in {
 		t.Fatalf("no-op must return verbatim, got %q", got)
 	}
 }

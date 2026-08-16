@@ -163,14 +163,18 @@ func TestFetchCycleReusedFeedIdStartsClean(t *testing.T) {
 	// Remove feed 0, then add a new feed for the same source — it reuses id 0.
 	// The feed has stored articles, so removal is the irreversible case that
 	// now requires --force (what a real operator would pass here).
+	// t.Cleanup, not a trailing restore: the Fatalf between them means a red rm
+	// leaks --force into every test that runs after this one in the package,
+	// where a lock-refusal test then passes for the wrong reason.
 	savedForce := globals.Force
+	t.Cleanup(func() { globals.Force = savedForce })
 	globals.Force = true
 	if err := (&RmCmd{ID: []int{0}}).Run(); err != nil {
 		t.Fatalf("rm: %v", err)
 	}
 	globals.Force = savedForce
 	stubPassthroughResolve()
-	if err := (&AddCmd{Title: strPtr("B"), URL: strPtr(srv.URL)}).Run(); err != nil {
+	if err := (&AddCmd{Title: "B", URL: srv.URL}).Run(); err != nil {
 		t.Fatalf("add: %v", err)
 	}
 

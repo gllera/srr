@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -94,7 +95,7 @@ func TestMatchTagHierarchicalPrefix(t *testing.T) {
 func TestFeedFilterApply(t *testing.T) {
 	t.Run("no selectors selects all feeds", func(t *testing.T) {
 		sel, warns := feedFilter{}.apply(filterTestFeeds())
-		if got := selectedIDs(sel); !reflectDeepEqualInts(got, []int{0, 1, 2, 3, 4}) {
+		if got := selectedIDs(sel); !slices.Equal(got, []int{0, 1, 2, 3, 4}) {
 			t.Errorf("selected %v, want all [0 1 2 3 4]", got)
 		}
 		if len(warns) != 0 {
@@ -104,7 +105,7 @@ func TestFeedFilterApply(t *testing.T) {
 
 	t.Run("include tag matches subtree by prefix", func(t *testing.T) {
 		sel, warns := feedFilter{Tag: []string{"news"}}.apply(filterTestFeeds())
-		if got := selectedIDs(sel); !reflectDeepEqualInts(got, []int{0, 1}) {
+		if got := selectedIDs(sel); !slices.Equal(got, []int{0, 1}) {
 			t.Errorf("selected %v, want [0 1] (news + news/tech, not news2)", got)
 		}
 		if len(warns) != 0 {
@@ -114,35 +115,35 @@ func TestFeedFilterApply(t *testing.T) {
 
 	t.Run("include by feed id", func(t *testing.T) {
 		sel, _ := feedFilter{Feed: []int{3}}.apply(filterTestFeeds())
-		if got := selectedIDs(sel); !reflectDeepEqualInts(got, []int{3}) {
+		if got := selectedIDs(sel); !slices.Equal(got, []int{3}) {
 			t.Errorf("selected %v, want [3]", got)
 		}
 	})
 
 	t.Run("include union of tag and feed id", func(t *testing.T) {
 		sel, _ := feedFilter{Tag: []string{"news"}, Feed: []int{3}}.apply(filterTestFeeds())
-		if got := selectedIDs(sel); !reflectDeepEqualInts(got, []int{0, 1, 3}) {
+		if got := selectedIDs(sel); !slices.Equal(got, []int{0, 1, 3}) {
 			t.Errorf("selected %v, want [0 1 3]", got)
 		}
 	})
 
 	t.Run("exclude tag drops subtree from all", func(t *testing.T) {
 		sel, _ := feedFilter{ExcludeTag: []string{"news"}}.apply(filterTestFeeds())
-		if got := selectedIDs(sel); !reflectDeepEqualInts(got, []int{2, 3, 4}) {
+		if got := selectedIDs(sel); !slices.Equal(got, []int{2, 3, 4}) {
 			t.Errorf("selected %v, want [2 3 4] (news2 survives the prefix guard)", got)
 		}
 	})
 
 	t.Run("exclude by feed id", func(t *testing.T) {
 		sel, _ := feedFilter{ExcludeFeed: []int{3}}.apply(filterTestFeeds())
-		if got := selectedIDs(sel); !reflectDeepEqualInts(got, []int{0, 1, 2, 4}) {
+		if got := selectedIDs(sel); !slices.Equal(got, []int{0, 1, 2, 4}) {
 			t.Errorf("selected %v, want [0 1 2 4]", got)
 		}
 	})
 
 	t.Run("include then exclude a child", func(t *testing.T) {
 		sel, _ := feedFilter{Tag: []string{"news"}, ExcludeTag: []string{"news/tech"}}.apply(filterTestFeeds())
-		if got := selectedIDs(sel); !reflectDeepEqualInts(got, []int{0}) {
+		if got := selectedIDs(sel); !slices.Equal(got, []int{0}) {
 			t.Errorf("selected %v, want [0] (news kept, news/tech excluded)", got)
 		}
 	})
@@ -247,21 +248,6 @@ func TestSelectFeedsOnlyPathUnknownIDErrors(t *testing.T) {
 	if _, err := (&FetchCmd{only: []int{999}}).selectFeeds(db); err == nil {
 		t.Error("selectFeeds(only=[999]) = nil error, want an unknown-id error")
 	}
-}
-
-func reflectDeepEqualInts(a, b []int) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		// gosec cannot carry the length guard above into the loop, so b[i] reads
-		// as unbounded to it.
-		//nolint:gosec // G602: len(a) == len(b) is established
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // backoffTestGlobals swaps in a Globals with the given backoff cap, restoring

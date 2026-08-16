@@ -212,24 +212,16 @@ func loadConfigSidecar(fetch keyGetter) (*configSidecar, error) {
 // running a fetch cycle with the default recipe when the operator configured
 // something else would rewrite every article through the wrong pipeline.
 func (o *DB) loadConfig(ctx context.Context) error {
-	rc, err := getOptional(ctx, o.Backend, configFileKey)
-	if err != nil {
+	data, err := readGzOptional(ctx, o.Backend, configFileKey)
+	if err != nil || data == nil {
 		return err
-	}
-	if rc == nil {
-		return nil
-	}
-	data, err := gunzip(rc)
-	rc.Close()
-	if err != nil {
-		return fmt.Errorf("decompress %s: %w", configFileKey, err)
 	}
 	var c configSidecar
 	if err := json.Unmarshal(data, &c); err != nil {
 		return fmt.Errorf("decode %s: %w", configFileKey, err)
 	}
 	if c.Version > dbFormatVersion {
-		return fmt.Errorf("%s was written by a newer srr (format v%d, this binary supports v%d)", configFileKey, c.Version, dbFormatVersion)
+		return errFutureFormat(configFileKey, c.Version)
 	}
 	o.core.StoreConfig = c.StoreConfig
 	for id, cfg := range c.Feeds {

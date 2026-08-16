@@ -1,7 +1,6 @@
 package mod
 
 import (
-	"context"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -41,14 +40,7 @@ import (
 // sanitizer strips.
 
 func init() {
-	RegisterDOM("dedupmedia", func() DOMProcessor {
-		return func(_ context.Context, p Params, _ *RawItem, body *html.Node) (bool, error) {
-			if err := p.only(); err != nil {
-				return false, err
-			}
-			return dedupMedia(body), nil
-		}
-	})
+	RegisterDOMBody("dedupmedia", dedupMedia)
 }
 
 // dedupMediaTags are the element types deduplicated, each by its own
@@ -79,29 +71,27 @@ var glyphClasses = map[string]bool{"emoji": true, "wp-smiley": true, "smiley": t
 func dedupMedia(body *html.Node) bool {
 	type fileKey struct{ tag, file string }
 	groups := map[fileKey][]*html.Node{}
-	var collect func(*html.Node)
-	collect = func(n *html.Node) {
+	for n := range descend(body) {
 		if n.Type == html.ElementNode && dedupMediaTags[n.Data] {
 			if src := strings.TrimSpace(mediaAttr(n, "src")); src != "" && !isMediaGlyph(n) {
 				k := fileKey{n.Data, mediaFileID(src)}
 				groups[k] = append(groups[k], n)
 			}
 		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			collect(c)
-		}
 	}
-	collect(body)
 
 	changed := false
 	for _, copies := range groups {
 		if len(copies) < 2 {
 			continue
 		}
-		best := 0
+		// bestScore rides alongside best: mediaScore runs four regexp passes,
+		// and recomputing the incumbent's on every comparison paid them again
+		// for a value that only changes when best moves.
+		best, bestScore := 0, mediaScore(copies[0])
 		for i := 1; i < len(copies); i++ {
-			if mediaScore(copies[i]).beats(mediaScore(copies[best])) {
-				best = i
+			if s := mediaScore(copies[i]); s.beats(bestScore) {
+				best, bestScore = i, s
 			}
 		}
 		for i, n := range copies {
@@ -201,14 +191,11 @@ func pruneEmptyWrappers(n, stop *html.Node) {
 }
 
 func hasRealContent(n *html.Node) bool {
-	if n.Type == html.TextNode && strings.TrimSpace(n.Data) != "" {
-		return true
-	}
-	if n.Type == html.ElementNode && dedupKeepTags[n.Data] {
-		return true
-	}
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		if hasRealContent(c) {
+	for d := range descend(n) {
+		if d.Type == html.TextNode && strings.TrimSpace(d.Data) != "" {
+			return true
+		}
+		if d.Type == html.ElementNode && dedupKeepTags[d.Data] {
 			return true
 		}
 	}
@@ -227,7 +214,13 @@ func mediaAttr(n *html.Node, name string) string {
 
 // pxDim parses the leading decimal digits of a width/height attribute value
 // ("383", "383px"); anything else is 0.
-func pxDim(s string) int {
+func pxDim(s string) int { v, _ := pxDimOK(s); return v }
+
+// pxDimOK is pxDim keeping the "were there any leading digits at all" answer it
+// computes anyway — the predicate #untrack's declaredPx used to re-derive by
+// hand. ⚠ It does NOT trim: mediaScore's area must stay 0 for width=" 12", so
+// leading whitespace is the caller's to strip (declaredPx does).
+func pxDimOK(s string) (int, bool) {
 	v, ok := 0, false
 	for _, r := range s {
 		if r < '0' || r > '9' {
@@ -239,7 +232,7 @@ func pxDim(s string) int {
 		}
 	}
 	if !ok {
-		return 0
+		return 0, false
 	}
-	return v
+	return v, true
 }

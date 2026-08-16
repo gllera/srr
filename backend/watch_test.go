@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -11,6 +12,41 @@ import (
 
 	"srr/store"
 )
+
+// loadWatchRegion reads the bitmap object covering a chron and reports which
+// rules claim it. TEST-ONLY, and it lives here for that reason: the writer only
+// ever extends the region it is already holding, --validate reads planes
+// through parseWatchDoc directly, and the reader lane that will want this shape
+// is not built yet. It moved out of watch.go when its doc comment there was
+// found naming a consumer (`srr inspect`) that does not exist — production code
+// advertising a caller is what stops the next person deleting it.
+func (o *DB) loadWatchRegion(ctx context.Context, chron int) (watchPlanes, int, error) {
+	c := &o.core
+	p := chron / watchPackSize
+	key, err := c.Names.key(watchSeries, p)
+	if err != nil {
+		return nil, 0, err
+	}
+	buf, err := o.readGz(ctx, key)
+	if err != nil {
+		return nil, 0, err
+	}
+	base := p * watchPackSize
+	n := min(c.TotalArticles-base, watchPackSize)
+	planes, err := parseWatchDoc(buf, base, n)
+	return planes, base, err
+}
+
+// watched reports whether a rule's plane claims a chron — test-only, like the
+// reader above. The coverage gate is the caller's: a chron outside [WatchFrom[rule], WatchCovered) has no answer
+// here, and a zero bit there means "never evaluated", not "no match".
+func (p watchPlanes) watched(rule string, offset int) bool {
+	plane := p[rule]
+	if plane == nil || offset < 0 || offset>>3 >= len(plane) {
+		return false
+	}
+	return plane[offset>>3]&(1<<(offset&7)) != 0
+}
 
 // Keyword watchlists (FMT5) — the per-article axis over a chron-aligned bitmap
 // sidecar. What these tests are for, in order of how much they matter:

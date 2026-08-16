@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
+	"sync"
 )
 
 // InspectCmd mirrors the frontend's bounds-based pack lookup so a pass
@@ -118,7 +120,7 @@ func (o *InspectCmd) Run() error {
 
 func (o *InspectCmd) openFetcher(ctx context.Context) (keyGetter, func(), error) {
 	if o.URL != "" {
-		return httpFetcher(ctx, o.URL), nil, nil
+		return cacheManifests(httpFetcher(ctx, o.URL)), nil, nil
 	}
 	db, err := NewDB(ctx, false)
 	if err != nil {
@@ -127,9 +129,42 @@ func (o *InspectCmd) openFetcher(ctx context.Context) (keyGetter, func(), error)
 	o.lister = func(prefix string) ([]string, error) {
 		return db.List(ctx, prefix)
 	}
+	return cacheManifests(db.fetcher(ctx)), func() { db.Close(ctx) }, nil
+}
+
+// cacheManifests memoizes manifest bodies for ONE inspect run. --validate
+// walks the same K-generation window three separate times — the M2 hole scan,
+// the orphan reachability set and the chron-permanence check — and reads the
+// current manifest again on top of the one loadCore already fetched, so on an
+// --url store that is ~60 redundant GET+gunzip round-trips at the default K.
+//
+// Sound because manifest names are write-once and never reused (M3): inside a
+// run a cached body cannot be stale. Only SUCCESSES are cached, so a missing
+// generation is re-fetched and reported exactly as before, and only manifests
+// are — the pack walks deliberately keep one resident pack rather than the
+// whole store's content.
+func cacheManifests(fetch keyGetter) keyGetter {
+	// Guarded because a wrapped fetcher is handed to loadIdxPacks, which reads
+	// the finalized packs concurrently: only manifest keys are ever stored, so
+	// today no write races a read — but a memo whose safety depends on which
+	// keys its callers happen to ask for is one refactor from a data race.
+	var mu sync.Mutex
+	cache := map[string][]byte{}
 	return func(key string) ([]byte, error) {
-		return db.readGz(ctx, key)
-	}, func() { db.Close(ctx) }, nil
+		mu.Lock()
+		buf, ok := cache[key]
+		mu.Unlock()
+		if ok {
+			return buf, nil
+		}
+		buf, err := fetch(key)
+		if err == nil && strings.HasPrefix(key, manifestSeries+"/") {
+			mu.Lock()
+			cache[key] = buf
+			mu.Unlock()
+		}
+		return buf, err
+	}
 }
 
 // httpFetcher reads store objects straight off a CDN for `srr inspect --url`.
@@ -185,8 +220,12 @@ func loadDataPack(fetch keyGetter, key string) ([]ArticleData, error) {
 }
 
 func truncStr(s string, n int) string {
-	if len(s) <= n {
-		return s
+	// Runes, via the same cutter the MCP layer uses: a report line cut at a byte
+	// offset can land mid-rune and print a replacement char, and the one caller
+	// truncates a feed title.
+	out, cut := truncateRunes(s, n)
+	if cut {
+		return out + "..."
 	}
-	return s[:n] + "..."
+	return out
 }

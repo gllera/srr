@@ -276,6 +276,8 @@ func Register(name string, init func() Processor) {
 type Module struct {
 	processors    map[string]Processor
 	domProcessors map[string]DOMProcessor
+	// steps memoizes resolveStep by raw pipeline token (see resolveStep).
+	steps map[string]resolvedStep
 }
 
 // New builds a Module with every registered built-in instantiated once.
@@ -391,13 +393,13 @@ func Builtins() []string {
 func (o *Module) Validate(ctx context.Context, pipeline []string) error {
 	sentinel := &RawItem{}
 	for _, step := range pipeline {
-		if len(strings.Fields(step)) == 0 {
+		st, ok, err := o.resolveStep(step)
+		if st.name == "" { // no first word at all
 			return fmt.Errorf("empty pipeline step")
 		}
-		st, ok, err := o.resolveStep(step)
 		if !ok {
-			if name := strings.Fields(step)[0]; strings.HasPrefix(name, "#") {
-				return fmt.Errorf("unknown built-in module %q", name)
+			if strings.HasPrefix(st.name, "#") {
+				return fmt.Errorf("unknown built-in module %q", st.name)
 			}
 			continue // external shell command: not validated here
 		}

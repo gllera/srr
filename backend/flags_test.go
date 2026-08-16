@@ -1,6 +1,9 @@
 package main
 
 import (
+	"fmt"
+	"os"
+	"reflect"
 	"runtime"
 	"testing"
 	"time"
@@ -194,6 +197,92 @@ func findCmd(t *testing.T, n *kong.Node, path ...string) *kong.Node {
 		n = next
 	}
 	return n
+}
+
+// The other half of the drift net, and the half that was missing: every flag
+// the scoped STRUCTS declare must appear in scopedFlagNamesList. The list is
+// the yaml-resolution allowlist, so a field added to a struct but not to the
+// list keeps parsing and keeps showing in --help while silently losing its
+// bare top-level srr.yaml key — a failure that lands on the operator, not the
+// build. The tests below iterate the list, so they could never see it.
+func TestScopedFlagStructsAreListed(t *testing.T) {
+	listed := map[string]bool{}
+	for _, n := range scopedFlagNamesList {
+		listed[n] = true
+	}
+	declared := map[string]bool{}
+	for _, st := range []any{cycleFlags{}, gcFlags{}, netFlags{}} {
+		rt := reflect.TypeOf(st)
+		for i := range rt.NumField() {
+			f := rt.Field(i)
+			name := f.Tag.Get("name")
+			if name == "" {
+				name = toKebab(f.Name)
+			}
+			declared[name] = true
+			if !listed[name] {
+				t.Errorf("%s.%s declares --%s, which is missing from scopedFlagNamesList (its srr.yaml key will not resolve)",
+					rt.Name(), f.Name, name)
+			}
+		}
+	}
+	for _, n := range scopedFlagNamesList {
+		if !declared[n] {
+			t.Errorf("scopedFlagNamesList names --%s, which no scoped struct declares", n)
+		}
+	}
+}
+
+// TestScopedFlagEnvNamesAreSeeded nets the OTHER axis: seedScopedDefaults
+// restates every SRR_* name a second time, in string literals, so a typo there
+// is invisible — the flag keeps working everywhere it is declared, and only the
+// non-embedding commands that still reach the writer (`feed rm` draining a live
+// delta chain) quietly ignore the env var. That is exactly the class of bug
+// seedScopedDefaults exists to prevent.
+//
+// The check is behavioural rather than textual: set every declared env var to a
+// value distinguishable from the compiled default, seed a fresh Globals, and
+// require the seed to have picked it up.
+func TestScopedFlagEnvNamesAreSeeded(t *testing.T) {
+	// Values that parse for every scoped type (int, duration, bool, string) and
+	// that no compiled default uses.
+	const probeInt, probeDur, probeStr = "7", "7h", "true"
+	var g Globals
+	for _, st := range []any{cycleFlags{}, gcFlags{}, netFlags{}} {
+		rt := reflect.TypeOf(st)
+		for i := range rt.NumField() {
+			f := rt.Field(i)
+			env := f.Tag.Get("env")
+			if env == "" {
+				t.Errorf("%s.%s declares no env var; every scoped flag has one", rt.Name(), f.Name)
+				continue
+			}
+			gf := reflect.ValueOf(&g).Elem().FieldByName(f.Name)
+			if !gf.IsValid() {
+				t.Errorf("Globals has no %s field for %s.%s", f.Name, rt.Name(), f.Name)
+				continue
+			}
+			var probe string
+			switch {
+			case f.Type == reflect.TypeOf(time.Duration(0)):
+				probe = probeDur
+			case f.Type.Kind() == reflect.Bool:
+				probe = probeStr
+			case f.Type.Kind() == reflect.Int:
+				probe = probeInt
+			default:
+				probe = "probe-value"
+			}
+			t.Setenv(env, probe)
+			g = Globals{}
+			seedScopedDefaults(&g)
+			if got := fmt.Sprint(gf.Interface()); got == "" || got == fmt.Sprint(reflect.Zero(f.Type).Interface()) {
+				t.Errorf("%s=%s did not reach Globals.%s (seedScopedDefaults left it %v) — the env name is misspelled in one of the two places that state it",
+					env, probe, f.Name, gf.Interface())
+			}
+			os.Unsetenv(env)
+		}
+	}
 }
 
 // The help-noise regression pin: no cycle/gc/net flag may sit at the root

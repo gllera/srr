@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"bytes"
+	"iter"
 	"net/url"
 	"strings"
 
@@ -40,8 +41,7 @@ func discoverFeedLink(htmlData []byte, baseURL string) (string, bool) {
 			}
 			switch string(name) {
 			case "base":
-				for {
-					k, v, more := z.TagAttr()
+				for k, v := range tagAttrs(z) {
 					if baseOverride == nil && strings.EqualFold(string(k), "href") {
 						if h := strings.TrimSpace(string(v)); h != "" {
 							if u, perr := url.Parse(h); perr == nil {
@@ -53,15 +53,11 @@ func discoverFeedLink(htmlData []byte, baseURL string) (string, bool) {
 							}
 						}
 					}
-					if !more {
-						break
-					}
 				}
 			case "link":
 				// Collect all attributes of this <link> tag.
 				var rel, typ, href string
-				for {
-					k, v, more := z.TagAttr()
+				for k, v := range tagAttrs(z) {
 					switch strings.ToLower(string(k)) {
 					case "rel":
 						rel = string(v)
@@ -69,9 +65,6 @@ func discoverFeedLink(htmlData []byte, baseURL string) (string, bool) {
 						typ = string(v)
 					case "href":
 						href = string(v)
-					}
-					if !more {
-						break
 					}
 				}
 				href = strings.TrimSpace(href)
@@ -131,4 +124,20 @@ func resolveHref(href string, base *url.URL) string {
 		return base.ResolveReference(ref).String()
 	}
 	return ref.String()
+}
+
+// tagAttrs iterates the current tag's attributes. html.Tokenizer.TagAttr is a
+// "call until it says there are no more" API, which every caller then wrapped in
+// the same bare for/break — the loop shape it needs is a range, so this states
+// the termination rule once. The yielded slices are the tokenizer's, valid only
+// until the next call, exactly as TagAttr's are.
+func tagAttrs(z *html.Tokenizer) iter.Seq2[[]byte, []byte] {
+	return func(yield func([]byte, []byte) bool) {
+		for {
+			k, v, more := z.TagAttr()
+			if !yield(k, v) || !more {
+				return
+			}
+		}
+	}
 }

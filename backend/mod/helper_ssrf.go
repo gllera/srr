@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -130,3 +131,15 @@ func SafeTransport() *http.Transport {
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 }
+
+// safeClient is the ONE guarded client the content-fetching built-ins share.
+// Each used to build its own transport per mod.New() — i.e. per pooled Module,
+// dropped at every GC — so #readability and #selfhost re-handshook TCP+TLS
+// instead of reusing keep-alives, and never shared a connection across the
+// parallel feeds. An *http.Transport is safe for concurrent use and neither
+// caller sets Client.Timeout (both bound every request by ctx), so one warm
+// client is behaviour-identical. The fetch fan-out keeps its own (cmd_fetch),
+// which sizes the pools to --workers.
+var safeClient = sync.OnceValue(func() *http.Client {
+	return &http.Client{Transport: SafeTransport()}
+})

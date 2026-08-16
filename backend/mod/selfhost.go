@@ -54,7 +54,7 @@ func init() {
 		// One SSRF-guarded client per Module (per fetch worker via procPool):
 		// media URLs come from attacker-controlled feed content, so dials to
 		// private/loopback/link-local addresses are refused.
-		client := &http.Client{Transport: SafeTransport()}
+		client := safeClient()
 		return func(ctx context.Context, p Params, i *RawItem, body *html.Node) (bool, error) {
 			timeout, err := p.Duration("timeout", selfhostTimeout)
 			if err != nil {
@@ -70,8 +70,8 @@ func init() {
 			// The self-host object cap is enforced at download: clamp the download
 			// limit to it so an over-cap asset is never written to the cache (the
 			// upload step trusts whatever lands there).
-			if MaxAssetSize > 0 && MaxAssetSize < maxBody {
-				maxBody = MaxAssetSize
+			if MaxAssetSize > 0 {
+				maxBody = min(maxBody, MaxAssetSize)
 			}
 
 			cacheDir := cacheDirFromContext(ctx)

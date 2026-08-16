@@ -107,8 +107,24 @@ type storeLease struct {
 
 func (l storeLease) expired(now time.Time) bool { return l.Expires <= now.Unix() }
 
+// heldByPeer reports whether this lease is LIVE and belongs to another writer —
+// the one classification arm that refuses. Both acquireMarker and the fetch
+// phase's advisory probe (checkStoreBusy) dispatch on it, so the probe can
+// never drift from the real acquire.
+func (l storeLease) heldByPeer(now time.Time) bool {
+	return l.Owner != "" && l.Owner != leaseOwner && !l.expired(now)
+}
+
 func (l storeLease) until() string {
 	return time.Unix(l.Expires, 0).UTC().Format(time.RFC3339)
+}
+
+// heldErr is the refusal a live foreign lease earns — the completion of
+// heldByPeer. It lives here because the os.ErrExist it wraps is the DISPATCH
+// identity for exit code 3, serve's 409 and MCP's "store busy": a second copy
+// of this line is the one place that classification can silently be lost.
+func (l storeLease) heldErr(key string) error {
+	return fmt.Errorf("%s is held by %s until %s: %w", key, l.Owner, l.until(), os.ErrExist)
 }
 
 // acquireMarker takes key as a lease. Every refusal wraps os.ErrExist, so the
@@ -153,11 +169,11 @@ func acquireMarker(ctx context.Context, b store.Backend, key string) error {
 		return fmt.Errorf("%s was left by a writer that recorded no lease (an older srr, or a corrupt marker), so its liveness cannot be judged; if no srr is running, clear it with --force: %w", key, os.ErrExist)
 	case held.Owner == leaseOwner:
 		slog.Info("reclaiming this process's own abandoned lease", "key", key)
-	case held.expired(now):
+	case held.heldByPeer(now):
+		return held.heldErr(key)
+	default: // a foreign lease past its deadline
 		slog.Warn("stealing an expired lease: its holder started no cycle within the lease window and is presumed dead",
 			"key", key, "owner", held.Owner, "expired", held.until())
-	default:
-		return fmt.Errorf("%s is held by %s until %s: %w", key, held.Owner, held.until(), os.ErrExist)
 	}
 	return b.AtomicPut(ctx, key, bytes.NewReader(body), store.ObjectMeta{})
 }

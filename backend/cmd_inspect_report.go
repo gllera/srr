@@ -15,7 +15,7 @@ func (o *InspectCmd) inspectOne(fetch keyGetter, core *DBCore, packs []*idxPack,
 	}
 	n := packIdxFor(chron, len(packs))
 	pack := packs[n]
-	idxSub := int(pack.feedIDs[chron-n*idxPackSize])
+	idxSub := pack.feedIDAt(chron)
 	pid, offset := pack.getPackRef(chron)
 
 	fmt.Fprintf(o.w(), "\nchron %d:\n", chron)
@@ -94,14 +94,12 @@ func (o *InspectCmd) filterReport(core *DBCore, packs []*idxPack, token string, 
 	feedIDs := slices.Sorted(maps.Keys(feeds))
 	feedTotal := 0
 	for _, id := range feedIDs {
-		feedTotal += core.Feeds[id].TotalArt - core.Feeds[id].Expired
+		feedTotal += core.Feeds[id].LiveArt()
 	}
 
 	count, aboveFloor, firstChron, lastChron := 0, 0, -1, -1
 	for chron := range core.TotalArticles {
-		n := packIdxFor(chron, len(packs))
-		pack := packs[n]
-		sid := int(pack.feedIDs[chron-n*idxPackSize])
+		sid := packAt(packs, chron).feedIDAt(chron)
 		addIdx, ok := feeds[sid]
 		if !ok || chron < addIdx {
 			continue
@@ -153,7 +151,7 @@ func (o *InspectCmd) listTagsReport(core *DBCore) error {
 		}
 		if ch.Tag == "" {
 			untagged.feeds++
-			untagged.articles += ch.TotalArt - ch.Expired
+			untagged.articles += ch.LiveArt()
 			continue
 		}
 		t := tags[ch.Tag]
@@ -162,7 +160,7 @@ func (o *InspectCmd) listTagsReport(core *DBCore) error {
 			tags[ch.Tag] = t
 		}
 		t.feeds++
-		t.articles += ch.TotalArt - ch.Expired
+		t.articles += ch.LiveArt()
 	}
 	names := slices.Sorted(maps.Keys(tags))
 	fmt.Fprintf(o.w(), "\ntags (%d):\n", len(names))
@@ -232,8 +230,7 @@ func (o *InspectCmd) fromHashReport(fetch keyGetter, core *DBCore, packs []*idxP
 		fmt.Fprintf(o.w(), "  pos=%d\n", pos)
 	}
 
-	n := packIdxFor(pos, len(packs))
-	posFeedID := int(packs[n].feedIDs[pos-n*idxPackSize])
+	posFeedID := packAt(packs, pos).feedIDAt(pos)
 	matches := true
 	if activeFilter {
 		addIdx, ok := feeds[posFeedID]
@@ -245,8 +242,7 @@ func (o *InspectCmd) fromHashReport(fetch keyGetter, core *DBCore, packs []*idxP
 	if !matches {
 		finalPos = -1
 		for c := core.TotalArticles - 1; c >= floor; c-- {
-			pn := packIdxFor(c, len(packs))
-			sid := int(packs[pn].feedIDs[c-pn*idxPackSize])
+			sid := packAt(packs, c).feedIDAt(c)
 			if !activeFilter {
 				finalPos = c
 				break

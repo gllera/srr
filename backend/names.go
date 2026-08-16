@@ -29,8 +29,8 @@ import (
 // (ARC6) stays a manifest-shape change and nothing else.
 
 // manifestSingletonKeys are the keys inside `names` that are NOT a pack series.
-// A series may never be called one of these; assertNamesDisjoint proves it at
-// startup so the flat encoding below can never be ambiguous.
+// A series may never be called one of these; MarshalJSON refuses the collision
+// so the flat encoding below can never be ambiguous.
 var manifestSingletonKeys = []string{"deltas", "seen", "aref", "hsum", "ssum", "next"}
 
 // SeriesNames is one pack series' positional name list. Entry i names the
@@ -311,33 +311,19 @@ func (n *ManifestNames) deltaKeys() []string {
 	return out
 }
 
-func (n *ManifestNames) seenKey() string {
-	if n.Seen == nil {
+// singletonKey resolves an optional singleton's key, "" when the store names
+// none. Generic over the two singleton name types (StemRef, SummaryName).
+func singletonKey[T interface{ key() string }](n *ManifestNames, p *T) string {
+	if p == nil {
 		return ""
 	}
-	return n.resolve(n.Seen.key())
+	return n.resolve((*p).key())
 }
 
-func (n *ManifestNames) arefKey() string {
-	if n.ARef == nil {
-		return ""
-	}
-	return n.resolve(n.ARef.key())
-}
-
-func (n *ManifestNames) hsumKey() string {
-	if n.HSum == nil {
-		return ""
-	}
-	return n.resolve(n.HSum.key())
-}
-
-func (n *ManifestNames) ssumKey() string {
-	if n.SSum == nil {
-		return ""
-	}
-	return n.resolve(n.SSum.key())
-}
+func (n *ManifestNames) seenKey() string { return singletonKey(n, n.Seen) }
+func (n *ManifestNames) arefKey() string { return singletonKey(n, n.ARef) }
+func (n *ManifestNames) hsumKey() string { return singletonKey(n, n.HSum) }
+func (n *ManifestNames) ssumKey() string { return singletonKey(n, n.SSum) }
 
 // tailKey resolves a series' tail object, "" when it has none.
 func (n *ManifestNames) tailKey(series string) string {
@@ -390,13 +376,11 @@ func (n *ManifestNames) setTail(series string, pos, stem int) error {
 	return nil
 }
 
-// truncate drops every position at or above pos (used when a rebuild restarts
-// a derived series from scratch) and forgets the tail.
-func (n *ManifestNames) truncate(series string, pos int) {
+// truncate drops every position of a series (used when a rebuild restarts a
+// derived series from scratch) and forgets the tail.
+func (n *ManifestNames) truncate(series string) {
 	s := n.series(series)
-	if i := pos - s.Base; i >= 0 && i < len(s.Stems) {
-		s.Stems = s.Stems[:i]
-	}
+	s.Stems = s.Stems[:0]
 	s.Tail = -1
 }
 

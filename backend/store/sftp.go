@@ -2,8 +2,6 @@ package store
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -672,11 +670,11 @@ func (d *SFTP) Version(ctx context.Context, key string) (string, error) {
 			return fmt.Errorf("opening file %s: %w", file, err)
 		}
 		defer fs.Close()
-		h := sha256.New()
-		if _, err := io.Copy(h, fs); err != nil {
+		token, err := digestToken(fs)
+		if err != nil {
 			return fmt.Errorf("reading file %s: %w", file, err)
 		}
-		version = hex.EncodeToString(h.Sum(nil))
+		version = token
 		return nil
 	})
 	if err != nil {

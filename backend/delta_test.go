@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"srr/store"
 	"strings"
 	"testing"
 )
@@ -151,7 +152,7 @@ func storeFingerprint(t *testing.T, dir string, c *DBCore) map[string][]byte {
 			if pos == s.Tail {
 				label = series + "@tail"
 			}
-			slots[label] = fmt.Sprintf("%s/%d.gz", series, stem)
+			slots[label] = store.PackKey(series, stem)
 		}
 	}
 	if c.Names.HSum != nil {
@@ -609,7 +610,7 @@ func TestCheckTailIntactErrorsOnMissingIdxTail(t *testing.T) {
 
 	// Drop the idx series names: the store now claims tc consolidated articles
 	// but names no idx tail.
-	c.Names.truncate(idxSeries, 0)
+	c.Names.truncate(idxSeries)
 	if got := c.Names.tailKey(idxSeries); got != "" {
 		t.Fatalf("precondition: idx tail should be gone, got %q", got)
 	}

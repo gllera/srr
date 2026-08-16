@@ -49,12 +49,10 @@ func resolveSecrets(lists ...[]string) []string {
 // optional feed-level-style override), warns once on scopes srr.yaml does not
 // define, and stamps the grant onto ctx for mod.SubprocessEnv. Used by the
 // preview/resolve paths, which simulate a feed carrying the overrides;
-// Feed.Fetch inlines the same steps (it already holds the resolved recipes and
-// wants the feed in its warn line).
+// Feed.Fetch resolves the same grant through effectiveRecipe (it wants the
+// feed in its warn line).
 func grantSecrets(ctx context.Context, recipes map[string]Recipe, recipeName string, override []string) context.Context {
-	r := recipeFor(recipes, recipeName)
-	def := recipeFor(recipes, defaultRecipeName)
-	scopes := resolveSecrets(override, r.Secrets, def.Secrets)
+	scopes := effectiveRecipe(recipes, recipeName, Recipe{Secrets: override}).Secrets
 	if missing := mod.MissingScopes(scopes); len(missing) > 0 {
 		slog.Warn("granted secret scopes srr.yaml does not define", "scopes", missing)
 	}
@@ -79,6 +77,24 @@ func resolvePipe(base, override []string) []string {
 		}
 	}
 	return out
+}
+
+// effectiveRecipe resolves the full three-axis {ingest, pipe, secrets} that a
+// feed carrying `override` on top of recipe `recipeName` would run: each
+// override axis wins over the recipe when set, each recipe axis falls back to
+// `default` independently, and #default in the override's pipe expands to the
+// recipe's effective pipe. Every surface that performs or simulates a fetch —
+// Feed.Fetch, preview, /api/resolve, subscribe-time discovery — resolves
+// through this one function, so adding an axis (as SEC5's secrets was) lands
+// on all of them at once and a preview can never drift from a real fetch.
+func effectiveRecipe(recipes map[string]Recipe, recipeName string, override Recipe) Recipe {
+	r := recipeFor(recipes, recipeName)
+	def := recipeFor(recipes, defaultRecipeName)
+	return Recipe{
+		Ingest:  ingest.Select(override.Ingest, r.Ingest, def.Ingest),
+		Pipe:    resolvePipe(resolvePipe(def.Pipe, r.Pipe), override.Pipe),
+		Secrets: resolveSecrets(override.Secrets, r.Secrets, def.Secrets),
+	}
 }
 
 type Feed struct {
@@ -186,7 +202,8 @@ type Feed struct {
 	// Starts at 0 on AddFeed (id reuse included); never decreases otherwise.
 	Expired  int `json:"xp,omitempty"`
 	TotalArt int `json:"total_art"`
-	AddIdx   int `json:"add_idx"`
+
+	AddIdx int `json:"add_idx"`
 	// ContentBytes is the cumulative uncompressed size in bytes of the article
 	// JSONL lines this feed added to data/ packs (bumped per article by
 	// PutArticles, before gzip; idx/meta overhead not included). Never
@@ -210,6 +227,13 @@ type Feed struct {
 	// db.gz (mirrors newItems).
 	seenStamps []uint32
 }
+
+// LiveArt is the feed's VISIBLE article count: all-time minus expired. The
+// invariant behind it — the idx entries at chron >= AddIdx are exactly these —
+// is what `srr inspect --validate` cross-checks, what the GUI and the tag
+// buckets display, and what `feed rm` guards on, so it is named once rather
+// than open-coded at each of them.
+func (c *Feed) LiveArt() int { return c.TotalArt - c.Expired }
 
 func (c *Feed) LogValue() slog.Value {
 	return slog.GroupValue(
@@ -280,20 +304,18 @@ func (c *Feed) Fetch(ctx context.Context, run *fetchRun, buf []byte, processor *
 	// markers. Set before Validate so every downstream step (and the throwaway
 	// Validate run) sees it; srr preview never sets it, so #selfhost no-ops there.
 	ctx = mod.WithCacheDir(ctx, run.cacheDir)
-	r := recipeFor(run.recipes, c.Recipe)
-	def := recipeFor(run.recipes, defaultRecipeName)
-	pipe := resolvePipe(resolvePipe(def.Pipe, r.Pipe), c.Pipe)
+	eff := effectiveRecipe(run.recipes, c.Recipe, Recipe{Ingest: c.Ingest, Pipe: c.Pipe, Secrets: c.Secrets})
+	pipe := eff.Pipe
 	// Stamp the resolved secret-scope grant onto the fetch ctx: only these
 	// scopes' vars reach this feed's external ingest/pipe commands
 	// (mod.SubprocessEnv). A scope srr.yaml does not define is warn-only —
 	// recipes live in the (possibly shared) store while secrets are per-box
 	// config, so another box's grant must not fail this one's fetch; the scope
 	// simply contributes nothing (fail-closed).
-	scopes := resolveSecrets(c.Secrets, r.Secrets, def.Secrets)
-	if missing := mod.MissingScopes(scopes); len(missing) > 0 {
+	if missing := mod.MissingScopes(eff.Secrets); len(missing) > 0 {
 		slog.Warn("feed grants secret scopes srr.yaml does not define", "feed", c, "scopes", missing)
 	}
-	ctx = mod.WithSecretScopes(ctx, scopes)
+	ctx = mod.WithSecretScopes(ctx, eff.Secrets)
 	// Validate the resolved pipeline once, before the item loop. A bad token
 	// (unknown built-in, stray #default, malformed params) is a config error that
 	// would fail identically for every item; surface it loudly here instead of
@@ -305,8 +327,7 @@ func (c *Feed) Fetch(ctx context.Context, run *fetchRun, buf []byte, processor *
 		c.FailStreak++
 		return
 	}
-	ingestName := ingest.Select(c.Ingest, r.Ingest, def.Ingest)
-	items, err := c.fetchURL(ctx, run, buf, processor, pipe, ingestName)
+	items, err := c.fetchURL(ctx, run, buf, processor, pipe, eff.Ingest)
 	if err != nil {
 		if ctx.Err() != nil {
 			// Run shutdown (SIGTERM/SIGINT) cancelled this fetch mid-flight — not a
@@ -350,7 +371,12 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 		URL:          c.URL,
 		ETag:         c.ETag,
 		LastModified: c.LastModified,
-		MaxSize:      cap(buf) - 1,
+		// len, not cap — the rule readBody states and the other caller
+		// (cmd_preview) already follows. Identical today (the pool hands out a
+		// buffer whose len is its cap), but MaxSize is what an EXTERNAL ingest
+		// strategy is told the limit is, and a re-sliced buffer would tell it a
+		// different number than the reader enforces.
+		MaxSize:      len(buf) - 1,
 		MaxAssetSize: run.maxAssetSize,
 		AssetDir:     run.cacheDir,
 	})
@@ -392,7 +418,10 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 	priorBoundary := uint32Set(c.BoundaryGUIDs)
 
 	maxPub := priorWatermark
-	boundary := make(map[uint32]int64)
+	// Sized to the response: every one of these ends up with at most one entry
+	// per item, and the count is known before the pass. A 300-item feed rehashed
+	// the boundary map ~8 times per feed per cycle for nothing.
+	boundary := make(map[uint32]int64, len(result.Items))
 
 	// Stale-response detection inputs, gathered over first occurrences of
 	// every GUID (seen or not — a response containing the watermark item at
@@ -428,7 +457,7 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 		guid  uint32
 		title string
 	}
-	var window []stampSrc
+	window := make([]stampSrc, 0, len(result.Items))
 
 	// First pass: cheap dedup/watermark classification over the whole
 	// response, no pipeline work yet. The boundary cap below must see the
@@ -437,7 +466,7 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 		item *mod.RawItem
 		pub  int64
 	}
-	var candidates []candidate
+	candidates := make([]candidate, 0, len(result.Items))
 	for _, i := range result.Items {
 		// An external ingest strategy returns items as a JSON array; a null
 		// element decodes to a nil *mod.RawItem. Skip it before any field access
@@ -579,21 +608,23 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 				rest = append(rest, g)
 			}
 		}
-		// Keep all prior up to cap, then fill with smallest-hash rest.
-		kept := make([]uint32, 0, maxBoundaryGUIDs)
-		kept = append(kept, prior...)
-		if len(kept) > maxBoundaryGUIDs {
-			kept = kept[:maxBoundaryGUIDs]
-		}
-		remaining := min(maxBoundaryGUIDs-len(kept), len(rest))
-		kept = append(kept, rest[:remaining]...)
-		dropped = make(map[uint32]struct{}, len(must)-len(kept))
-		for _, g := range must {
+		// Keep all prior up to cap, then fill with smallest-hash rest. prior and
+		// rest partition must (a GUID either was stored or wasn't) and both are
+		// sorted, so the kept and dropped sets are just the two halves of each:
+		// the dropped set is built from the tails directly rather than by adding
+		// every over-cap GUID and deleting the kept ones back out.
+		keptPrior := min(len(prior), maxBoundaryGUIDs)
+		remaining := min(maxBoundaryGUIDs-keptPrior, len(rest))
+		dropped = make(map[uint32]struct{}, (len(prior)-keptPrior)+(len(rest)-remaining))
+		for _, g := range prior[keptPrior:] {
 			dropped[g] = struct{}{}
 		}
-		for _, g := range kept {
-			delete(dropped, g)
+		for _, g := range rest[remaining:] {
+			dropped[g] = struct{}{}
 		}
+		kept := make([]uint32, 0, keptPrior+remaining)
+		kept = append(kept, prior[:keptPrior]...)
+		kept = append(kept, rest[:remaining]...)
 		must = kept
 	}
 

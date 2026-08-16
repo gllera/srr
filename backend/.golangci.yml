@@ -94,6 +94,16 @@ linters:
         # feed input flags the whole program and ranks them the same.
         - G304
         - G703
+        # G704 "SSRF via taint analysis" (2, both in `srr inspect --url`'s
+        # httpFetcher) — the same triage as G304/G703 one protocol up: this is
+        # a CLI whose job is fetching the store URL the operator named, plus
+        # the keys that store's own root/manifest list — the read loop IS the
+        # product, and bytes read from one's own store choosing the next key
+        # is the design, not an injection. The path that DOES face
+        # attacker-influenced URLs — the feed fan-out and its per-item second
+        # pass — is guarded at dial time by mod.SafeTransport (every redirect
+        # hop re-checked), which gosec cannot model; it flagged no site there.
+        - G704
 
   exclusions:
     # Idiomatic ignore-on-cleanup calls (deferred Close, Flush, os.Remove,

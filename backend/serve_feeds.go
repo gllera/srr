@@ -142,8 +142,37 @@ func updateFeed(w http.ResponseWriter, r *http.Request) {
 	handleFeedSave(w, r, &id)
 }
 
+// saveFeedTwoPhase is the two-phase feed upsert every writing surface shares
+// (the HTTP handlers and the MCP tools): phase 1 (NO lock) builds the target
+// view inside a read-only DB scope and runs subscribe-time discovery —
+// networked, so it must never hold .locked, which would 409 the fetch loop and
+// every other writer for the probe's duration — and phase 2 (locked) applies
+// the write with the already-resolved URL. build produces the view inside
+// phase 1's scope, so an update's merge base and its discovery probe come from
+// ONE consistent db.gz read.
+func saveFeedTwoPhase(ctx context.Context, build func(db *DB) (*feedView, error)) (*Feed, error) {
+	var v *feedView
+	if err := withDBCtx(ctx, false, func(ctx context.Context, db *DB) error {
+		built, err := build(db)
+		if err != nil {
+			return err
+		}
+		v = built
+		return resolveFeedViewURL(ctx, db, v)
+	}); err != nil {
+		return nil, err
+	}
+	var saved *Feed
+	err := withDBCtx(ctx, true, func(ctx context.Context, db *DB) error {
+		s, err := saveFeed(ctx, db, v)
+		saved = s
+		return err
+	})
+	return saved, err
+}
+
 // handleFeedSave decodes a feedView, stamps its id (nil = create, non-nil =
-// update), upserts via saveFeed, and echoes the stored feed. Shared by
+// update), upserts via saveFeedTwoPhase, and echoes the stored feed. Shared by
 // createFeed + updateFeed.
 func handleFeedSave(w http.ResponseWriter, r *http.Request, id *int) {
 	var v feedView
@@ -152,22 +181,7 @@ func handleFeedSave(w http.ResponseWriter, r *http.Request, id *int) {
 		return
 	}
 	v.ID = id
-	// Phase 1 (no lock): subscribe-time discovery hits the network — run it in a
-	// read-only DB scope BEFORE the store lock (mirrors handleImport), so a slow
-	// feed URL can't hold .locked for the probe's duration.
-	if err := withDBCtx(r.Context(), false, func(ctx context.Context, db *DB) error {
-		return resolveFeedViewURL(ctx, db, &v)
-	}); err != nil {
-		writeErr(w, err)
-		return
-	}
-	// Phase 2 (locked): apply the write with the already-resolved URL and commit.
-	var saved *Feed
-	err := withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
-		s, e := saveFeed(ctx, db, &v)
-		saved = s
-		return e
-	})
+	saved, err := saveFeedTwoPhase(r.Context(), func(*DB) (*feedView, error) { return &v, nil })
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -181,7 +195,7 @@ func deleteFeed(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	err = withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
+	mutateStore(w, r, "deleted", func(ctx context.Context, db *DB) error {
 		if _, e := db.FeedByID(id); e != nil {
 			return e // 404 when absent
 		}
@@ -191,11 +205,6 @@ func deleteFeed(w http.ResponseWriter, r *http.Request) {
 		// commitState so RemoveFeed's seen.gz purge persists before id reuse.
 		return db.commitState(ctx)
 	})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 func createFeed(w http.ResponseWriter, r *http.Request) {

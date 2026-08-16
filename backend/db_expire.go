@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"strings"
 	"sync"
@@ -201,10 +200,10 @@ func (o *DB) ExpireArticles(ctx context.Context, now int64) error {
 	for _, key := range dead {
 		owner := owners[key]
 		g.Go(func() error {
-			size, err := o.Stat(gctx, key)
-			if errors.Is(err, fs.ErrNotExist) {
-				size = 0
-			} else if err != nil {
+			// Absent-as-zero is tolerated HERE and only here: a retried
+			// expire cycle re-stats keys its aborted predecessor deleted.
+			size, _, err := store.StatOptional(gctx, o.Backend, key)
+			if err != nil {
 				return fmt.Errorf("stat %s: %w", key, err)
 			}
 			mu.Lock()

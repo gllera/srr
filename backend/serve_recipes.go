@@ -16,24 +16,13 @@ func putRecipe(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	err := withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
+	mutateStore(w, r, "ok", func(ctx context.Context, db *DB) error {
 		return setRecipe(ctx, db, name, body.Ingest, body.Pipe, body.Secrets)
 	})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func deleteRecipe(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	err := withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
-		return removeRecipe(ctx, db, name)
+	mutateStore(w, r, "deleted", func(ctx context.Context, db *DB) error {
+		return removeRecipe(ctx, db, r.PathValue("name"))
 	})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

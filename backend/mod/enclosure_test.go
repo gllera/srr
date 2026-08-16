@@ -7,14 +7,24 @@ import (
 	"time"
 )
 
-// runEnclosure processes an item with the given Raw entry and content
-// through #enclosure, asserting the pipeline contract survived.
-func runEnclosure(t *testing.T, raw RawFeedItem, content string) string {
+// runMod processes content through ONE built-in and returns the result,
+// asserting the contracts binding every module survived: GUID and Published are
+// immutable, and no step touches Title or Link. Five modules had a
+// character-for-character copy of this — so a contract added to one left the
+// other four unchecked, which is the opposite of what a shared contract means.
+func runMod(t *testing.T, token, content string) string {
+	t.Helper()
+	return runModRaw(t, token, nil, content)
+}
+
+// runModRaw is runMod for a module that reads the source feed entry (#enclosure
+// is the only one).
+func runModRaw(t *testing.T, token string, raw RawFeedItem, content string) string {
 	t.Helper()
 	m := New()
 	now := time.Now()
 	item := &RawItem{GUID: 7, Title: "T", Content: content, Link: "http://e.com", Published: &now, Raw: raw}
-	if err := m.Process(context.Background(), "#enclosure", item); err != nil {
+	if err := m.Process(context.Background(), token, item); err != nil {
 		t.Fatalf("Process: %v", err)
 	}
 	if item.GUID != 7 || item.Published == nil || !item.Published.Equal(now) {
@@ -30,7 +40,7 @@ func runEnclosure(t *testing.T, raw RawFeedItem, content string) string {
 func TestEnclosureImagePrepended(t *testing.T) {
 	raw := RawFeedItem{"enclosure": {{Attr: map[string]string{
 		"url": "https://x.org/hero.jpg", "type": "image/jpeg"}}}}
-	got := runEnclosure(t, raw, "<p>text</p>")
+	got := runModRaw(t, "#enclosure", raw, "<p>text</p>")
 	if !strings.HasPrefix(got, `<p><img src="https://x.org/hero.jpg"/></p>`) {
 		t.Fatalf("enclosure image should lead the content, got %q", got)
 	}
@@ -43,7 +53,7 @@ func TestEnclosureImagePrepended(t *testing.T) {
 func TestEnclosureAudioPlayer(t *testing.T) {
 	raw := RawFeedItem{"enclosure": {{Attr: map[string]string{
 		"url": "https://x.org/ep1.mp3", "type": "audio/mpeg"}}}}
-	got := runEnclosure(t, raw, "<p>shownotes</p>")
+	got := runModRaw(t, "#enclosure", raw, "<p>shownotes</p>")
 	if !strings.Contains(got, `<audio controls="" src="https://x.org/ep1.mp3"></audio>`) {
 		t.Fatalf("audio player missing, got %q", got)
 	}
@@ -52,7 +62,7 @@ func TestEnclosureAudioPlayer(t *testing.T) {
 // A video enclosure classified by URL extension (no type attr).
 func TestEnclosureVideoByExtension(t *testing.T) {
 	raw := RawFeedItem{"enclosure": {{Attr: map[string]string{"url": "https://x.org/clip.mp4"}}}}
-	got := runEnclosure(t, raw, "")
+	got := runModRaw(t, "#enclosure", raw, "")
 	if !strings.Contains(got, `<video controls="" src="https://x.org/clip.mp4"></video>`) {
 		t.Fatalf("video player missing, got %q", got)
 	}
@@ -64,7 +74,7 @@ func TestEnclosureMediaContentLargestWins(t *testing.T) {
 		{Attr: map[string]string{"url": "https://x.org/s.jpg", "type": "image/jpeg", "width": "150", "height": "150"}},
 		{Attr: map[string]string{"url": "https://x.org/l.jpg", "type": "image/jpeg", "width": "1200", "height": "800"}},
 	}}
-	got := runEnclosure(t, raw, "<p>t</p>")
+	got := runModRaw(t, "#enclosure", raw, "<p>t</p>")
 	if !strings.Contains(got, "l.jpg") || strings.Contains(got, "s.jpg") {
 		t.Fatalf("largest media:content should win, got %q", got)
 	}
@@ -77,7 +87,7 @@ func TestEnclosureMediaGroupThumbnail(t *testing.T) {
 		"content":   {{Attr: map[string]string{"url": "https://www.youtube.com/v/abc123xyz00?version=3", "type": "application/x-shockwave-flash"}}},
 		"thumbnail": {{Attr: map[string]string{"url": "https://i.ytimg.com/vi/abc123xyz00/hqdefault.jpg"}}},
 	}}}}
-	got := runEnclosure(t, raw, "")
+	got := runModRaw(t, "#enclosure", raw, "")
 	if !strings.Contains(got, `<img src="https://i.ytimg.com/vi/abc123xyz00/hqdefault.jpg"/>`) {
 		t.Fatalf("group thumbnail should be prepended, got %q", got)
 	}
@@ -92,7 +102,7 @@ func TestEnclosureFullImageBeatsThumbnail(t *testing.T) {
 		"thumbnail": {{Attr: map[string]string{"url": "https://x.org/t.jpg"}}},
 		"enclosure": {{Attr: map[string]string{"url": "https://x.org/full.jpg", "type": "image/jpeg"}}},
 	}
-	got := runEnclosure(t, raw, "")
+	got := runModRaw(t, "#enclosure", raw, "")
 	if !strings.Contains(got, "full.jpg") || strings.Contains(got, "t.jpg\"") {
 		t.Fatalf("full image should beat thumbnail, got %q", got)
 	}
@@ -104,7 +114,7 @@ func TestEnclosureAtomLink(t *testing.T) {
 		{Attr: map[string]string{"rel": "alternate", "href": "https://x.org/post"}},
 		{Attr: map[string]string{"rel": "enclosure", "href": "https://x.org/pod.mp3", "type": "audio/mpeg"}},
 	}}
-	got := runEnclosure(t, raw, "<p>t</p>")
+	got := runModRaw(t, "#enclosure", raw, "<p>t</p>")
 	if !strings.Contains(got, `src="https://x.org/pod.mp3"`) {
 		t.Fatalf("atom enclosure link should be prepended, got %q", got)
 	}
@@ -122,7 +132,7 @@ func TestEnclosureAlreadyPresentVerbatim(t *testing.T) {
 	} {
 		raw := RawFeedItem{"enclosure": {{Attr: map[string]string{
 			"url": "https://x.org/hero.jpg", "type": "image/jpeg"}}}}
-		if got := runEnclosure(t, raw, body); got != body {
+		if got := runModRaw(t, "#enclosure", raw, body); got != body {
 			t.Errorf("present media must not duplicate, body %q got %q", body, got)
 		}
 	}
@@ -135,7 +145,7 @@ func TestEnclosureUnusableCandidatesVerbatim(t *testing.T) {
 		{Attr: map[string]string{"url": "https://x.org/doc.pdf", "type": "application/pdf"}},
 	}}
 	in := "<p>t</p>"
-	if got := runEnclosure(t, raw, in); got != in {
+	if got := runModRaw(t, "#enclosure", raw, in); got != in {
 		t.Fatalf("unusable candidates must not change content, got %q", got)
 	}
 }
@@ -174,7 +184,7 @@ func TestEnclosureKindMediumAttr(t *testing.T) {
 // An <itunes:image href> (raw["image"]) is surfaced as a thumbnail-tier image.
 func TestEnclosureItunesImage(t *testing.T) {
 	raw := RawFeedItem{"image": {{Attr: map[string]string{"href": "https://x.org/cover.jpg"}}}}
-	got := runEnclosure(t, raw, "<p>notes</p>")
+	got := runModRaw(t, "#enclosure", raw, "<p>notes</p>")
 	if !strings.Contains(got, `<img src="https://x.org/cover.jpg"/>`) {
 		t.Fatalf("itunes:image should be prepended, got %q", got)
 	}
@@ -185,7 +195,7 @@ func TestEnclosureItunesImage(t *testing.T) {
 func TestEnclosureMediumAttrClassifiesVideo(t *testing.T) {
 	raw := RawFeedItem{"content": {{Attr: map[string]string{
 		"url": "https://x.org/stream", "medium": "video"}}}}
-	got := runEnclosure(t, raw, "<p>t</p>")
+	got := runModRaw(t, "#enclosure", raw, "<p>t</p>")
 	if !strings.Contains(got, `<video controls="" src="https://x.org/stream"></video>`) {
 		t.Fatalf("medium=video should classify as video, got %q", got)
 	}

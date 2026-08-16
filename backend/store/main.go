@@ -586,6 +586,34 @@ type BatchRemover interface {
 	RmBatch(ctx context.Context, keys []string) (failed []string, err error)
 }
 
+// StatOptional answers the question every existence probe actually asks:
+// present (with its size), provably absent, or COULD NOT TELL. The Backend
+// contract already settles it — a nil error proves presence, fs.ErrNotExist
+// proves absence, any other error proves nothing — but that tri-state was
+// being re-derived at every call site, each with its own comment re-explaining
+// the trap it had to avoid (a size of 0 is a present object, not an absent
+// one: an empty file and an HTTP HEAD without Content-Length both report it).
+//
+// A non-nil err leaves exists false and size 0 and must NEVER be read as
+// absence: that is how a transient outage turns into "create it, then".
+func StatOptional(ctx context.Context, be Backend, key string) (size int64, exists bool, err error) {
+	size, err = be.Stat(ctx, key)
+	switch {
+	case err == nil:
+		return size, true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return 0, false, nil
+	default:
+		return 0, false, err
+	}
+}
+
+// Exists is StatOptional for callers that do not need the size.
+func Exists(ctx context.Context, be Backend, key string) (bool, error) {
+	_, exists, err := StatOptional(ctx, be, key)
+	return exists, err
+}
+
 // RmAll deletes every key in keys and reports the ones that are still there.
 //
 // It NEVER stops at the first failure and never cancels a sibling delete,
@@ -649,6 +677,20 @@ func joinFailures(causes map[string]error) ([]string, error) {
 	return failed, errors.Join(errs...)
 }
 
+// digestToken is the version token of the two filesystem backends: hex sha256
+// of the object's bytes. THE THREE PRODUCERS MUST AGREE BYTE FOR BYTE — the
+// two Version implementations and putIfVersionDigest's tee below — because a
+// token is only ever compared against one another producer's. Change the hash
+// (or prefix it with a length) in one and every conditional root flip on local
+// and SFTP fails ErrPreconditionFailed forever, with no error naming the cause.
+func digestToken(r io.Reader) (string, error) {
+	h := sha256.New()
+	if _, err := io.Copy(h, r); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 // putIfVersionDigest is the shared PutIfVersion body of the two filesystem
 // backends (local, SFTP): a best-effort compare-and-swap — Version, compare,
 // then AtomicPut teeing through sha256 so the caller gets the new token
@@ -668,7 +710,7 @@ func putIfVersionDigest(ctx context.Context, b Backend, errPath func() string, k
 	if err := b.AtomicPut(ctx, key, io.TeeReader(r, h), meta); err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hex.EncodeToString(h.Sum(nil)), nil // digestToken's form, teed rather than re-read
 }
 
 func Open(ctx context.Context, outputPath string) (Backend, error) {

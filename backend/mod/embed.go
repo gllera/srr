@@ -1,7 +1,6 @@
 package mod
 
 import (
-	"context"
 	"net/url"
 	"regexp"
 	"strings"
@@ -39,14 +38,7 @@ import (
 // which will self-host the injected thumbnail like any other image.
 
 func init() {
-	RegisterDOM("embed", func() DOMProcessor {
-		return func(_ context.Context, p Params, _ *RawItem, body *html.Node) (bool, error) {
-			if err := p.only(); err != nil {
-				return false, err
-			}
-			return embedContent(body), nil
-		}
-	})
+	RegisterDOMBody("embed", embedContent)
 }
 
 var (
@@ -69,16 +61,11 @@ type embedTarget struct {
 // untouched.
 func embedContent(body *html.Node) bool {
 	var frames []*html.Node
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
+	for n := range descend(body) {
 		if n.Type == html.ElementNode && n.Data == "iframe" {
 			frames = append(frames, n)
 		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
-		}
 	}
-	walk(body)
 
 	changed := false
 	for _, f := range frames {

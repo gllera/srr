@@ -2,8 +2,6 @@ package store
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
@@ -169,11 +167,11 @@ func (d *Local) Version(_ context.Context, key string) (string, error) {
 		return "", fmt.Errorf("opening file %s: %w", file, err)
 	}
 	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	token, err := digestToken(f)
+	if err != nil {
 		return "", fmt.Errorf("reading file %s: %w", file, err)
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return token, nil
 }
 
 // PutIfVersion is a BEST-EFFORT compare-and-swap: a local store has no atomic
