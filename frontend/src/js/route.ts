@@ -24,7 +24,7 @@ const encTok = (t: string): string => encodeURIComponent(t)
 // existing deep link and stored srr-hash keeps working untouched; a PEER mount
 // prefixes each token with `@<mid>:`, and a peer [ALL] (no tokens) emits a bare
 // `@<mid>` marker so the mount survives.
-export function tokensSuffix(tokens: string[]): string {
+export function tokensSuffix(tokens: readonly string[]): string {
    // An empty token list IS an inactive filter ([ALL]) — the same predicate
    // nav's filter.active getter is.
    const active = tokens.length > 0
@@ -109,7 +109,7 @@ export function parseHashTokens(hash: string): string[] {
 
 // Write the reader's cursor + filter into the fragment. `pos` < 0 (no article on
 // screen — the placeholder states) emits the filter alone.
-export function updateHash(pos: number, tokens: string[], replace = false) {
+export function updateHash(pos: number, tokens: readonly string[], replace = false) {
    const hash = pos >= 0 ? `#${pos}${tokensSuffix(tokens)}` : `#${tokensSuffix(tokens)}`
    history[replace ? "replaceState" : "pushState"](null, "", hash)
 }

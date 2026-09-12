@@ -1,5 +1,9 @@
 import * as data from "./data"
 import { UNREAD_ONLY_KEY } from "./keys"
+import { firstUnreadProbe, labelFor, validResume, type Lane, type LaneEntry, type LaneEnv } from "./nav/lane"
+import { MembersLane } from "./nav/lane-members"
+import type { SearchLane } from "./nav/lane-search"
+import { makeLane } from "./nav/make-lane"
 import { abortPrefetch, prefetchTarget, releasePrefetch, schedulePrefetch } from "./prefetch"
 import {
    feedIdOf,
@@ -10,26 +14,13 @@ import {
    tokensSuffix as encodeTokens,
    updateHash as writeHash,
 } from "./route"
-import {
-   clearSavedGhost,
-   isSaved,
-   SAVED_TOKEN,
-   savedAhead,
-   savedCount,
-   savedNeighbor,
-   savedOrder,
-   toggleSaved as toggleSavedSet,
-} from "./saved"
+import { clearSavedGhost, isSaved, SAVED_TOKEN, savedCount, toggleSaved as toggleSavedSet } from "./saved"
 import * as search from "./search"
 import {
-   feedKey,
-   getSeen,
    markAllRead as raiseFilterRead,
    markUnreadFrom as lowerFilterFrom,
-   readSeen,
    recordSeen,
    tagUnreadFromCounts,
-   tallyWith,
    unreadCounts,
    type FrontierScope,
 } from "./seen"
@@ -56,6 +47,8 @@ export {
 } from "./seen"
 import { lsGet, lsSet } from "./storage"
 export type { FrontierUndo } from "./seen"
+export { SEARCH_PREFIX } from "./nav/lane"
+export { resetSearchStream, searchCard, searchTruncated } from "./nav/lane-search"
 export {
    feedIdOf,
    hashPos,
@@ -79,9 +72,25 @@ const next: { left?: Promise<number>; right?: Promise<number> } = {}
 // Unseen-only navigation: when on, the active filter skips articles already
 // seen (per the seen positions read at filter-apply time), so you glide past
 // feeds you're caught up on. A device-local preference, not part of the
-// shareable #pos!tokens hash. See filter.set / filter.applyUnseen and
+// shareable #pos!tokens hash. See setLane / a lane's applyUnseen and
 // dropdown.ts's chip.
 let unreadOnly = lsGet(UNREAD_ONLY_KEY) === "1"
+
+// The active filter MODE. Every mode-dependent question is a method on it
+// (nav/lane.ts); nav owns only WHICH lane is active and the cursor over it.
+const env: LaneEnv = {
+   unreadOnly: () => unreadOnly,
+   searchKey: () => searchLane()?.searchKey ?? "",
+}
+// Not makeLane([]): the store is not loaded when this module evaluates, so the boot
+// lane is an EMPTY [ALL] until fromHash/applyFilter resolves the real one — exactly
+// the empty `filter` object it replaces.
+let lane: Lane = new MembersLane([], new Map(), env)
+
+function setLane(tokens: readonly string[], opts: { keepKnownEmpty?: boolean } = {}): void {
+   lane = makeLane(tokens, env, opts)
+}
+
 export function isUnreadOnly(): boolean {
    return unreadOnly
 }
@@ -93,7 +102,7 @@ export function setUnreadOnly(on: boolean) {
    lsSet(UNREAD_ONLY_KEY, on ? "1" : "0")
    // Re-apply the current filter so its members immediately pick up (or shed) the
    // raised unseen-only bounds — the caller just flips the mode and rebuilds.
-   applyFilter([...filter.tokens])
+   applyFilter([...lane.tokens])
 }
 
 // Toggle one article's saved state; returns the new state (./saved owns the set
@@ -102,7 +111,7 @@ export function setUnreadOnly(on: boolean) {
 // the neighbor-cache drop, since the saved queue's neighbors may have shifted.
 export function toggleSaved(chron: number): boolean {
    return toggleSavedSet(chron, {
-      savedMode: filter.saved,
+      savedMode: lane.kind === "saved",
       pos,
       onQueueChange: () => {
          next.left = next.right = undefined
@@ -120,14 +129,14 @@ export function currentChron(): number {
 // the reader (pos) when it still matches the active filter — so opening the list
 // drops you back at the article you were reading, with newer ("next") articles
 // above and older below — else -1, meaning "newest" (a fresh boot, or a filter
-// change that left the prior article behind). filter.matches consults the same
-// state navigation does — raised bounds (unseen-only), the explicit set
+// change that left the prior article behind). The lane's matches() consults the
+// same state navigation does — raised bounds (unseen-only), the explicit set
 // (saved/search) — so the list anchors exactly where the reader sits.
 function anchorChron(): number {
    // The unseen-only entry anchor counts as a member (it renders as a list row
    // via the feedLeft/feedRight walks), so returning to the list from it lands
    // on it instead of losing the position to the oldest-unread fallback.
-   if (pos >= 0 && currentFeed >= 0 && (filter.matches(currentFeed, pos) || pos === filter.anchor)) return pos
+   if (pos >= 0 && currentFeed >= 0 && (lane.matches(currentFeed, pos) || pos === lane.entryAnchor())) return pos
    return -1
 }
 
@@ -142,10 +151,10 @@ function anchorChron(): number {
 //     unseen-only's already-raised bounds; a never-seen feed keeps its bound, so
 //     its full backlog counts as unread) and taking the OLDEST match under those
 //     bounds — the same unread set unseen-only navigation walks, evaluated
-//     transiently here without touching filter.feeds, so the list still SHOWS
-//     every article (read rows below the anchor, unread above). [ALL] runs this
-//     identical scan across every feed (filter.clear populates filter.feeds with
-//     all of them); on a fresh device with nothing read it lands at the oldest
+//     transiently here without touching the lane's members, so the list still
+//     SHOWS every article (read rows below the anchor, unread above). [ALL] runs
+//     this identical scan across every feed (the [ALL] lane's members are every
+//     feed); on a fresh device with nothing read it lands at the oldest
 //     article overall, exactly as a never-opened tag does.
 //   • ★ Saved opens at its OLDEST saved article: the saved set is a read-later
 //     queue consumed front-to-back, so you land at the front and read forward
@@ -158,125 +167,25 @@ function anchorChron(): number {
 // for the live-position callers.
 export async function listAnchor(): Promise<number> {
    const live = anchorChron()
-   if (live >= 0) return live
-   // ★ Saved (feed-agnostic, filter.feeds empty): the front of the queue — the
-   // earliest save (save-index 0), not the lowest chronIdx.
-   if (filter.saved) return savedOrder()[0] ?? -1
-   // [ALL] (filter.clear) populates filter.feeds with every feed, so it runs the
-   // same oldest-unread scan as a feed/tag — just spanning all feeds. Only
-   // search (feed-agnostic, filter.feeds empty) keeps the newest-first default.
-   if (filter.search) return -1
-   return oldestUnread()
-}
-
-// The oldest unread article under the current feed membership: raise each
-// member's bound past its seen high-water (idempotent with unseen-only's
-// already-raised bounds; a never-seen feed keeps its bound, so its full backlog
-// counts as unread) and take the OLDEST match under those bounds — the same
-// unread set unseen-only navigation walks, evaluated transiently without
-// touching filter.feeds. -1 when nothing is unread, or on an empty store (no
-// member feeds, which the size guard below returns before the minOf scan). Shared
-// by listAnchor (the list's fresh-filter anchor) and switchFilter's [ALL] entry.
-async function oldestUnread(): Promise<number> {
-   if (filter.feeds.size === 0) return -1
-   const seen = readSeen()
-   const unread = new Map<number, number>()
-   for (const [id, bound] of filter.feeds) {
-      const s = seen[feedKey(id)]
-      unread.set(id, s === undefined ? bound : Math.max(bound, s + 1))
-   }
-   // Oldest unread: the smallest matching chron under the raised bounds (scan up
-   // from the smallest bound — nothing matches below it). minOf, not
-   // Math.min(...), so [ALL]'s ~65k-feed map can't overflow the spread limit.
-   const start = minOf(unread.values())
-   return data.findRight(start, unread)
+   return live >= 0 ? live : lane.anchor()
 }
 
 // ── Search filter mode ───────────────────────────────────────────────────────
-// A third filter mode beside feed-membership and ★ Saved: when a token is
-// "q:<query>", navigation walks an explicit set of matching chronIdxs —
-// the title-search hits — exactly as ★ Saved walks the saved set. The set is
-// computed once per query by search.loadHits (cached there via cachedPromise,
-// so concurrent walks within one render dedupe); nav keeps only the sorted
-// snapshot and a Set for matches(). The query rides in the shareable
-// #!q:<query> hash like any token, so reload / back / forward restore the
-// search and it behaves like a tag filter (picking another filter, two-finger
-// cycle, or arrow-cycling leaves it — search is not part of getFilterEntries).
-// Capped at SEARCH_CAP newest hits so a broad query can't fetch the whole
-// archive; searchTruncated() flags the cap for the UI.
-//
-// RDR8 — the query may ride WITH ONE feed/tag token, its SCOPE: `#!q:x+tech` is
-// "search within tech". One query and one scope, never more (two queries have no
-// meaning, and a wider lane is what a plain multi-token URL filter already is).
-// The intersection happens inside search.ts DURING the scan rather than over the
-// finished hit list, because the scan stops at SEARCH_CAP: a common word would
-// otherwise fill the cap from other lanes and hand the scope nothing. Everything
-// else about the mode is unchanged — most of all that it stays a PEEK mode
-// (frontierScope's `peek` is `filter.search`, scoped or not), so a query never
-// moves a seen frontier however narrow its lane.
-export const SEARCH_PREFIX = "q:"
-const SEARCH_CAP = 500
-let searchSorted: number[] = [] // ascending matching chronIdxs in the snapshot
-let searchSet = new Set<number>() // the same hits, for matches()
-let searchCards = new Map<number, import("./format.gen").IMetaWire>() // {f,w,t} per hit chron
-let searchTruncatedFlag = false
-// The term the current snapshot was loaded for — distinct from the active query
-// when a query changes before its load resolves (A→B→A): dropping this key on
-// filter.set ensures a returning query re-loads rather than trusting an emptied
-// snapshot.
-let searchLoadedFor: string | null = null
-
-// Clear the snapshot so the next ensureSearchSet reloads it. Called when a new
-// query is set (filter.set) so a fast A→B→A sequence doesn't trust a stale or
-// emptied snapshot. The search.ts cache (cachedPromise on loadHits) stays warm,
-// so a returning query re-resolves from the cache without re-scanning.
-export function resetSearchStream(): void {
-   searchSorted = []
-   searchSet = new Set<number>()
-   searchCards = new Map()
-   searchTruncatedFlag = false
-   searchLoadedFor = null
-}
-
-// Derives the active search query from filter.tokens — always consistent with
-// filter.search since set() flips both synchronously (no hand-sync invariant).
-// The q: token is FOUND rather than assumed at index 0: a scoped query carries
-// its lane token alongside, in whatever order the hash spelled the two.
-function activeQuery(): string {
-   if (!filter.search) return ""
-   const t = filter.tokens.find((tok) => tok.startsWith(SEARCH_PREFIX))
-   return t === undefined ? "" : t.slice(SEARCH_PREFIX.length)
-}
-
-// The identity of the loaded snapshot: the query AND the lane it is scoped to.
-// A scope change re-derives a DIFFERENT hit set out of the same query, so it has
-// to invalidate the snapshot exactly as a new query does. JSON rather than a
-// separator join — a tag name may contain whatever character a separator is.
-function searchKey(): string {
-   return filter.search ? JSON.stringify([activeQuery(), ...filter.scope]) : ""
+// The mode itself — the hit-set snapshot, the RDR8 scope, the supersession guard —
+// lives in nav/lane-search.ts. These accessors read the active lane.
+function searchLane(): SearchLane | null {
+   return lane.kind === "search" ? (lane as SearchLane) : null
 }
 
 // The lane an active query is scoped to — "" when it searches everything (RDR8).
-// The UI reads it to keep the scope across a re-typed query, to return to that
-// lane on leaving search, and to name it in the toolbar readout / the tab title.
 export function searchScope(): string {
-   return filter.search ? (filter.scope[0] ?? "") : ""
+   return searchLane()?.scope[0] ?? ""
 }
-
 export function isSearchFilter(): boolean {
-   return filter.search
+   return lane.kind === "search"
 }
 export function searchQuery(): string {
-   return activeQuery()
-}
-export function searchTruncated(): boolean {
-   return searchTruncatedFlag
-}
-// The {f,w,t} card for a search hit chron, captured during the scan so the list
-// can render search rows without re-fetching/re-parsing the meta packs. Undefined
-// for a chron not in the current snapshot.
-export function searchCard(chron: number): import("./format.gen").IMetaWire | undefined {
-   return searchCards.get(chron)
+   return searchLane()?.query ?? ""
 }
 export function searchAvailable(): boolean {
    return search.available()
@@ -285,262 +194,65 @@ export function searchShort(q: string): boolean {
    return search.shortQuery(q)
 }
 
-// Largest entry <= from / smallest entry >= from in an ascending array (-1 =
-// none) — the pure value scan the SEARCH hit set walks (its order is chronIdx
-// order, so a value threshold gives the strict neighbor). Never fetches an idx
-// pack. (★ Saved does not use this — its order isn't chronIdx order, see
-// savedNeighbor.)
-function setLeft(sorted: number[], from: number): number {
-   let res = -1
-   for (const c of sorted) {
-      if (c > from) break
-      res = c
-   }
-   return res
-}
-function setRight(sorted: number[], from: number): number {
-   for (const c of sorted) if (c >= from) return c
-   return -1
-}
-
-// Load (or confirm) the full hit-set snapshot for the active query. Supersession
-// guard: captures the query at call entry; if it changed while we awaited
-// loadHits, the late result is discarded (the concurrent call for the newer query
-// will store its own snapshot). The cachedPromise in search.ts dedupes concurrent
-// calls for the same query, so concurrent neighbor walks within one render share
-// one in-flight load.
-async function ensureSearchSet(): Promise<void> {
-   const key = searchKey()
-   if (searchLoadedFor === key) return // snapshot already up to date
-   const term = activeQuery()
-   // An empty query has no hits — reset to the empty snapshot and mark it
-   // loaded without calling loadHits (parity with search.loadHits's own
-   // `if (query)` guard; tests assert it).
-   if (!term) {
-      resetSearchStream()
-      searchLoadedFor = key
-      return
-   }
-   // A scope reaches search.ts as the membership map ITSELF, so the scan applies
-   // nav's own lane rule (RDR8); its key rides along for search.ts's hit cache.
-   const scope = filter.scope.length > 0 ? { key: JSON.stringify(filter.scope), feeds: filter.feeds } : undefined
-   const { chrons, truncated, cards } = await search.loadHits(term, SEARCH_CAP, scope)
-   if (key !== searchKey()) return // superseded — discard stale result
-   searchSorted = chrons
-   searchSet = new Set(chrons)
-   // `cards` is absent only from a stubbed loadHits; an empty map keeps
-   // searchCard() answering "no card" rather than throwing on every row.
-   searchCards = cards ?? new Map()
-   searchTruncatedFlag = truncated
-   searchLoadedFor = key
-}
-
-// The value-addressed neighbor primitive: the nearest matching member ≤ `from`
-// (feedLeft) / ≥ `from` (feedRight). Feed mode walks the idx packs; search walks
-// its explicit chronIdx-sorted hit set (order == value order, so the value seam
-// is sound). ★ Saved does NOT come through here — its display order isn't
-// chronIdx order, so it steps by save-index through neighborOlder/neighborNewer
-// and the boundary branches (first/last/goTo/listAnchor/pendingRight) instead.
-// Async to match data.findLeft/findRight; the search branch resolves once its
-// snapshot loads.
-// The feed-membership walks fold in filter.anchor — the unseen-only entry
-// article (a SEEN article the reader landed on, which the raised bounds
-// exclude). Slotting it into both directional walks keeps it a member of the
-// navigable sequence, so ← returns to the first article shown after → steps
-// into the unseen, and every consumer of this seam (prev/next enablement,
-// step(), the list's rows, prefetch) agrees it exists.
+// The value seam (nearest member ≤ / ≥ `from`) and the strict-neighbour seam of
+// a member — the ONE place the reader's prev/next and the list's row walk ask
+// "what is next", answered by the active lane.
 export function feedLeft(from: number): Promise<number> {
-   if (filter.search) return ensureSearchSet().then(() => setLeft(searchSorted, from))
-   const a = filter.anchor
-   // No anchor (the usual case): return the walk's promise untouched — an
-   // unconditional .then would add a microtask tick to every neighbor lookup.
-   if (a < 0) return data.findLeft(from, filter.feeds)
-   return data.findLeft(from, filter.feeds).then((found) => (a <= from && a > found ? a : found))
+   return lane.atOrBelow(from)
 }
 export function feedRight(from: number): Promise<number> {
-   if (filter.search) return ensureSearchSet().then(() => setRight(searchSorted, from))
-   const a = filter.anchor
-   if (a < 0) return data.findRight(from, filter.feeds)
-   return data.findRight(from, filter.feeds).then((found) => (a >= from && (found === -1 || a < found) ? a : found))
+   return lane.atOrAbove(from)
 }
-
-// Strict neighbor of MEMBER `chron` under the active mode — the ONE seam the
-// reader's prev/next step and the list's row walk both route through, so "what's
-// the next/prev article" is decided in one place. Feed/search stay on the value
-// seam (member ∓ 1); ★ Saved steps by save-index (savedNeighbor), the one mode
-// whose display order isn't chronIdx order. "older" = the previous article
-// (feed: lower chronIdx; saved: the earlier save), "newer" = the next.
 export function neighborOlder(chron: number): Promise<number> {
-   if (filter.saved) return Promise.resolve(savedNeighbor(chron, "older"))
-   return feedLeft(chron - 1)
+   return lane.older(chron)
 }
 export function neighborNewer(chron: number): Promise<number> {
-   if (filter.saved) return Promise.resolve(savedNeighbor(chron, "newer"))
-   return feedRight(chron + 1)
+   return lane.newer(chron)
 }
 
-// Resolve a token list to its feed membership at natural add_idx bounds —
-// numeric token = that feed, else a tag's members; only feeds with articles
-// join. Empty tokens = every feed ([ALL]). The ONE copy of the resolution
-// rule: filter.set, filter.clear, and onStoreRefreshed must never drift on
-// what a token means.
-function resolveMembership(tokens: string[]): Map<number, number> {
-   const feeds = new Map<number, number>()
-   if (tokens.length === 0) {
-      for (const ch of Object.values(data.db.feeds)) if (ch.total_art) feeds.set(ch.id, ch.add_idx ?? 0)
-      return feeds
-   }
-   for (const token of tokens) {
-      const id = feedIdOf(token)
-      if (id !== null) {
-         const ch = data.db.feeds[id]
-         if (ch?.total_art && !feeds.has(id)) feeds.set(id, ch.add_idx ?? 0)
-      } else
-         for (const ch of Object.values(data.db.feeds))
-            if (ch.tag === token && ch.total_art && !feeds.has(ch.id)) feeds.set(ch.id, ch.add_idx ?? 0)
-   }
-   return feeds
-}
-
-// Which tokens the active filter resolves its FEED MEMBERSHIP from: its own
-// tokens normally, the SCOPE half for a scoped query (RDR8), and null for the
-// feed-agnostic modes (★ Saved, an unscoped query) whose membership IS an
-// explicit set and whose filter.feeds must therefore stay empty. Shared by
-// filter.set and onStoreRefreshed so the two can never disagree about what a
-// lane spans — the same reason resolveMembership itself is one function.
-function membershipTokens(): string[] | null {
-   if (filter.saved) return null
-   if (filter.search) return filter.scope.length > 0 ? filter.scope : null
-   return filter.active ? filter.tokens : []
-}
-
-// The active filter. Its DATA FIELDS are internal to nav plus the test suites
-// that seed them — production consumers read the mode through the accessors
-// below the object (isSavedFilter / isFilterActive / isSearchFilter — ENG4).
+// The pre-lane `filter` object's shape, kept ONLY as a seeding surface for the
+// unit and e2e suites (nav.test.ts; e2e/contract navigation, summary, refresh,
+// edges, multistore; e2e/stress). Every member forwards to the active lane, so it
+// is not a second source of truth; production code reads the accessors below.
 export const filter = {
-   feeds: new Map<number, number>(),
-   tokens: [] as string[],
-   // Unseen-only ENTRY ANCHOR: the chron of a SEEN article the reader landed on
-   // under raised bounds — switchFilter's resume position or a restored/shared
-   // #pos, the landings isValidSeen accepts by true add_idx. The raised (seen+1)
-   // bounds exclude it, so without this the walk loses it the moment you step
-   // off: → to the first unseen, then ← finds nothing — the entry article is
-   // gone. feedLeft/feedRight slot the anchor into their walks so it stays a
-   // reachable member of the navigable sequence ({anchor} ∪ unseen) until the
-   // filter is re-applied (set/clear reset it; a reload re-establishes it from
-   // the new landing). -1 = none. Set by resolve(); navigation-only — it does
-   // NOT make matches() true, so the unread counting (feedUnread) and badges are
-   // untouched.
-   anchor: -1,
-   // "★ Saved" mode: navigation walks the explicit srr-saved set, feed-agnostic
-   // (feeds stays empty). Set by set() when the only token is SAVED_TOKEN.
-   saved: false,
-   // Search mode: navigation walks the explicit title-search set (searchSorted).
-   // Set by set() when a token is "q:<query>" — see the Search filter mode
-   // section above.
-   search: false,
-   // The SCOPE half of a search filter (RDR8): the feed/tag tokens riding beside
-   // the q: token, [] for the feed-agnostic unscoped query. When it is non-empty
-   // `feeds` holds that lane's membership and the hit set is scanned inside it;
-   // when it is empty `feeds` stays empty, exactly as ★ Saved's does, because
-   // "no scope" means the query spans the store rather than spanning every feed.
-   scope: [] as string[],
-   get active() {
-      return this.tokens.length > 0
+   get feeds(): Map<number, number> {
+      return lane.members as Map<number, number>
    },
-   matches(feedId: number, chronIdx: number) {
-      // Saved/search modes ignore the feed: membership IS the explicit set.
-      // (feedId is still passed by callers that don't know the mode.)
-      if (this.saved) return isSaved(chronIdx)
-      if (this.search) return searchSet.has(chronIdx)
-      const addIdx = this.feeds.get(feedId)
-      return addIdx !== undefined && chronIdx >= addIdx
+   get tokens(): string[] {
+      return lane.tokens as string[]
    },
-   clear() {
-      this.saved = false
-      this.search = false
-      this.scope = []
-      this.anchor = -1
-      this.feeds = resolveMembership([])
-      this.tokens = []
-      // [ALL] honours unseen-only too now (a global "only unread" catch-up view).
-      this.applyUnseen(readSeen())
+   get active(): boolean {
+      return lane.tokens.length > 0
    },
-   set(tokens: string[]) {
-      this.tokens = tokens
-      this.feeds = new Map<number, number>()
-      this.anchor = -1
-      this.scope = []
-      // "★ Saved" is a standalone mode, not a feed resolution: short-circuit
-      // before the feed loop (which would find no feeds and clear() back
-      // to [ALL]). feeds stays empty; feedLeft/feedRight/matches/showFeed all
-      // branch on filter.saved.
-      this.saved = tokens.length === 1 && tokens[0] === SAVED_TOKEN
-      // "q:<query>" — title-search mode (see Search filter mode above). The
-      // matching set is loaded once by ensureSearchSet (via feedLeft/feedRight)
-      // and cached in search.ts. RDR8: the q: token may be joined by ONE scope
-      // token, hence "find it anywhere in a list of at most two" rather than
-      // "it is the only token".
-      const q = this.saved ? -1 : tokens.findIndex((t) => t.startsWith(SEARCH_PREFIX))
-      this.search = q >= 0 && tokens.length <= 2
-      if (this.saved) return
-      if (this.search) {
-         this.scope = tokens.filter((_, i) => i !== q)
-         // The scope resolves to feed membership exactly as a plain feed/tag
-         // filter does, but at NATURAL add_idx bounds — no applyUnseen: search is
-         // a peek mode, so a query inside a lane must still find its read
-         // articles. A scope token that resolves to nothing leaves an empty map
-         // and the query honestly finds nothing in that lane.
-         const members = membershipTokens()
-         if (members) this.feeds = resolveMembership(members)
-         // New query OR new scope: drop the snapshot so ensureSearchSet reloads
-         // it. A returning key (back/forward, nothing changed) would already have
-         // its snapshot if it loaded before; resetSearchStream just nulls
-         // searchLoadedFor so a stale or emptied snapshot doesn't strand the list
-         // on no matches (the A→B→A case: B's load emptied the set; on return to
-         // A, resetSearchStream forces the reload).
-         if (searchKey() !== searchLoadedFor) resetSearchStream()
-         return
-      }
-      // Resolve membership at natural add_idx bounds (numeric token = a feed,
-      // else a tag's members), then fold in unseen-only via applyUnseen.
-      this.feeds = resolveMembership(tokens)
-      if (this.feeds.size === 0) {
-         this.clear()
-         return
-      }
-      this.applyUnseen(readSeen())
+   get anchor(): number {
+      return lane.entryAnchor()
    },
-   // Fold unseen-only into the just-built feed membership (shared by set() and
-   // clear()). When on, raise EVERY member's lower bound past its seen high-water
-   // (read from localStorage at apply time) — so read articles fall below it for findLeft/findRight/matches.
-   // Generalised from the old single-tag case: it now applies to any filter, so
-   // [ALL]/a feed/a tag all become a "show only unread" view. When off, no-op.
-   // Saved/search short-circuit before this.
-   applyUnseen(seenMap: Record<string, number>) {
-      if (!unreadOnly) return
-      for (const [id, addIdx] of this.feeds) {
-         const seen = seenMap[feedKey(id)] ?? -1
-         this.feeds.set(id, Math.max(addIdx, seen + 1))
-      }
+   get saved(): boolean {
+      return lane.kind === "saved"
+   },
+   get search(): boolean {
+      return lane.kind === "search"
+   },
+   matches(feedId: number, chron: number): boolean {
+      return lane.matches(feedId, chron)
+   },
+   set(tokens: string[]): void {
+      setLane(tokens)
+   },
+   clear(): void {
+      setLane([])
    },
 }
 
 // ── Filter read accessors (finding ENG4) ─────────────────────────────────────
-// `filter`'s DATA FIELDS (feeds / tokens / anchor / saved / search and the
-// `active` getter) are internal to nav plus the test suites that seed them —
-// they are its representation, not its API. Every production consumer reads the
-// mode through an accessor instead, so the representation can evolve without
-// touching a consumer: isSearchFilter() below is the original member of this
-// set, and these complete it for every production read. (`filter` itself stays
-// exported and mutable: nav.test.ts / list.test.ts / app.test.ts and several
-// e2e suites set up state by writing to it directly.)
+// Every production consumer reads the mode through these — never through the
+// `filter` facade above, and never through a lane's `kind`.
 export function isSavedFilter(): boolean {
-   return filter.saved
+   return lane.kind === "saved"
 }
 // True when a feed/tag/★ Saved/search filter is active — [ALL] is inactive.
 export function isFilterActive(): boolean {
-   return filter.active
+   return lane.tokens.length > 0
 }
 // The active filter's tokens. Returned `readonly` so a consumer that wants to
 // hand them back to applyFilter (the "re-snapshot the current filter" move, in
@@ -548,14 +260,14 @@ export function isFilterActive(): boolean {
 // must copy them first — spreading a live nav array straight back into the
 // setter would otherwise read as safe while aliasing nav's own state.
 export function filterTokens(): readonly string[] {
-   return filter.tokens
+   return lane.tokens
 }
 // The active filter's members (feed id → lower bound). A ReadonlyMap: this is
 // nav's live map, not a copy — callers only ever read `.size` or walk it, and
 // copying on every call would cost real work on the pin path at [ALL] scale.
 // The type is what makes the no-write contract enforceable at zero runtime cost.
 export function filterFeeds(): ReadonlyMap<number, number> {
-   return filter.feeds
+   return lane.members
 }
 
 // After data.refresh() swapped the store snapshot: reconcile the filter and the
@@ -568,66 +280,15 @@ export function filterFeeds(): ReadonlyMap<number, number> {
 // all — they sit above every existing bound, so matches()/findRight see them
 // automatically. pos is untouched: chronIdx is a permanent address and
 // total_art only ever grows. ★ Saved and an UNSCOPED query have no per-feed
-// bounds (filter.feeds stays empty for them) — skipped here; a SCOPED query
-// (RDR8) does, and reconciles through the same path as any feed/tag lane.
+// bounds (a peek lane's members stays empty for them) — skipped here; a SCOPED
+// query (RDR8) does, and reconciles through the same path as any feed/tag lane.
 export async function onStoreRefreshed(): Promise<void> {
-   // null = a feed-agnostic mode (★ Saved, an unscoped query): no per-feed bounds
-   // to reconcile. A SCOPED query does have them, and reconciles like any lane.
-   const members = membershipTokens()
-   if (members) {
-      // Recompute the fresh membership set exactly as filter.set/clear would:
-      // [ALL] (no active tokens) = every feed with total_art>0; a feed/tag
-      // filter = the union its tokens resolve to (numeric ids as feeds, else a
-      // tag match) — the SAME resolveMembership filter.set/clear use, so a mixed
-      // multi-token filter (feed ids + tags) gets the identical union.
-      const fresh = resolveMembership(members)
-      const seenMap = readSeen()
-      // The SAME peek predicate the rest of nav branches on — not the raw
-      // unread-only flag — because a SCOPED QUERY reaches this loop too and
-      // search is a peek mode. Hoisted out of the loop: it is a property of the
-      // filter, not of a member.
-      const fold = unseenActive()
-      for (const [id, addIdx] of fresh) {
-         const old = filter.feeds.get(id)
-         if (old !== undefined) {
-            // Existing member: raise the bound only if add_idx grew (expiration
-            // advanced past it) — never re-derive it from seen.
-            if (addIdx > old) filter.feeds.set(id, addIdx)
-         } else {
-            // A brand-new member: join with the same bound a fresh set()/
-            // applyUnseen would give it (raised past its seen high-water only
-            // in unseen-only mode; a never-seen member keeps its natural add_idx).
-            // Under a SCOPED QUERY that bound is the NATURAL add_idx even with
-            // unread-only on — filter.set deliberately skips applyUnseen there
-            // BECAUSE SEARCH IS A PEEK MODE: a query inside a lane must still
-            // find that lane's already-read articles. Branching on the raw flag
-            // instead of `fold` let a feed newly tagged into the active scope
-            // join with a seen-raised bound while every member already there
-            // kept its natural one, so the same query answered differently
-            // depending on when the feed joined the tag.
-            const s = fold ? (seenMap[feedKey(id)] ?? -1) : -1
-            filter.feeds.set(id, Math.max(addIdx, s + 1))
-         }
-      }
-      // A member gone from the store (feed deleted, or dropped from the tag/
-      // [ALL] scope) leaves.
-      for (const id of [...filter.feeds.keys()]) if (!fresh.has(id)) filter.feeds.delete(id)
-   }
-   // Cached neighbor probes are exactly what new content invalidates (a stored
-   // "no right neighbor" at the article that was newest before the refresh,
-   // most of all), and any in-flight prefetch may equally target stale content.
-   // Drop both; the next step re-probes fresh.
+   // Cached neighbour probes are exactly what new content invalidates, and an
+   // in-flight prefetch may target stale content: drop both, then let the lane
+   // reconcile (bounds only rise; an active query reloads its snapshot).
    next.left = next.right = undefined
    abortPrefetch()
-   // An active search walks a snapshot computed against the old store. The
-   // caller (refresh.ts) invalidates search.ts's caches first — see
-   // search.invalidate()'s docblock — so this is nav's half of that pairing:
-   // drop nav's own snapshot and reload it. ensureSearchSet's supersession
-   // guard absorbs a concurrent query change racing this reload.
-   if (filter.search) {
-      resetSearchStream()
-      await ensureSearchSet()
-   }
+   await lane.refreshed()
 }
 
 // Recompute the reader chrome (has_left/has_right/right_count) for the article
@@ -645,7 +306,7 @@ export async function probeCurrent(): Promise<IShowFeed | null> {
 // search). Matches the exact conditions under which applyUnseen raises bounds,
 // so feedUnread and isValidSeen can branch on the same predicate.
 function unseenActive(): boolean {
-   return unreadOnly && !filter.saved && !filter.search
+   return unreadOnly && !lane.peek
 }
 
 // The reader's pending readout: what the next pill displays. ★ Saved counts its
@@ -680,28 +341,8 @@ function unseenActive(): boolean {
 // at boot only because it painted before the list's anchor seed landed, and 30
 // after any repaint — a backlog count that quietly dropped an article for no
 // reason the user could see.
-async function pendingRight(seenMap?: Record<string, number>, floor = pos): Promise<number> {
-   if (filter.saved) return savedAhead(floor)
-   if (filter.search) {
-      await ensureSearchSet()
-      return searchSorted.filter((c) => c > floor).length
-   }
-   const members: IFeed[] = []
-   for (const id of filter.feeds.keys()) {
-      const ch = data.db.feeds[id]
-      if (ch) members.push(ch)
-   }
-   // Reuse the seen map the caller already parsed (recordSeen's, on a recorded
-   // landing — the map it just persisted, so it equals a fresh read) instead of
-   // re-parsing srr-seen in the same navigation tick; else read it fresh (an
-   // unrecorded landing, probeCurrent, the not-started placeholder).
-   const seen = seenMap ?? readSeen()
-   const eff = (id: number): number | undefined => {
-      const s = seen[feedKey(id)]
-      if (floor < 0) return s
-      return Math.max(s ?? -1, floor)
-   }
-   return tagUnreadFromCounts(members, await tallyWith(members, eff))
+function pendingRight(seenMap?: Record<string, number>, floor = pos): Promise<number> {
+   return lane.ahead(floor, seenMap)
 }
 
 async function showFeed(article: IArticle, seenMap?: Record<string, number>): Promise<IShowFeed> {
@@ -776,9 +417,11 @@ async function resolve(target: number, o: Landing = {}): Promise<IShowFeed> {
    // navigable sequence — ← must be able to return to the first article shown
    // after → steps into the unseen. A matching landing leaves the anchor alone:
    // stepping forward must not orphan the entry it came from.
-   if (unseenActive() && !filter.matches(article.f, target)) filter.anchor = target
+   lane.landed(target, article.f)
    // Any real landing moves off the just-unsaved ghost article onto a genuine
-   // member (or another article entirely), so the saved ghost is spent.
+   // member (or another article entirely), so the saved ghost is spent. Not a
+   // lane hook: the ghost is saved.ts state that outlives a lane switch, so every
+   // landing clears it, whatever lane it lands in.
    clearSavedGhost()
    next.left = next.right = undefined
    // Arriving at the article being prefetched must NOT abort it: its in-flight
@@ -800,7 +443,7 @@ async function resolve(target: number, o: Landing = {}): Promise<IShowFeed> {
 // you are reading. Passed as an argument rather than imported back, so ./seen
 // stays independent of nav.
 function frontierScope(): FrontierScope {
-   return { peek: filter.search || filter.saved, members: filter.feeds.keys() }
+   return { peek: lane.peek, members: lane.members.keys() }
 }
 
 // Mark the whole current feed/tag/[ALL] selection read (./seen owns the write).
@@ -885,8 +528,7 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
    // current lane rather than blanking (MS4).
    const { mid, tokens } = parseHashMount(parseHashTokens(hash))
    if (mid !== data.activeStore().mid) data.setActive(mid)
-   if (tokens.length > 0) filter.set(tokens)
-   else filter.clear()
+   setLane(tokens)
 
    if (data.db.total_art === 0) throw new Error("no articles")
 
@@ -896,14 +538,14 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
    if (!Number.isFinite(target) || target < 0 || target >= data.db.total_art) target = data.db.total_art - 1
 
    // Search mode's matching set must be fully loaded before isValidSeen/resolve
-   // read it (matches() is synchronous). ensureSearchSet loads the full hit-set
-   // for the active query so a #pos!q:… deep-link honors its position.
-   if (filter.search) await ensureSearchSet()
+   // read it (matches() is synchronous). The search lane's prepare() loads the
+   // full hit-set for the active query so a #pos!q:… deep-link honors its position.
+   await lane.prepare()
 
    // Validate the explicit #pos against the feed's TRUE add_idx, not unseen-only's
    // raised (seen+1) bounds. A restored/shared hash position is an entry anchor, like
    // switchFilter's resume position — isValidSeen is exactly that predicate (true add_idx
-   // in unseen-only mode, filter.matches otherwise).
+   // in unseen-only mode, the lane's matches() otherwise).
    //
    // Both landings resolve with record = false: restoring a position (a reload,
    // back/forward, or a shared deep-link — this is the sole hash→reader path) is
@@ -951,65 +593,23 @@ export function right(): Promise<IShowFeed> {
    return step("right")
 }
 
-// The smallest value in an iterable, computed WITHOUT a spread: Math.min(...it)
-// overflows the JS engine's spread-argument limit and throws on a store
-// approaching FEED_ID_CEILING (~65k feeds) — the same reason data.ts reduces
-// instead of Math.max(...ids). Returns 0 for an empty iterable.
-function minOf(values: Iterable<number>): number {
-   let m = Infinity
-   for (const v of values) if (v < m) m = v
-   return m === Infinity ? 0 : m
-}
-
 export async function first(o: Landing = {}): Promise<IShowFeed> {
    const { record = true } = o
-   // ★ Saved is a queue read front-to-back: "first" is the FRONT — the earliest
-   // save (save-index 0), not the lowest chronIdx.
-   if (filter.saved) {
-      const front = savedOrder()[0]
-      return front === undefined ? resolveNoMatch() : resolve(front, { record })
-   }
-   // No article from a feed with add_idx N exists below chronIdx N, so the
-   // earliest matching article is at or after the smallest add_idx in filter.
-   const start = minOf(filter.feeds.values())
-   return goTo(start, { record })
+   // The lane's own start: ★ Saved's queue front, a membership's first article at
+   // or after its smallest bound (else its newest), a query's oldest hit.
+   const target = await lane.oldest()
+   return target === -1 ? resolveNoMatch() : resolve(target, { record })
 }
 
 export async function last(o: Landing = {}): Promise<IShowFeed> {
    const { replace = false, record = true } = o
-   // ★ Saved: the BACK of the queue is the newest save (highest save-index).
-   let found: number
-   if (filter.saved) {
-      const order = savedOrder()
-      found = order.length ? order[order.length - 1] : -1
-   } else {
-      found = await feedLeft(data.db.total_art - 1)
-   }
+   const found = await lane.newest()
    if (found === -1) return resolveNoMatch({ replace })
    return resolve(found, { replace, record })
 }
 
 async function isValidSeen(idx: number): Promise<boolean> {
-   if (idx < 0 || idx >= data.db.total_art) return false
-   const feedId = await data.getFeedId(idx)
-   // Unseen-only tag mode raises each member's bound past its seen position
-   // (read at filter-apply time), so filter.matches() would reject the tag's own resume (seen)
-   // position and bounce switchFilter forward to the oldest unseen. Accept that
-   // resume position anyway — the same current position a feed or a non-unseen
-   // tag resumes to — by validating against the member's TRUE add_idx instead of
-   // the raised bound. Right then steps to the first unseen, and resolve()
-   // records the accepted landing as filter.anchor so ← can step back to it.
-   if (unseenActive()) return filter.feeds.has(feedId) && idx >= (data.db.feeds[feedId]?.add_idx ?? 0)
-   return filter.matches(feedId, idx)
-}
-
-// Does this filter token name a real feed (numeric id) or tag in the store?
-// Used by switchFilter to tell a known-but-empty pick (→ placeholder) from a
-// stale/bogus token (→ [ALL]).
-function isKnownToken(token: string): boolean {
-   const id = feedIdOf(token)
-   if (id !== null) return data.db.feeds[id] !== undefined
-   return Object.values(data.db.feeds).some((ch) => ch.tag === token)
+   return validResume(lane, idx, unreadOnly)
 }
 
 // True when unread-only is on and the active feed/tag filter has no unread
@@ -1024,17 +624,8 @@ function isKnownToken(token: string): boolean {
 // never strand an open on the "All caught up" placeholder over a transient probe
 // failure, so an unknown answer resumes normally (showFeed degrades the neighbor
 // buttons on its own).
-async function probeFirstUnread(): Promise<{ chron: number; known: boolean }> {
-   if (!unseenActive() || filter.feeds.size === 0) return { chron: -1, known: false }
-   try {
-      return { chron: await feedRight(minOf(filter.feeds.values())), known: true }
-   } catch {
-      return { chron: -1, known: false }
-   }
-}
-
 async function noUnreadLeft(): Promise<boolean> {
-   const { chron, known } = await probeFirstUnread()
+   const { chron, known } = await firstUnreadProbe(lane, unreadOnly)
    return known && chron === -1
 }
 
@@ -1053,68 +644,24 @@ async function noUnreadLeft(): Promise<boolean> {
 // records normally from there.
 export async function switchFilter(token: string): Promise<IShowFeed> {
    token = resolveMountToken(token)
-   if (token === "") {
-      filter.clear()
-      // [ALL] opens at the oldest unseen article — the start of the global
-      // unread backlog, the same anchor the list uses — NOT the newest. It lands
-      // there but records nothing (record = false): opening [ALL] leaves the whole
-      // backlog, the shown article included, unread until you step into it. Fully
-      // caught up falls back to the newest available — or, in unread-only mode, the
-      // "All caught up" placeholder (nothing unread anywhere to show).
-      const idx = await oldestUnread()
-      if (idx !== -1) return resolve(idx, { record: false })
-      return unseenActive() ? resolveNoMatch() : last({ record: false })
+   setLane(token === "" ? [] : [token], { keepKnownEmpty: true })
+   // A token that named nothing resolved to [ALL]: land on its newest, not on the
+   // [ALL] lane's own entry (a stale token is not a pick of [ALL]).
+   if (token !== "" && lane.tokens.length === 0) return last({ record: false })
+   await lane.prepare()
+   return actOnEntry(await lane.entry())
+}
+
+// Act on a lane's entry decision. A landing is a RESUME (record: false); `land: -1`
+// is "nothing to land on" and takes the plain placeholder, as first()/last() do.
+async function actOnEntry(e: LaneEntry): Promise<IShowFeed> {
+   if ("land" in e) return e.land === -1 ? resolveNoMatch() : resolve(e.land, { record: false })
+   const o = resolveNoMatch({ notStarted: e.notStarted })
+   if (e.notStarted) {
+      o.has_right = e.hasRight
+      o.right_count = e.rightCount ?? -1
+      o.startFeed = e.startFeed
    }
-   filter.set([token])
-   if (!filter.active) {
-      // filter.set cleared to [ALL] because the token matched no articles. A real
-      // feed/tag with total_art===0 is now pickable (the config picker lists empty
-      // feeds when read items are shown): scope the filter to it and show the
-      // empty-state placeholder rather than teleporting into [ALL]'s newest article.
-      // An unrecognised token (not reachable from the picker today) still falls
-      // back to [ALL].
-      if (!isKnownToken(token)) return last({ record: false })
-      filter.tokens = [token]
-      filter.feeds = new Map<number, number>()
-      return resolveNoMatch()
-   }
-   // Search has no per-feed resume position; open at the newest hit (top of
-   // the list), the same place selecting it on the list shows.
-   if (filter.search) return last({ record: false })
-   // ★ Saved is a read-later queue consumed front-to-back: open at the OLDEST
-   // saved article — the same landing the list anchors on — and read forward.
-   // first() with an empty filter.feeds walks the saved set from chron 0.
-   if (filter.saved) return first({ record: false })
-   // Oldest unread under the raised bounds — ONE scan, reused for both the
-   // caught-up test here and the not-started startFeed name below (it was two
-   // identical scans: noUnreadLeft's probe, then a re-tread for startFeed).
-   // noUnreadLeft is the same probe read for its boolean alone; fromHash still
-   // uses that, having no second consumer to share this one with.
-   const { chron: firstUnread, known: unreadKnown } = await probeFirstUnread()
-   // Unread-only + fully-read feed/tag: nothing unread to resume onto — show the
-   // "All caught up" placeholder rather than opening an already-read article.
-   if (unreadKnown && firstUnread === -1) return resolveNoMatch()
-   const seenIdx = getSeen(token)
-   if (seenIdx !== undefined && (await isValidSeen(seenIdx))) return resolve(seenIdx, { record: false })
-   // No already-read article to resume onto, but there IS unread (not caught up
-   // above). In unread-only mode the reader is a resume surface: show the distinct
-   // "not started" placeholder rather than dropping the reader onto an unread
-   // article that a mere switch must not consume (a switch records nothing).
-   // The placeholder itself keeps Next ARMED: reading begins right here with a
-   // →-step onto the oldest unread (recorded, as any read step is), no detour
-   // through the list. With pos at -1 the pill has no cursor to floor at, so
-   // it reads the feed's whole unread backlog — exactly the picker badge.
-   // Show-read mode opens the oldest article as before (you browse there).
-   if (!unseenActive()) return first({ record: false })
-   const o = resolveNoMatch({ notStarted: true })
-   o.has_right = true // the unread probe above found a right-match (a blip assumes one)
-   o.right_count = await pendingRight().catch(() => -1)
-   // Name WHICH feed the never-read backlog starts with: the oldest unread's own
-   // feed — under a tag lane the label alone can't say which member feed is the
-   // new one. Reuse the firstUnread chron already probed above (warm idx pack); a
-   // blip left it -1, so startFeed stays unset and the message falls back to the
-   // lane label.
-   o.startFeed = firstUnread < 0 ? undefined : await Promise.resolve(data.getFeedId(firstUnread)).catch(() => undefined)
    return o
 }
 
@@ -1125,11 +672,11 @@ export async function switchFilter(token: string): Promise<IShowFeed> {
 export async function goTo(idx: number, o: Landing = {}): Promise<IShowFeed> {
    const { record = true, replace = false } = o
    if (idx < 0 || idx >= data.db.total_art) return last({ replace, record })
-   // ★ Saved has no value order to snap through: land on the exact saved article
-   // (a list-row tap / deep-link always names a member), else fall back to the
-   // front of the queue for a stale ~saved deep-link.
-   if (filter.saved) return isSaved(idx) ? resolve(idx, { replace, record }) : first({ record: false })
-   const found = await feedRight(idx)
+   // A lane with no value order (★ Saved) cannot snap: land on the exact member a
+   // row tap or deep link names (its matches() ignores the feed, hence -1), else
+   // fall back to the front of the lane for a stale link.
+   if (!lane.chronOrdered) return lane.matches(-1, idx) ? resolve(idx, { replace, record }) : first({ record: false })
+   const found = await lane.atOrAbove(idx)
    return found === -1 ? last({ replace, record }) : resolve(found, { replace, record })
 }
 
@@ -1148,7 +695,7 @@ export async function goToArticle(chron: number): Promise<IShowFeed> {
    if (chron >= 0 && chron < data.db.total_art) {
       let addressable = await isValidSeen(chron)
       if (!addressable) {
-         filter.clear()
+         setLane([])
          addressable = await isValidSeen(chron)
       }
       if (addressable) return resolve(chron, { record: false })
@@ -1189,21 +736,10 @@ export function getFilterEntries(): string[] {
 // segment (numeric feed ids and tag names; unseen-only's raised bounds apply
 // in single-tag mode). Empty → clear (all feeds).
 export function applyFilter(tokens: string[]): void {
-   if (tokens.length === 0) {
-      filter.clear()
-      return
-   }
-   filter.set(tokens)
-   // Symmetric with switchFilter: a known feed/tag that currently has zero
-   // matching articles (an empty feed, pickable when read items are shown)
-   // makes filter.set fall back to [ALL]. Re-scope it to itself so a reload/back
-   // to `#!<token>` re-renders the empty-state placeholder under that scope
-   // instead of silently showing [ALL]'s full list. A truly unknown/stale token
-   // still falls back to [ALL].
-   if (!filter.active && tokens.length === 1 && isKnownToken(tokens[0])) {
-      filter.tokens = [tokens[0]]
-      filter.feeds = new Map<number, number>()
-   }
+   // Empty = [ALL]. A KNOWN feed/tag with no articles stays scoped to itself so a
+   // reload or back to `#!<token>` re-renders its empty state (makeLane's
+   // keepKnownEmpty); an unknown token falls back to [ALL].
+   setLane(tokens, { keepKnownEmpty: true })
 }
 
 // A stable key for the active filter tokens — identifies the token SET
@@ -1211,21 +747,19 @@ export function applyFilter(tokens: string[]): void {
 // so the list can key its build/scroll memory on the exact filter.
 // "" means [ALL].
 export function filterKey(): string {
-   return filter.tokens.join(" ")
+   return lane.tokens.join(" ")
 }
 
 // The `!tokens` hash suffix for the active filter ("" when inactive) — shared by
 // updateHash (reader `#pos!tokens`) and the list surface (`#!tokens`, no pos).
 // ./route owns the grammar; nav supplies the active tokens.
 export function tokensSuffix(): string {
-   return encodeTokens(filter.tokens)
+   return encodeTokens(lane.tokens)
 }
 
 // Map current filter state to a key matching getFilterEntries() format (""|"tagName"|"id")
 export function getCurrentFilterKey(): string {
-   if (!filter.active) return ""
-   if (filter.tokens.length === 1) return filter.tokens[0]
-   return ""
+   return lane.key
 }
 
 // Resolve a filter key (getCurrentFilterKey / getFilterEntries format) to its
@@ -1238,14 +772,7 @@ export function getCurrentFilterKey(): string {
 // either. A SCOPED query's key is its scope token (nav.searchScope), so the
 // combined lane labels as the lane it is searching inside.
 export function filterLabel(key: string): string {
-   if (key === "") return "All"
-   if (key === SAVED_TOKEN) return "★ Saved"
-   if (key.startsWith(SEARCH_PREFIX)) {
-      const q = key.slice(SEARCH_PREFIX.length)
-      return q ? `Search: ${q}` : "Search"
-   }
-   const id = feedIdOf(key)
-   return id !== null ? data.feedTitle(id) : key
+   return labelFor(key)
 }
 
 // A mount-qualified token (`@<mid>` / `@<mid>:<tok>`, §6.3): switch the active
@@ -1268,7 +795,7 @@ export function resolveMountToken(token: string): string {
 // cycle relative to the same current selection.
 export function cycleOriginKey(): string {
    let current = getCurrentFilterKey()
-   if (current !== "" && filter.tokens.length === 1) {
+   if (current !== "" && lane.tokens.length === 1) {
       const id = feedIdOf(current)
       if (id !== null) {
          const ch = data.db.feeds[id]
@@ -1320,7 +847,7 @@ export async function cycleFilter(dir: number): Promise<IShowFeed> {
 }
 
 function updateHash(replace = false) {
-   writeHash(pos, filter.tokens, replace)
+   writeHash(pos, lane.tokens, replace)
 }
 
 // Publish the CURRENT cursor + filter into the fragment WITHOUT navigating —
