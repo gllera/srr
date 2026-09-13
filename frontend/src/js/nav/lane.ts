@@ -51,7 +51,8 @@ export interface Lane {
    readonly chronOrdered: boolean
    label(): string
    // Synchronous, for the hot paths; valid once prepare() resolved for the
-   // current store snapshot.
+   // current store snapshot. A lane with chronOrdered: false MUST ignore
+   // feedId — goTo passes -1 for it (it has no value order to snap through).
    matches(feedId: number, chron: number): boolean
    // The value seam: the nearest member ≤ from / ≥ from, -1 at the edge.
    atOrBelow(from: number): Promise<number>

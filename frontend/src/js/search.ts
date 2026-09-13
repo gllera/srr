@@ -467,8 +467,8 @@ export function loadHits(
 // finalized shards changed bytes. Refetches ride the SW cache. Called by
 // refresh.ts after data.refresh() adopts a new snapshot. Caller contract: while
 // a q: filter is active this alone is not enough — nav.ts keeps its own snapshot
-// (searchSorted/searchLoadedFor), so pair with nav's resetSearchStream() + an
-// ensureSearchSet re-run.
+// (searchSorted/searchLoadedFor), so pair with nav's resetSearchStream() + a
+// SearchLane.prepare() re-run (nav/lane-search.ts).
 export function invalidate(store: Store = activeStore()): void {
    // Replace the store's whole SearchState — a fresh set of lazy slots/LRUs, the
    // delta memo dropped — so stale generation-named summary/tail bytes from a

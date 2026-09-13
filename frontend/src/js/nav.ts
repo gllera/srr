@@ -215,8 +215,8 @@ export function neighborNewer(chron: number): Promise<number> {
 // edges, multistore; e2e/stress). Every member forwards to the active lane, so it
 // is not a second source of truth; production code reads the accessors below.
 export const filter = {
-   get feeds(): Map<number, number> {
-      return lane.members as Map<number, number>
+   get feeds(): ReadonlyMap<number, number> {
+      return lane.members
    },
    get tokens(): string[] {
       return lane.tokens as string[]
@@ -288,8 +288,8 @@ export function laneChronOrdered(): boolean {
 // a grown add_idx (expiration) — never re-derived from seen, which would yank
 // the unseen-only sequence mid-session (articles read this session would drop
 // out from under ←). New members (a new feed under [ALL], a feed newly tagged
-// into the active tag) join with the same bound set()/applyUnseen would give
-// them; members gone from the store leave. New articles need no bound work at
+// into the active tag) join with the same bound a fresh lane's construction
+// would give them; members gone from the store leave. New articles need no bound work at
 // all — they sit above every existing bound, so matches()/findRight see them
 // automatically. pos is untouched: chronIdx is a permanent address and
 // total_art only ever grows. ★ Saved and an UNSCOPED query have no per-feed
@@ -354,8 +354,8 @@ function unseenActive(): boolean {
 // at boot only because it painted before the list's anchor seed landed, and 30
 // after any repaint — a backlog count that quietly dropped an article for no
 // reason the user could see.
-function pendingRight(seenMap?: Record<string, number>, floor = pos): Promise<number> {
-   return lane.ahead(floor, seenMap)
+async function pendingRight(seenMap?: Record<string, number>, floor = pos): Promise<number> {
+   return await lane.ahead(floor, seenMap)
 }
 
 async function showFeed(article: IArticle, seenMap?: Record<string, number>): Promise<IShowFeed> {

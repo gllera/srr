@@ -2350,5 +2350,23 @@ describe("list", () => {
          await list.loadNewer()
          expect($pill()).toBeNull()
       })
+
+      it("stays out of ★ Saved too — a lane you curate, not a feed you follow", async () => {
+         // Saving an article from the reader can itself reopen an exhausted
+         // Saved runway (the new save arrives newer than every row on screen);
+         // an "N new" pill announcing an article the reader just saved
+         // themself would be noise, not news — see nav.lanePeek() (D11).
+         setIndex(6)
+         nav._setSaved([0, 2, 4])
+         nav.filter.saved = true
+         await list.render()
+         expect($chrons()).toEqual([4, 2, 0])
+         data._arts.set(5, art({ f: 1, t: "title 5", a: 5 }))
+         data.db.total_art = 6
+         nav._setSaved([0, 2, 4, 5]) // the new save, appended (newest)
+         await list.onStoreGrown()
+         await list.loadNewer()
+         expect($pill()).toBeNull()
+      })
    })
 })

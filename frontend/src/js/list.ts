@@ -267,9 +267,10 @@ export function setup(
 }
 
 // Count `n` freshly prepended rows toward the arrivals pill and (re)paint it.
-// Peek lanes are exempt: their rows are an explicit set rather than a wire that
-// grows (and search's pinned bar owns the strip of viewport the pill would sit
-// in). ★ Saved never reached this anyway — a store refresh adds nothing to it.
+// A peek lane's rows are an explicit set the user curates (saved articles,
+// search hits), so an "N new" pill has no meaning there — stand down for any
+// peek lane, not just search (and search's pinned bar owns the strip of
+// viewport the pill would sit in anyway).
 function noteNewAbove(n: number): void {
    if (n <= 0 || nav.lanePeek()) return
    newAbove += n
@@ -1250,7 +1251,7 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
 }
 
 // Search render: the full hit-set is pre-loaded into nav's snapshot via
-// feedLeft/feedRight → ensureSearchSet (search.ts caches results per query).
+// SearchLane.prepare() (nav/lane-search.ts; search.ts caches results per query).
 // Rows are built directly from the search snapshot's per-hit {f,w,t} cards
 // (nav.searchCard) — no per-row meta fetch, since search.loadHits already parsed
 // them during the scan. Search suppresses day dividers (relabelDividers returns
