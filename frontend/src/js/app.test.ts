@@ -142,6 +142,9 @@ const nav = vi.hoisted(() => {
       isFilterActive: vi.fn(() => mock.filter.active),
       filterTokens: vi.fn(() => mock.filter.tokens),
       filterFeeds: vi.fn(() => mock.filter.feeds),
+      // nav lanes P2: the peek test every consumer asks, answered as the real lanes
+      // answer it before the watch lane exists.
+      lanePeek: vi.fn(() => mock.filter.saved || mock.isSearchFilter()),
       // The route.ts grammar re-exports — real logic, not spies: app's routing
       // decisions under test ARE these classifications.
       isPosInt: (s: string) => /^-?\d+$/.test(s),
@@ -2596,6 +2599,18 @@ describe("the frontier menu — right-click / long-press on the reader's next pi
       expect(e.defaultPrevented).toBe(true) // ours, not the browser's menu
       expect(dropdown.showContextMenu).toHaveBeenCalledWith(document.querySelector(".srr-next"), expect.anything())
       expect(menuItems()!.map((i) => i.label)).toEqual(["Mark all read", "Mark unread from here"])
+   })
+
+   it("offers nothing on ANY peek lane, not only ★ Saved and search", async () => {
+      await boot()
+      hashTo("#2")
+      await flush()
+      nav.isSearchFilter.mockReturnValue(false)
+      nav.filter.feeds = new Map([[1, 0]])
+      nav.currentChron.mockReturnValue(7)
+      nav.lanePeek.mockReturnValueOnce(true) // a peek lane that is neither mode
+      const e = rightClick(".srr-next")
+      expect(e.defaultPrevented).toBe(false) // no items: the browser's own menu
    })
 
    it("'Mark all read' raises and (unread-only, reader view) re-applies + invalidates the hidden list", async () => {

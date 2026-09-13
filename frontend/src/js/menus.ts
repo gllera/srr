@@ -165,11 +165,11 @@ export function markUnreadFromHere(): void {
 // Its one anchor is the readout of exactly the walk the gestures operate on:
 // the reader's next pill (the pending count they raise past or restore). The
 // list's lane readout is deliberately NOT an anchor — it's the picker opener,
-// and a second meaning there shadowed the browser's own menu. Saved/search are
-// seen-neutral peek modes — no items, and the gesture falls through to the
-// browser's own menu.
+// and a second meaning there shadowed the browser's own menu. Peek lanes (★
+// Saved, search, …) are seen-neutral — no items, and the gesture falls
+// through to the browser's own menu.
 function frontierMenuItems(): MenuItem[] {
-   if (nav.isSavedFilter() || nav.isSearchFilter()) return []
+   if (nav.lanePeek()) return []
    const items: MenuItem[] = []
    if (nav.filterFeeds().size > 0) items.push({ label: "Mark all read", action: markAllRead })
    if (nav.currentChron() >= 0) items.push({ label: "Mark unread from here", action: markUnreadFromHere })

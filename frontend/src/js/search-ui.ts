@@ -93,7 +93,9 @@ export function setup(deps: SearchDeps): void {
 function scopeToken(): string {
    if (nav.isSearchFilter()) return nav.searchScope()
    const key = nav.getCurrentFilterKey()
-   return key === nav.SAVED_TOKEN ? "" : key
+   // Only a membership lane can scope a query: a peek lane (★ Saved, …) is not a
+   // feed map the scan's intersection can take.
+   return nav.lanePeek() ? "" : key
 }
 
 // The token pair for a query under the current scope — the ONE place the

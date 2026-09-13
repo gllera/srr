@@ -89,7 +89,14 @@ const nav = vi.hoisted(() => {
       // reaching into nav.filter.saved / nav.filter.active.
       isSavedFilter: vi.fn(() => filter.saved),
       isFilterActive: vi.fn(() => filter.active),
-      searchQuery: vi.fn(() => searchTerm),
+      // The lane reads (nav lanes P2), answered from the same mock `filter` the
+      // cases seed — exactly what the real lane answers for each mode.
+      laneDividers: vi.fn(() => !filter.saved && !filter.search),
+      lanePeek: vi.fn(() => filter.saved || filter.search),
+      laneChronOrdered: vi.fn(() => !filter.saved),
+      // "" outside search, as the real accessor answers — the list's term
+      // highlighting keys on it.
+      searchQuery: vi.fn(() => (filter.search ? searchTerm : "")),
       // RDR8 — the lane an active query is scoped to; "" unless a test sets one.
       searchScope: vi.fn(() => searchScopeTok),
       _setSearchScope: (t: string) => (searchScopeTok = t),
@@ -305,6 +312,17 @@ describe("list", () => {
       nav._setSearch("x")
       await list.render()
       expect(document.querySelectorAll(".srr-day-divider").length).toBe(0)
+   })
+
+   it("draws day strata when the LANE says so, not when a mode name is absent", async () => {
+      setIndex(6)
+      nav.laneDividers.mockReturnValue(false) // a lane with no date order that is neither saved nor search
+      try {
+         await list.render()
+         expect(document.querySelectorAll(".srr-day-divider").length).toBe(0)
+      } finally {
+         nav.laneDividers.mockImplementation(() => !nav.filter.saved && !nav.filter.search)
+      }
    })
 
    it("paints skeleton rows immediately, then fills them in place", async () => {

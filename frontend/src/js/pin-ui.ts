@@ -234,13 +234,13 @@ export function postMounts(): void {
 }
 
 // Returns the pin menu row entry for the current filter, or null when pinning
-// is not available (no SW controller, or a saved/search scope). `onError` is the
-// app's error popup — the one app-level dependency in this module, passed in by
-// the caller (menus.ts) rather than imported, so nothing here points back at the
-// orchestrator.
+// is not available (no SW controller, or a peek lane — an explicit set has no
+// pack list to pin). `onError` is the app's error popup — the one app-level
+// dependency in this module, passed in by the caller (menus.ts) rather than
+// imported, so nothing here points back at the orchestrator.
 export function pinMenuEntry(onError: (e: unknown) => void): { label: string; action: () => void } | null {
    if (!navigator.serviceWorker?.controller) return null
-   if (nav.isSavedFilter() || nav.isSearchFilter()) return null
+   if (nav.lanePeek()) return null
    const key = pinKey()
    if (isPinned(key, data.activeStore().mid)) {
       return { label: "Remove offline copy", action: unpinCurrentFilter }

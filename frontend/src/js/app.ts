@@ -997,7 +997,7 @@ async function init() {
       if (mountsChanged) menus.afterMountChange(loadMounts())
       nav.pruneSeen()
       repaintSaveButton()
-      if (view === "list" && !hasInteracted && !nav.isSavedFilter() && !nav.isSearchFilter()) {
+      if (view === "list" && !hasInteracted && !nav.lanePeek()) {
          // The BOOT pull changed the profile before anything was touched — the
          // device-switch moment, and the navigator half of the sync feature
          // (the profile syncs on page load; there is deliberately no button):

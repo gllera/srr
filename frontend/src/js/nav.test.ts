@@ -3754,6 +3754,23 @@ describe("never-opened feed/tag shows the not-started placeholder (unread-only)"
    })
 })
 
+describe("lane reads (laneDividers / lanePeek / laneChronOrdered)", () => {
+   it("answer per mode, from the active lane", () => {
+      setupIndex([{ feedId: 1 }, { feedId: 2 }])
+      const read = () => [nav.laneDividers(), nav.lanePeek(), nav.laneChronOrdered()]
+      nav.applyFilter([])
+      expect(read()).toEqual([true, false, true])
+      nav.applyFilter(["1"])
+      expect(read()).toEqual([true, false, true])
+      nav.applyFilter([nav.SAVED_TOKEN])
+      expect(read()).toEqual([false, true, false])
+      nav.applyFilter([nav.SEARCH_PREFIX + "x"])
+      expect(read()).toEqual([false, true, true])
+      nav.applyFilter([nav.SEARCH_PREFIX + "x", "1"])
+      expect(read()).toEqual([false, true, true])
+   })
+})
+
 // docs/MULTI-STORE-SPEC.md §6.3 — the @<mid> token grammar. Bare tokens keep
 // meaning the home mount, so every existing deep link + stored srr-hash still
 // works; a peer mount rides IN the token as @<mid> ([ALL]) or @<mid>:<token>.

@@ -270,6 +270,19 @@ export function filterFeeds(): ReadonlyMap<number, number> {
    return lane.members
 }
 
+// The lane reads the list surface consumes: the question it means ("does this
+// lane draw day strata", "is this a peek lane", "is display order chron order")
+// instead of a list of mode names that a new lane would silently fall outside of.
+export function laneDividers(): boolean {
+   return lane.dividers
+}
+export function lanePeek(): boolean {
+   return lane.peek
+}
+export function laneChronOrdered(): boolean {
+   return lane.chronOrdered
+}
+
 // After data.refresh() swapped the store snapshot: reconcile the filter and the
 // navigation caches WITHOUT re-snapshotting the walk. Bounds only ever rise by
 // a grown add_idx (expiration) — never re-derived from seen, which would yank

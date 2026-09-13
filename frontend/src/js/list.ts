@@ -267,11 +267,11 @@ export function setup(
 }
 
 // Count `n` freshly prepended rows toward the arrivals pill and (re)paint it.
-// Search is exempt: its rows are an explicit query result rather than a wire
-// that grows, and the pinned search bar owns the strip of viewport the pill
-// would sit in.
+// Peek lanes are exempt: their rows are an explicit set rather than a wire that
+// grows (and search's pinned bar owns the strip of viewport the pill would sit
+// in). ★ Saved never reached this anyway — a store refresh adds nothing to it.
 function noteNewAbove(n: number): void {
-   if (n <= 0 || nav.isSearchFilter()) return
+   if (n <= 0 || nav.lanePeek()) return
    newAbove += n
    paintNewPill()
 }
@@ -387,7 +387,7 @@ let readSwipeUndo: { mid: string; chron: number; feed: number; undo: nav.Frontie
 // direction outright (no affordance for an inert action), and the scope still
 // carries the flag — the exemption stays structural in ./seen rather than resting
 // on this module's gate.
-const frontierPeek = () => nav.isSavedFilter() || nav.isSearchFilter()
+const frontierPeek = () => nav.lanePeek()
 
 interface RowAction {
    // Which edge the affordance reveals, and what it means (styles.css).
@@ -629,7 +629,8 @@ export function rowEl(
 // nothing at all when that mapping can't be verified), so all that is left here
 // is to walk them: text, mark, text, …
 function paintTitle(host: Element, text: string): void {
-   const spans = nav.isSearchFilter() ? matchSpans(text, nav.searchQuery()) : []
+   const q = nav.searchQuery() // "" outside search, and matchSpans answers [] for it
+   const spans = q ? matchSpans(text, q) : []
    if (spans.length === 0) {
       host.textContent = text
       return
@@ -883,7 +884,7 @@ function relabelDividers(): void {
    // rows aren't in date order (search hits span time; saved reads in save
    // order), so day strata would repeat chaotically instead of marking a walk
    // down through the days.
-   if (nav.isSearchFilter() || nav.isSavedFilter()) return
+   if (!nav.laneDividers()) return
    let prev: string | null = null
    const ctx = dayLabelCtx() // hoisted: the pass walks every loaded row
    for (const row of rowsEl.querySelectorAll<HTMLElement>("a.srr-row")) {
@@ -1027,8 +1028,8 @@ function mayClaimCursor(): boolean {
 // so a saved chron 0 can sit mid-queue and only that walk's own exhaustion (a
 // -1 neighbour) ends the lane. Stated once because it was the same carve-out
 // copied to four sites, one of which had already lost it.
-const atOldestEnd = (chron: number): boolean => !nav.isSavedFilter() && chron === 0
-const atNewestEnd = (chron: number): boolean => !nav.isSavedFilter() && chron === data.db.total_art - 1
+const atOldestEnd = (chron: number): boolean => nav.laneChronOrdered() && chron === 0
+const atNewestEnd = (chron: number): boolean => nav.laneChronOrdered() && chron === data.db.total_art - 1
 
 export async function render(anchorNow = false, onInteractive?: () => void): Promise<void> {
    const my = (tok = {})
@@ -1063,9 +1064,9 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    // nearest match below a non-matching anchor. ★ Saved's listAnchor already
    // returns a member (the front of the queue, or the live reader article), and
    // has no chronIdx value order to scan, so it seeds directly.
-   let seed = nav.isSavedFilter() ? anchor : await nav.feedLeft(anchor === -1 ? data.db.total_art - 1 : anchor)
+   let seed = nav.laneChronOrdered() ? await nav.feedLeft(anchor === -1 ? data.db.total_art - 1 : anchor) : anchor
    if (my !== tok) return
-   if (seed === -1 && anchor !== -1 && !nav.isSavedFilter()) seed = await nav.feedLeft(data.db.total_art - 1)
+   if (seed === -1 && anchor !== -1 && nav.laneChronOrdered()) seed = await nav.feedLeft(data.db.total_art - 1)
    if (my !== tok) return
    if (seed === -1) {
       bailEmpty(onInteractive)
