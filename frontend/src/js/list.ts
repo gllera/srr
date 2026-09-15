@@ -99,7 +99,7 @@ export function setScroller(s: Scroller): void {
    sc = s
 }
 
-// "Is a LIVE reader holding the shared cursor?" — app.ts's readerLive, injected
+// "Is a LIVE reader holding the shared cursor?" — layout.ts's readerLive, injected by app.ts
 // for the same reason the scroller is: this module sits below the controllers
 // and cannot import one (reader.ts already imports this, so the edge would be a
 // cycle). The default answers "no reader", which is the single-surface truth and

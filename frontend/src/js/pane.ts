@@ -3,7 +3,8 @@
 // A leaf module, sibling to split.ts and scroller.ts: split.ts owns the
 // breakpoint (body.srr-split), scroller.ts owns which box the list scrolls, and
 // this owns how wide the pane is and whether it is on screen. Imports only
-// keys.ts, so it stays unit-testable without a running pack server.
+// keys.ts, storage.ts and model.ts (its hidden flag is the layout record's
+// model.paneHidden input), so it stays unit-testable without a pack server.
 //
 // FIVE things change the pane's VISIBILITY, and only three of them are a press:
 // the rail's .srr-pane-toggle button (wired here), the grip's Enter/Space and
@@ -37,6 +38,7 @@
 // desktop session — which is why the 0px override is scoped under body.srr-split.
 // Every pre-existing split rule already reads --split-pane-w and stays untouched.
 import { PANE_HIDDEN_KEY, PANE_WIDTH_KEY } from "./keys"
+import * as model from "./model"
 // Private mode / quota: the layout still applies, it just will not survive a reload.
 import { lsGet, lsSet } from "./storage"
 
@@ -73,8 +75,6 @@ function paneCeiling(viewportW: number): number {
    const wide = Math.round(viewportW * PANE_WIDE_FRACTION)
    return Math.min(PANE_MAX_CEIL, Math.max(PANE_MAX_W, wide))
 }
-
-const HIDDEN_CLASS = "srr-pane-hidden"
 
 // The rail's toggle button, cached at initPane. CACHED rather than looked up
 // per call because the sync below hangs off applyHidden, which a drag runs once
@@ -120,8 +120,9 @@ export function setPaneW(px: number, opts: { persist?: boolean } = {}): void {
    if (opts.persist) lsSet(PANE_WIDTH_KEY, String(w))
 }
 
+// The model, not the class: layout.ts stamps `srr-pane-hidden` from this atom.
 export function isPaneHidden(): boolean {
-   return document.body.classList.contains(HIDDEN_CLASS)
+   return model.paneHidden()
 }
 
 // The class toggle and the persist-write, independently drivable. They have to
@@ -131,7 +132,10 @@ export function isPaneHidden(): boolean {
 // pick: the button/keyboard path persists, the drag path persists only at the
 // end, and restore never does.
 function applyHidden(on: boolean, persist: boolean): void {
-   document.body.classList.toggle(HIDDEN_CLASS, on)
+   // A drag calls this once per frame; the atom's equality check makes every
+   // frame that does not cross the collapse threshold a no-op, and layout.ts's
+   // effect turns the atom into the body class.
+   model.paneHidden.set(on)
    if (persist) lsSet(PANE_HIDDEN_KEY, on ? "1" : null)
    syncToggle()
 }

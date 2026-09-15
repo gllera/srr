@@ -381,6 +381,20 @@ const hashTo = (h: string) => {
    window.location.hash = h
    window.dispatchEvent(new Event("hashchange"))
 }
+// Cross the breakpoint the way the app sees it: layout.ts's effect owns
+// body.srr-split, so a hand-edited class is overwritten on the next layout
+// change. Write the model instead — through the SAME registry app.ts was
+// imported into (boot() resets modules), hence the dynamic import.
+const setSplit = async (on: boolean) => (await import("./model")).split.set(on)
+
+// The layout record reads the cursor from the MODEL (layout.ts readerLive), and
+// nav is mocked here — so nothing writes model.cursor on its own. Every case that
+// moves the mocked cursor moves the model's in the same breath, through the
+// registry app.ts was imported into (boot() resets modules).
+const setCursor = async (chron: number) => {
+   nav.currentChron.mockReturnValue(chron)
+   ;(await import("./model")).cursor.set({ chron, feedId: 1 })
+}
 
 // app.ts binds window/document listeners (hashchange, click, keydown, …) at
 // load. vi.resetModules() + re-import per test would STACK another set onto the
@@ -431,6 +445,44 @@ afterEach(() => {
    for (const [t, type, h] of added) t.removeEventListener(type, h)
    vi.restoreAllMocks()
    vi.resetModules()
+})
+
+// The layout record's inputs (layout.ts) are written by their owners: focus by
+// the surface switchers, readerPainted by the reader's render paths.
+describe("layout inputs mirror into the model", () => {
+   it("writes focus from the surface switchers and readerPainted from the reader", async () => {
+      await boot()
+      const model = await import("./model") // app.ts's registry (boot() reset modules)
+      expect(model.focus()).toBe("list")
+      expect(model.readerPainted()).toBe(false)
+      nav.fromHash.mockResolvedValue(showFeed())
+      hashTo("#2")
+      await flush()
+      expect(model.focus()).toBe("reader")
+      expect(model.readerPainted()).toBe(true)
+      nav.fromHash.mockResolvedValue({ ...showFeed(), placeholder: true })
+      hashTo("#3")
+      await flush()
+      expect(model.readerPainted()).toBe(false)
+      hashTo("#!news")
+      await flush()
+      expect(model.focus()).toBe("list")
+   })
+
+   it("stamps the layout from the model, not from the surface switchers", async () => {
+      await boot()
+      const model = await import("./model")
+      nav.fromHash.mockResolvedValue(showFeed())
+      hashTo("#2")
+      await flush()
+      expect(document.body.classList.contains("srr-reader-shown")).toBe(true)
+      expect(document.body.classList.contains("srr-list-shown")).toBe(false)
+      // A focus write alone — no switcher runs — must re-derive the classes.
+      model.focus.set("list")
+      expect(document.body.classList.contains("srr-view-list")).toBe(true)
+      expect(document.querySelector(".srr-list")!.hasAttribute("hidden")).toBe(false)
+      expect(document.querySelector(".srr-reader")!.hasAttribute("hidden")).toBe(true)
+   })
 })
 
 describe("route() — surface selection from the hash", () => {
@@ -516,7 +568,7 @@ describe("split view (body.srr-split)", () => {
       hashTo("#2")
       await flush()
       // An article is on screen (per the mocked nav) — the reader pane stays.
-      nav.currentChron.mockReturnValue(2)
+      await setCursor(2)
       hashTo("#!news")
       await flush()
       expect(document.body.classList.contains("srr-view-list")).toBe(true)
@@ -529,7 +581,7 @@ describe("split view (body.srr-split)", () => {
       // thirds of a desktop window with nothing in it (and dead arrows) read as
       // a broken app, so the reader's own directed empty panel stands in until
       // the first open.
-      nav.currentChron.mockReturnValue(-1)
+      await setCursor(-1)
       hashTo("#!other")
       await flush()
       expect(reader().hasAttribute("hidden")).toBe(false)
@@ -545,7 +597,7 @@ describe("split view (body.srr-split)", () => {
 
    // Every caller that re-derives the reader's chrome does so BECAUSE the pane
    // went stale, and under split the pane is on screen whichever surface has
-   // focus. reader.ts gated the WRITE on `view === "reader"`, so the probe
+   // focus. reader.ts gated the WRITE on the reader holding focus, so the probe
    // resolved and was thrown away whenever the list held focus — defeating all
    // four callers at once. `nav.probeCurrent` being called is not the assertion:
    // it always was. What must land is the DOM.
@@ -554,7 +606,7 @@ describe("split view (body.srr-split)", () => {
       nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true, right_count: 13 }))
       hashTo("#2")
       await flush()
-      nav.currentChron.mockReturnValue(2)
+      await setCursor(2)
       hashTo("#!news") // the LIST takes focus; the article stays in the pane
       await flush()
       expect(nextBtn().disabled).toBe(false)
@@ -580,17 +632,17 @@ describe("split view (body.srr-split)", () => {
       nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
       hashTo("#2")
       await flush()
-      nav.currentChron.mockReturnValue(2)
+      await setCursor(2)
       const title = document.querySelector(".srr-title")!.textContent
 
       // Narrow: the single-surface list hides the article (and disables its nav).
-      document.body.classList.remove("srr-split")
+      await setSplit(false)
       hashTo("#!news")
       await flush()
       expect(reader().hasAttribute("hidden")).toBe(true)
 
       // …and back. The article must survive, not be replaced by the resting panel.
-      document.body.classList.add("srr-split")
+      await setSplit(true)
       hashTo("#!other")
       await flush()
       expect(reader().hasAttribute("hidden")).toBe(false)
@@ -607,7 +659,7 @@ describe("split view (body.srr-split)", () => {
       await boot()
       nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
       // Before the render: the MOUNTED chron is stamped as the article paints.
-      nav.currentChron.mockReturnValue(2)
+      await setCursor(2)
       hashTo("#2")
       await flush()
       hashTo("#!news") // the LIST takes focus; the article stays in the pane
@@ -631,7 +683,7 @@ describe("split view (body.srr-split)", () => {
    it("publishes the article hash on a focus-only re-entry", async () => {
       await boot()
       nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
-      nav.currentChron.mockReturnValue(2)
+      await setCursor(2)
       hashTo("#2")
       await flush()
       hashTo("#!news")
@@ -651,7 +703,7 @@ describe("split view (body.srr-split)", () => {
    it("a row tap on the article the pane already shows is a focus change too", async () => {
       await boot()
       nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
-      nav.currentChron.mockReturnValue(2)
+      await setCursor(2)
       hashTo("#2")
       await flush()
       hashTo("#!news")
@@ -681,7 +733,7 @@ describe("split view (body.srr-split)", () => {
    it("a save from the reader re-derives the pane's stars", async () => {
       await boot()
       nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
-      nav.currentChron.mockReturnValue(2)
+      await setCursor(2)
       hashTo("#2")
       await flush()
 
@@ -697,7 +749,7 @@ describe("split view (body.srr-split)", () => {
    it("a row's ★ re-derives the reader's save button — but only for the article it shows", async () => {
       await boot()
       nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
-      nav.currentChron.mockReturnValue(2)
+      await setCursor(2)
       hashTo("#2")
       await flush()
       const save = document.querySelector(".srr-save") as HTMLButtonElement
@@ -725,7 +777,7 @@ describe("split view (body.srr-split)", () => {
       data.db.feeds = { 1: { id: 1, title: "F", total_art: 9 } } as unknown as IDB["feeds"]
       await boot()
       nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true, right_count: 25 }))
-      nav.currentChron.mockReturnValue(2)
+      await setCursor(2)
       hashTo("#2")
       await flush()
       expect(document.querySelector(".srr-next-count")!.textContent).toBe("25")
@@ -745,12 +797,12 @@ describe("split view (body.srr-split)", () => {
    it("still renders when the cursor has moved off the article the pane shows", async () => {
       await boot()
       nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
-      nav.currentChron.mockReturnValue(2)
+      await setCursor(2)
       hashTo("#2") // the pane mounts chron 2…
       await flush()
       hashTo("#!news")
       await flush()
-      nav.currentChron.mockReturnValue(7) // …and the list stepped the shared cursor off it
+      await setCursor(7) // …and the list stepped the shared cursor off it
       nav.goTo.mockClear()
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))
       await flush()
@@ -764,14 +816,14 @@ describe("split view (body.srr-split)", () => {
    // the backlog and opened its second article, marking the first read behind you.
    it("starts reading AT the highlighted article from the resting pane, not past it", async () => {
       await boot()
-      nav.currentChron.mockReturnValue(-1)
+      await setCursor(-1)
       hashTo("#!news")
       await flush()
       expect(reader().classList.contains("srr-reader-empty")).toBe(true)
       expect(nextBtn().disabled).toBe(false)
 
       // The list's anchor seed lands: the shared cursor now names the top unread.
-      nav.currentChron.mockReturnValue(4)
+      await setCursor(4)
       nav.right.mockClear()
       nav.goTo.mockClear()
       nextBtn().click()
@@ -797,7 +849,7 @@ describe("split view (body.srr-split)", () => {
       expect(document.body.classList.contains("srr-view-list")).toBe(false)
       expect(reader().classList.contains("srr-reader-empty")).toBe(true)
       // The list's rebuild for the new lane seeds the shared cursor at its anchor.
-      nav.currentChron.mockReturnValue(4)
+      await setCursor(4)
       nav.right.mockClear()
       nav.goTo.mockClear()
       nextBtn().click()
@@ -811,12 +863,12 @@ describe("split view (body.srr-split)", () => {
    // stepping. The split gate is what keeps the two apart.
    it("keeps Next stepping on a placeholder in the narrow layout", async () => {
       await boot()
-      document.body.classList.remove("srr-split")
+      await setSplit(false)
       nav.fromHash.mockResolvedValue({ ...showFeed({ has_right: true }), placeholder: true, notStarted: true })
       hashTo("#0")
       await flush()
       expect(reader().classList.contains("srr-reader-empty")).toBe(true)
-      nav.currentChron.mockReturnValue(4)
+      await setCursor(4)
       nav.right.mockClear()
       nav.goTo.mockClear()
       nextBtn().click()
@@ -835,7 +887,7 @@ describe("split view (body.srr-split)", () => {
       nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true, right_count: 25 }))
       hashTo("#2")
       await flush()
-      nav.currentChron.mockReturnValue(2)
+      await setCursor(2)
       hashTo("#!news")
       await flush()
       expect(nextBtn().disabled).toBe(false)
@@ -857,7 +909,7 @@ describe("split view (body.srr-split)", () => {
    it("re-derives the pane's chrome on every query change, not just at search entry", async () => {
       await boot()
       nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true, right_count: 25 }))
-      nav.currentChron.mockReturnValue(2)
+      await setCursor(2)
       hashTo("#2")
       await flush()
       hashTo("#!news")
@@ -884,7 +936,7 @@ describe("split view (body.srr-split)", () => {
       await flush()
       expect(list.followCursor).toHaveBeenCalled()
       // Narrow: the same navigation must NOT touch the hidden list.
-      document.body.classList.remove("srr-split")
+      await setSplit(false)
       list.followCursor.mockClear()
       hashTo("#3")
       await flush()
@@ -902,7 +954,7 @@ describe("split view (body.srr-split)", () => {
       nav.fromHash.mockResolvedValue(showFeed({ has_right: true, right_count: 2 }))
       hashTo("#5")
       await flush()
-      nav.currentChron.mockReturnValue(5)
+      await setCursor(5)
       list.onStoreGrown.mockClear()
       nav.probeCurrent.mockClear()
       afterStore()()
@@ -911,17 +963,62 @@ describe("split view (body.srr-split)", () => {
       expect(nav.probeCurrent).toHaveBeenCalled() // …and the reader re-probes
    })
 
+   // The chrome re-probe's write gate is the record's readerSteppable, NOT
+   // readerMounted: under split the reader is mounted beside a RESTING panel too,
+   // and the list has already seeded the cursor there — so a readerMounted gate
+   // would write the cursor article's arrows and pill over the resting panel.
+   it("keeps a probed chrome off the resting panel after a store refresh", async () => {
+      await boot()
+      expect(reader().classList.contains("srr-reader-empty")).toBe(true)
+      await setCursor(4) // the list's anchor seed
+      nav.probeCurrent.mockResolvedValue(showFeed({ has_left: true, has_right: true, right_count: 9 }))
+      ;(refresh.init.mock.calls[0][1] as () => void)()
+      await flush()
+      expect(prevBtn().disabled).toBe(true)
+      expect(document.querySelector(".srr-next-count")!.textContent).not.toBe("9")
+   })
+
    // Same shape, sync half: a pulled profile changes what is read, and the pane
    // is on screen showing those rows.
    it("rebuilds the pane after a profile merge while the reader has focus", async () => {
       await boot("#2")
       hashTo("#5")
       await flush()
-      nav.currentChron.mockReturnValue(5)
+      await setCursor(5)
       list.rerender.mockClear()
       const afterMerge = dropdown.setProfileImportHook.mock.calls[0][0] as (m?: boolean) => void
       afterMerge(false)
       await flush()
+      expect(list.rerender).toHaveBeenCalled()
+   })
+
+   // The boot-pull re-anchor re-applies the filter and rebuilds the list from its
+   // anchor — but ONLY for a boot with no live article beside it. L14's own case
+   // is the FOCUS back on the list (view/focus === "list") while a real article
+   // still sits live in the split pane: the OLD `view === "list"` check would
+   // wrongly re-anchor under it, discarding the article's context; the record's
+   // `listShown && !readerLive` gets it right because readerLive is true here.
+   // So this scenario — not a plain reader-hash boot — is what actually tells
+   // the two conditions apart (a boot straight onto the reader leaves `view`
+   // "reader" for both checks, which is gentle either way and proves nothing).
+   it("keeps a pre-interaction profile merge gentle under a split deep link", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
+      hashTo("#2")
+      await flush()
+      await setCursor(2)
+      hashTo("#!news") // the LIST takes focus; the article stays live in the pane
+      await flush()
+      expect(document.body.classList.contains("srr-view-list")).toBe(true)
+      expect(reader().classList.contains("srr-reader-empty")).toBe(false) // readerLive
+      list.render.mockClear()
+      list.rerender.mockClear()
+      nav.applyFilter.mockClear()
+      const afterMerge = dropdown.setProfileImportHook.mock.calls[0][0] as (m?: boolean) => void
+      afterMerge(false)
+      await flush()
+      expect(nav.applyFilter).not.toHaveBeenCalled()
+      expect(list.render).not.toHaveBeenCalled()
       expect(list.rerender).toHaveBeenCalled()
    })
 
@@ -934,7 +1031,7 @@ describe("split view (body.srr-split)", () => {
       nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
       hashTo("#2")
       await flush()
-      nav.currentChron.mockReturnValue(2)
+      await setCursor(2)
       hashTo("#!news") // back to the list surface, article still in the pane
       await flush()
       list.moveSelection.mockClear()
@@ -959,7 +1056,7 @@ describe("split view (body.srr-split)", () => {
          nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
          hashTo("#20")
          await flush()
-         nav.currentChron.mockReturnValue(20)
+         await setCursor(20)
          // …then back to the LIST surface with the article still in the pane:
          // picker.onSelect routes a pick by `view`, and this describe drives the
          // LIST half. (The reader half does NOT bring the pane along on its own —
@@ -1025,7 +1122,7 @@ describe("split view (body.srr-split)", () => {
 
       it("leaves the pane alone in the narrow layout", async () => {
          await withArticleOpen()
-         document.body.classList.remove("srr-split")
+         await setSplit(false)
          nav.listAnchor.mockResolvedValue(40)
          nav.goTo.mockClear()
          nav.last.mockClear()
@@ -1049,7 +1146,7 @@ describe("split view (body.srr-split)", () => {
          nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
          hashTo("#20") // the READER surface keeps focus — no trip back to the list
          await flush()
-         nav.currentChron.mockReturnValue(20)
+         await setCursor(20)
          expect(document.body.classList.contains("srr-view-list")).toBe(false)
       }
 
@@ -1093,7 +1190,7 @@ describe("split view (body.srr-split)", () => {
 
       it("leaves the pane alone in the narrow layout", async () => {
          await readingWhenPicked()
-         document.body.classList.remove("srr-split")
+         await setSplit(false)
          nav.switchFilter.mockResolvedValue({ ...showFeed({ has_right: true }), placeholder: true, notStarted: true })
          nav.listAnchor.mockResolvedValue(9)
          nav.goTo.mockClear()
@@ -1146,7 +1243,7 @@ describe("split view (body.srr-split)", () => {
       nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
       hashTo("#2")
       await flush()
-      nav.currentChron.mockReturnValue(2)
+      await setCursor(2)
       let dimmedDuringListRender: boolean | null = null
       list.show.mockImplementationOnce(async () => {
          dimmedDuringListRender = document.body.classList.contains("srr-loading-reader")
@@ -1165,7 +1262,7 @@ describe("split view (body.srr-split)", () => {
       nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
       hashTo("#2")
       await flush()
-      nav.currentChron.mockReturnValue(2)
+      await setCursor(2)
       hashTo("#!news") // list surface, article still in the pane
       await flush()
       nav.probeCurrent.mockClear()
@@ -1180,13 +1277,112 @@ describe("split view (body.srr-split)", () => {
    // no article to step, and the resting panel is not a cursor.
    it("keeps the list's row stepping when the split pane is resting", async () => {
       await boot()
-      nav.currentChron.mockReturnValue(-1)
+      await setCursor(-1)
       list.moveSelection.mockClear()
       nav.right.mockClear()
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }))
       await flush()
       expect(list.moveSelection).toHaveBeenCalledWith("newer")
       expect(nav.right).not.toHaveBeenCalled()
+   })
+
+   // The scroller follows the BREAKPOINT and nothing else: keyed on model.split
+   // alone, so a focus change never swaps it (or resets the toolbar baseline).
+   it("swaps the list's scroller on a breakpoint crossing, never on a focus change", async () => {
+      await boot()
+      list.setScroller.mockClear()
+      nav.fromHash.mockResolvedValue(showFeed())
+      hashTo("#2") // focus → reader
+      await flush()
+      hashTo("#!news") // focus → list
+      await flush()
+      expect(list.setScroller).not.toHaveBeenCalled()
+      await setSplit(false)
+      expect(list.setScroller).toHaveBeenCalledTimes(1)
+   })
+
+   // A resting paint that lands during a guarded landing would paint over the
+   // article about to arrive. model.rendering holds it off (plan D4).
+   it("holds the resting paint off while a guarded landing is in flight", async () => {
+      await boot()
+      const model = await import("./model")
+      nav.restingState.mockClear()
+      let land!: (o: unknown) => void
+      nav.fromHash.mockImplementationOnce(() => new Promise((r) => (land = r)))
+      hashTo("#2")
+      await flush()
+      model.paneHidden.set(true) // a layout input moves mid-landing
+      await flush()
+      expect(nav.restingState).not.toHaveBeenCalled()
+      land(showFeed({ has_left: true }))
+      await flush()
+      expect(nav.restingState).not.toHaveBeenCalled() // the landing took focus
+      expect(reader().classList.contains("srr-reader-empty")).toBe(false)
+   })
+
+   it("repaints the resting pane when the lane changes beside it", async () => {
+      await boot()
+      const model = await import("./model")
+      nav.restingState.mockClear()
+      model.laneTokens.set(["news"])
+      await flush()
+      expect(nav.restingState).toHaveBeenCalledTimes(1)
+   })
+
+   // A reader-surface placeholder ("Not started", "All caught up") is not the
+   // resting panel's to replace, under split or not (plan D4).
+   it("never paints the resting panel over a reader-surface placeholder", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue({ ...showFeed({ has_right: true }), placeholder: true, notStarted: true })
+      hashTo("#0")
+      await flush()
+      nav.restingState.mockClear()
+      const model = await import("./model")
+      model.laneTokens.set(["news"])
+      await flush()
+      expect(nav.restingState).not.toHaveBeenCalled()
+   })
+
+   // Before the layout record, showList/showReader both closed the picker, so
+   // an open overlay closed on a breakpoint crossing along with everything
+   // else. onSplitChange's replacement body (cursor re-seat, chrome re-probe,
+   // relayoutPane) dropped that call — an open picker silently survived a
+   // crossing instead. A crossing is a surface-changing gesture like Escape or
+   // a filter pick, both of which close it too.
+   //
+   // setSplit() (used throughout this describe block) writes model.split
+   // directly and so never runs split.ts's onSplitChange listeners — those
+   // fire only from a REAL matchMedia "change" event (split.test.ts's own
+   // idiom). This case stubs matchMedia to capture that listener and fires it
+   // for real, the only way to exercise app.ts's onSplitChange callback body.
+   //
+   // The crossing must land with FOCUS ON THE READER: relayoutPane's list
+   // branch (focus === "list") runs showList(), which closes the picker on
+   // its own and would pass even with the fix reverted — a false negative.
+   // The reader branch never calls showList/showReader, so it is the one
+   // case that actually isolates onSplitChange's own picker.close() call.
+   it("closes an open picker on a breakpoint crossing", async () => {
+      let fire: ((e: { matches: boolean }) => void) | null = null
+      vi.stubGlobal("matchMedia", (query: string) => {
+         if (query === "print") return { matches: false, addEventListener: () => {} }
+         return {
+            matches: true,
+            addEventListener: (_: string, fn: (e: { matches: boolean }) => void) => {
+               fire = fn
+            },
+         }
+      })
+      try {
+         await boot()
+         nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
+         hashTo("#2") // focus → reader
+         await flush()
+         picker.close.mockClear()
+         fire!({ matches: false })
+         expect(picker.close).toHaveBeenCalled()
+      } finally {
+         vi.unstubAllGlobals()
+      }
    })
 })
 

@@ -18,9 +18,11 @@ import { HASH_KEY, UNREAD_ONLY_KEY } from "./keys"
 import * as lightbox from "./lightbox"
 import * as list from "./list"
 import * as menus from "./menus"
+import * as model from "./model"
 import { loadMounts } from "./mounts"
 import * as nav from "./nav"
 import * as pager from "./pager"
+import { initLayout, layout } from "./layout"
 import { initPane, togglePane } from "./pane"
 import * as picker from "./picker"
 import * as pinUI from "./pin-ui"
@@ -31,13 +33,15 @@ import { ensureSchema } from "./schema"
 import { elementScroller, windowScroller } from "./scroller"
 import * as searchUI from "./search-ui"
 import { initSplit, isSplit, onSplitChange } from "./split"
+import { effect, untracked } from "./signals"
 import { lsSet } from "./storage"
 import * as sync from "./sync"
 
-// Which surface is showing. The list is home; the reader is the drill-down.
-// (The filter picker is a fixed overlay over the list, not a view of its own —
-// while it's open, view stays "list" and picker.isOpen() gates input instead.)
-let view: "list" | "reader" = "list"
+// Which surface has the KEYBOARD is model.focus, written only by showList /
+// showReader below. Every visibility question reads layout.ts's record; the
+// record's focus field is read at exactly the sites docs/ARCHITECTURE.md lists
+// under "The layout record". (The filter picker is an overlay, not a surface:
+// picker.isOpen() gates input while it is up.)
 // Set once gestures are wired; the list calls it after a programmatic scroll so
 // the toolbar-hide baseline stays in sync (declared up here so list.setup, wired
 // before setupGestures runs, can close over it).
@@ -91,26 +95,8 @@ let retryFn: (() => void) | null = null
 let previousFocus: HTMLElement | null = null
 
 function showReader() {
-   view = "reader"
-   document.body.classList.remove("srr-view-list")
+   model.focus.set("reader")
    picker.close()
-   el.listView.hidden = !isSplit()
-   el.article.hidden = false
-}
-
-// Is the reader pane a LIVE article right now? Under split both surfaces are on
-// screen, so `view` names which one has focus, not which one exists — every
-// "can the reader be acted on" question (the keymap, the lane-change follow-up)
-// has to ask this instead. It asks the READER, not nav.pos: the list moves that
-// shared cursor too (its anchor seed at boot, its keyboard row stepping), so
-// pos >= 0 routinely names an article the pane has never rendered — inferring
-// from it left the resting panel unpainted at boot, because the list's own seed
-// had already made the pane look "live".
-// BOTH halves are required, and they fail in opposite directions: the reader may
-// hold an article nav has since left behind (a filter change that dropped the
-// position), and nav may name one the pane has never rendered.
-function readerLive(): boolean {
-   return isSplit() && reader.hasArticle() && nav.currentChron() >= 0
 }
 
 // Landing a pane on a lane it did not navigate to: don't consume unread, and
@@ -120,65 +106,41 @@ function readerLive(): boolean {
 // nav.goTo(anchor,false,true)) and read as two different intentions.
 const RESUME: nav.Landing = { record: false, replace: true }
 
-// The list pane's twin: is the LIST on screen right now? Under split the pane
-// is always on screen whatever `view` (the focus surface) says; off split the
-// two views alternate, so it is `view` itself. Every "should the list repaint"
-// question asks this layout question, never `view` — a repaint gated on focus
-// left the always-visible pane stale beside the reader (the split-view bug
-// class rounds 2-6 kept refinding, one `view ===` site at a time).
-function listVisible(): boolean {
-   return view === "list" || isSplit()
-}
-
-// The reader's twin of listVisible(): is the READER on screen to be acted on —
-// it holds focus (single-surface), or the split pane is live beside the list.
-// `view` alone answers only the first, which is the same half-answer
-// listVisible() exists to stop the list asking.
-function readerActive(): boolean {
-   return view === "reader" || readerLive()
-}
-
 function showList() {
-   view = "list"
-   document.body.classList.add("srr-view-list")
+   model.focus.set("list")
    picker.close()
-   el.listView.hidden = false
-   if (isSplit()) {
-      // Split view: both panes stay live — the reader keeps its article beside
-      // the list, and its toolbar prev/next stay usable. With nothing open the
-      // pane shows the reader's own resting panel rather than a blank third of
-      // the window (paintRestingPane).
-      //
-      // Unhide FIRST, then ask. readerLive() reads `el.article.hidden` (through
-      // reader.hasArticle), and the single-surface layout sets that flag on the
-      // list — so on a narrow → wide crossing the question was being asked of a
-      // pane still marked hidden by the layout we are leaving. It answered "no
-      // article here" for a reader holding a perfectly good one, and the resting
-      // paint below then destroyed it: read an article, go back to the list,
-      // drag the window under 1000px and back, and it was replaced by "Not
-      // started". The order is the whole fix.
-      el.article.hidden = false
-      if (!readerLive()) void paintRestingPane()
-      return
-   }
-   el.article.hidden = true
-   // Disable the reader-only nav so an arrow key is a no-op while the list
-   // scrolls natively (the buttons are also hidden via CSS). The touch path
-   // needs no disabling here: the pager only engages inside el.article, which
-   // is hidden on this view — and the disabled state is what its dead-edge
-   // resistance reads when the reader IS showing.
-   el.prev.disabled = true
-   el.next.disabled = true
 }
 
-// Paint the split view's resting pane — the reader's own empty panel where a
-// blank two thirds of the window used to be. Fire-and-forget: it is a resting
-// state, not a navigation, so no caller waits on it, and a probe that lands
-// after an article opened (or after the breakpoint dropped) simply drops.
-async function paintRestingPane(): Promise<void> {
-   const o = await nav.restingState().catch(() => null)
-   if (!o || !isSplit() || readerLive()) return
-   reader.renderResting(o)
+// D4 — the split view's RESTING pane, derived rather than remembered. It paints
+// where showList's split branch used to: the split layout, the LIST holding
+// focus, and no live article in the pane — never over a navigational
+// placeholder (single-surface, or reader-focused under split), and never while a
+// guarded landing is in flight (model.rendering), which would paint over the
+// article about to arrive. Its inputs are the lane's identity and the store, NOT
+// the cursor: the list moves that cursor on every row step, and the resting
+// panel does not follow the highlight. A probe that lands after the layout moved
+// on — an article opened, the breakpoint dropped, a newer run started — drops.
+let restingGen = 0
+function initRestingPane(): void {
+   effect(() => {
+      const l = layout()
+      model.laneTokens()
+      model.unreadOnly()
+      model.frontierEpoch()
+      model.activeMid()
+      model.snapshot()
+      const my = ++restingGen
+      if (model.rendering() || !l.split || l.focus !== "list" || l.readerLive) return
+      void nav
+         .restingState()
+         .catch(() => null)
+         .then((o) => {
+            if (!o || my !== restingGen) return
+            const now = untracked(layout)
+            if (untracked(model.rendering) || !now.split || now.focus !== "list" || now.readerLive) return
+            reader.renderResting(o)
+         })
+   })
 }
 
 // The ONE door to "put this article on the reader surface", shared by the row
@@ -265,9 +227,17 @@ function hideSnackbar() {
    snackbarAction = null
 }
 
+// A guarded landing in flight (model.rendering): the resting-pane effect holds
+// its paint off until it lands. Cleared by its OWN generation, not busyToken —
+// renderListSurface can reclaim a stale mutex without ever touching this flag,
+// which a busyToken check would then strand true (plan L20).
+let renderGen = 0
+
 async function guard(fn: () => Promise<IShowFeed>) {
    const token = acquire()
    if (token === null) return
+   const rendering = ++renderGen
+   model.rendering.set(true)
    // Two veil classes, one progress bar: `srr-loading` is the shared top-edge
    // bar, `srr-loading-reader` additionally dims the ARTICLE — which only this
    // path may do. renderListSurface takes the first alone, because under split
@@ -287,6 +257,7 @@ async function guard(fn: () => Promise<IShowFeed>) {
       if (token === busyToken) showError(e, () => guard(fn))
    } finally {
       if (token === busyToken) document.body.classList.remove("srr-loading", "srr-loading-reader")
+      if (rendering === renderGen) model.rendering.set(false)
       release(token)
    }
 }
@@ -319,7 +290,7 @@ async function guardBg(fn: () => Promise<void>): Promise<boolean> {
 // A no-op off split and whenever the pane holds no article, so callers need no
 // layout test of their own.
 function reprobePaneChrome() {
-   if (readerLive()) reader.reprobeReaderChrome()
+   if (layout().readerLive) reader.reprobeReaderChrome()
 }
 
 // The lane-change follow-up for the READER surface, the twin of selectTokens'.
@@ -371,7 +342,7 @@ function reReadReader() {
    // focus, so a frontier gesture or a Show-read flip made from there left both
    // stale — a next-count that no longer matched the lane, arrows armed against
    // bounds that had moved.
-   if (!readerActive()) return
+   if (!layout().readerSteppable) return
    if (nav.currentChron() >= 0) {
       reader.reprobeReaderChrome()
       return
@@ -522,9 +493,9 @@ async function renderListSurface() {
    // the lane's resume position) on every arrival. Returning FROM THE READER
    // (back button, browser-back) commits that scroll immediately — the seed's
    // pack is warm from the article on screen; a filter change / boot arrival
-   // (view was already "list") takes the settle-then-land-once path instead.
-   // Captured before showList() flips view to "list".
-   const anchorNow = view === "reader"
+   // (focus was already on the list) takes the settle-then-land-once path
+   // instead. Captured before showList() moves focus to the list.
+   const anchorNow = layout().focus === "reader"
    showList()
    reader.refreshFeedLabel()
    setTitle(listTitle())
@@ -567,7 +538,7 @@ async function renderListSurface() {
 // a hand-copied version quietly loses.
 function relayoutPane(): void {
    list.invalidate()
-   if (view === "reader") {
+   if (layout().focus === "reader") {
       // followCursor rebuilds the PANE beside the article; off split there is no
       // pane to rebuild and the reader owns the whole window.
       if (isSplit()) list.followCursor()
@@ -676,7 +647,7 @@ async function selectTokens(tokens: string[]) {
    // no-match placeholder the moment the bar opens empty.
    // …but exempt from the LANDING is not exempt from the CHROME (reprobePaneChrome).
    if (nav.isSearchFilter()) reprobePaneChrome()
-   if (readerLive() && !nav.isSearchFilter()) {
+   if (layout().readerLive && !nav.isSearchFilter()) {
       const anchor = await nav.listAnchor()
       // replace, not push: goToList already pushed this filter change, and a
       // second entry would make the first browser-back a visual no-op.
@@ -736,7 +707,7 @@ function toggleUnseenOnly() {
    // invalidate() would leave a stale row set — read rows that should now show,
    // or vice versa — beside the reader, with the observer torn down and no
    // rebuild coming; deferring is only for a display:none list (zero row heights).
-   if (listVisible()) void list.rerender()
+   if (layout().listMounted) void list.rerender()
    else list.invalidate()
    // The reader re-derives for the new mode: a real article re-probes its
    // chrome; a placeholder (pos < 0) re-runs the switch (reprobeReaderChrome
@@ -759,7 +730,7 @@ function onCycle(dir: number) {
    // cycles by its tag) and skips ★ Saved / empty-of-unread lanes, so the list and
    // the reader share one rotation. Async (unread is idx-derived): the list resolves
    // the token then re-filters in place; the reader's cycleFilter awaits it inside.
-   if (view === "list") {
+   if (layout().focus === "list") {
       // Only the latest press applies its resolved token (a stale one — from a
       // press superseded before its cycleToken resolved — is discarded), so
       // rapid presses can't land out of order; selectFilter's own busy guard
@@ -782,7 +753,8 @@ function onCycle(dir: number) {
 // The picker overlay can be open OVER the reader (via the reader's filter
 // button, view stays "reader"), so a key pressed under it must be inert too —
 // a bare view check no longer covers it now that the picker isn't list-only.
-// Gating on view !== "reader" additionally makes them a clean no-op on the LIST.
+// Gating on the record's readerSteppable additionally makes them a clean no-op on
+// a list with no live pane beside it.
 // The image lightbox is the same class of overlay: it covers the reader while a
 // content image is enlarged, so it must not step the article behind. (Its key
 // input is already swallowed at the capture phase — lightbox.ts onKey — so that
@@ -791,13 +763,14 @@ function onCycle(dir: number) {
 // live beside the list and its prev/next buttons stay enabled on both surfaces:
 // a key must reach the same article the button beside it does, or ← / → go dead
 // on the list surface while the arrows a centimetre away still work.
-const readerSteppable = () => readerActive() && !picker.isOpen() && !lightbox.isOpen()
+// A modal over the reader (the picker, the image lightbox) owns input while up.
+const overlayUp = () => picker.isOpen() || lightbox.isOpen()
 const stepLeft = () => {
-   if (!readerSteppable()) return
+   if (!layout().readerSteppable || overlayUp()) return
    return el.prev.disabled ? reader.bumpReaderEdge("prev") : guard(() => nav.left())
 }
 const stepRight = () => {
-   if (!readerSteppable()) return
+   if (!layout().readerSteppable || overlayUp()) return
    return el.next.disabled ? reader.bumpReaderEdge("next") : guard(() => nav.right())
 }
 // The reader keymap's W/S — the same lane change onCycle's reader branch makes,
@@ -823,7 +796,7 @@ const cycleNext = cycle(1)
 // this is only ever reached from the single-surface layout, where "reader" is
 // the only view a drag can start in.
 async function pagerCommit(side: "prev" | "next"): Promise<boolean> {
-   if (view !== "reader" || picker.isOpen() || lightbox.isOpen()) return false
+   if (layout().focus !== "reader" || overlayUp()) return false
    const before = nav.currentChron()
    reader.setEntryTransition("slide")
    try {
@@ -870,14 +843,21 @@ async function init() {
    // throws, and outside the try below on purpose: a migration failure is warned
    // internally, not a boot error the popup should offer to reload past.
    ensureSchema()
-   // Split view (two-pane desktop): stamp body.srr-split before anything
-   // renders, hand the list its scroller for the mode, and rebuild both
-   // surfaces on a breakpoint crossing (rare — a window drag across 1000px).
+   // Split view (two-pane desktop): learn the breakpoint, then register the
+   // layout record's DOM writer at once — before data.init() — so the first
+   // paint already carries body.srr-split. layout.ts is the only writer of the
+   // layout's body classes and of both hosts' `hidden` from here on.
    initSplit()
-   const applyScroller = () => list.setScroller(isSplit() ? elementScroller(el.listView) : windowScroller())
-   applyScroller()
+   initLayout({ listView: el.listView, article: el.article })
+   // The list's scroller follows the BREAKPOINT and nothing else — keyed on
+   // model.split alone, never on the whole layout record, or every focus change
+   // would swap the scroller and reset the toolbar's scroll baseline.
+   effect(() => {
+      list.setScroller(model.split() ? elementScroller(el.listView) : windowScroller())
+      gestures?.resetScroll()
+   })
    // Who owns the shared cursor when the list rebuilds (list.mayClaimCursor).
-   list.setCursorOwner(readerLive)
+   list.setCursorOwner(() => layout().readerLive)
    // A row's ★ writes the set the reader's save button paints from. Only the
    // article that button describes can be affected — a star on any OTHER row
    // must leave it alone.
@@ -898,53 +878,28 @@ async function init() {
    // button, which pane.ts wires and keeps labelled. Every committed change ends
    // in the shared re-layout tail above.
    initPane({ onSettle: relayoutPane })
+   // A breakpoint crossing. The classes, both hosts' visibility, the scroller and
+   // the resting pane are effects over model.split and have already re-derived by
+   // the time this runs (split.ts writes the model before notifying). What is
+   // left is command work:
+   //  - Crossing INTO split the PANE owns the cursor, because it keeps its
+   //    article across the crossing; below the breakpoint the list legitimately
+   //    claimed it (a search rebuild seats it on the newest hit). Re-seat it on
+   //    the mounted article first, so everything below reads one cursor.
+   //  - A live pane re-derives its chrome: a pill that went stale while the
+   //    narrow list held focus is otherwise carried across (plan L16).
+   //  - The shared re-layout tail (relayoutPane) rebuilds what the new layout
+   //    needs without re-routing — a re-route would re-render the article.
    onSplitChange(() => {
-      applyScroller()
-      gestures?.resetScroll()
-      // Crossing INTO split: the PANE owns the cursor, because the pane is what
-      // you have been looking at and it keeps its article across the crossing
-      // (showList's split branch). Below the breakpoint the list is the only
-      // surface, so its rebuild legitimately claims the shared cursor — a search
-      // rebuild seats it on the newest hit — and that claim then arrived here
-      // naming an article the pane has never shown: read something at 800px with
-      // a query up, widen the window, and the arrows stepped from an invisible
-      // row while the reader showed something else entirely. Re-seat it on the
-      // mounted article FIRST, so everything below — both surface switchers, the
-      // chrome re-derive, followCursor, the list rebuild — reads one cursor.
-      // A no-op when they already agree, and when the pane holds no article.
-      if (isSplit()) {
+      // A breakpoint crossing is a surface-changing gesture like Escape or a
+      // filter pick, both of which close the picker too — an open overlay
+      // should not silently survive the crossing.
+      picker.close()
+      if (layout().split) {
          const mounted = reader.mountedArticle()
          if (mounted && nav.currentChron() !== mounted.chron) nav.select(mounted.chron, mounted.feedId)
       }
-      // Re-assert the LAYOUT for the new breakpoint — not a re-route. route()
-      // would re-resolve the hash, and on a `#pos` that means guard() → a full
-      // reader re-render: the article's DOM destroyed and its scroll thrown back
-      // to the top just because the window crossed 1000px (and, if the mutex
-      // happened to be held, the whole crossing dropped instead, leaving the
-      // pane's visibility and the swapped scroller disagreeing). Both surface
-      // switchers are idempotent and already know both layouts, so calling the
-      // one for the CURRENT surface reconciles visibility, the toolbar's
-      // reader-only state and the resting pane without touching what is loaded.
-      // Chrome re-evaluates width queries against the PAGE BOX while printing,
-      // so Ctrl-P fires a crossing and its undo — which is exactly why this has
-      // to stay cheap and non-destructive rather than re-routing twice.
-      // Visibility FIRST and unconditionally — both switchers are idempotent and
-      // take no mutex, so a crossing can no longer be dropped wholesale (the
-      // pane hidden while the scroller had already been swapped to it).
-      if (view === "reader") showReader()
-      else showList()
-      // A crossing INTO split on the list surface arrives from a layout that
-      // DISABLED the reader-only prev/next (showList's single-surface branch).
-      // Its split branch re-asserts visibility but deliberately not that chrome,
-      // so an article that survived the crossing would sit under two dead
-      // arrows. Re-derive it for whatever the pane is actually holding — a
-      // resting panel owns its own chrome and reprobeReaderChrome's hasArticle()
-      // test leaves it alone.
-      if (isSplit() && view === "list") reader.reprobeReaderChrome()
-      // Then rebuild only what the new layout actually needs — the shared
-      // re-layout tail (relayoutPane: invalidate the measured row heights, then
-      // followCursor beside a kept article / re-render the list surface). One
-      // body, so this crossing and the pane-geometry settles cannot drift.
+      if (layout().readerLive) reader.reprobeReaderChrome()
       relayoutPane()
    })
    // Tell the SW its mounted roots BEFORE data.init() (the PWA0 fix, §5.1): the
@@ -997,7 +952,9 @@ async function init() {
       if (mountsChanged) menus.afterMountChange(loadMounts())
       nav.pruneSeen()
       repaintSaveButton()
-      if (view === "list" && !hasInteracted && !nav.lanePeek()) {
+      // "The list is on screen with no live reader beside it" (plan L14): a split
+      // boot into a deep link shows the list too, and stays gentle.
+      if (layout().listShown && !layout().readerLive && !hasInteracted && !nav.lanePeek()) {
          // The BOOT pull changed the profile before anything was touched — the
          // device-switch moment, and the navigator half of the sync feature
          // (the profile syncs on page load; there is deliberately no button):
@@ -1010,7 +967,7 @@ async function init() {
          // would be wrong in both cases.
          nav.applyFilter([...nav.filterTokens()])
          void list.render()
-      } else if (listVisible()) {
+      } else if (layout().listMounted) {
          // On an on-screen pane the gentle rebuild is not optional: the
          // display:none reasoning above (zero row heights, the return path
          // re-derives anyway) does not hold — there is no return path, and
@@ -1041,8 +998,8 @@ async function init() {
    // or the pill, until some unrelated rebuild happened by.
    const refreshAfterStore = () => {
       reader.refreshFeedLabel()
-      if (view === "reader" || isSplit()) reader.reprobeReaderChrome(true)
-      if (listVisible()) void list.onStoreGrown()
+      if (layout().readerMounted) reader.reprobeReaderChrome(true)
+      if (layout().listMounted) void list.onStoreGrown()
       if (picker.isOpen()) picker.render()
       // New articles landed: the launcher badge is the one readout that is
       // supposed to notice without anyone opening the app (RDR12).
@@ -1071,7 +1028,6 @@ async function init() {
    // runs. reader + menus here, search-ui down with the search bar it wires —
    // every one of them before route() paints the first surface.
    reader.setup({
-      view: () => view,
       showReader,
       persistHash,
       setTitle,
@@ -1113,7 +1069,7 @@ async function init() {
       readPosition: reader.readPosition,
    })
    menus.setup({
-      listVisible,
+      listVisible: () => layout().listMounted,
       showError,
       showSnackbar,
       hideSnackbar,
@@ -1133,7 +1089,7 @@ async function init() {
    picker.setup(el.picker, {
       onSelect: (token) => {
          picker.close()
-         if (view === "reader") void laneChange(() => nav.switchFilter(token))
+         if (layout().focus === "reader") void laneChange(() => nav.switchFilter(token))
          else void selectFilter(token)
       },
       onClose: () => picker.close(),
@@ -1222,7 +1178,7 @@ async function init() {
    // search bar's own input (debounced live query, Enter applies immediately,
    // Escape / ✕ leave search) and owns the debounce timer.
    searchUI.setup({
-      listVisible,
+      listVisible: () => layout().listMounted,
       selectTokens,
       commitListHash,
       setTitle,
@@ -1264,7 +1220,7 @@ async function init() {
          }
          e.preventDefault()
          if (picker.isOpen()) picker.close()
-         else if (view === "reader") void goToList(true)
+         else if (layout().focus === "reader") void goToList(true)
          else void enterReader()
          return
       }
@@ -1331,7 +1287,7 @@ async function init() {
       // horizontal keys (and the rest of the reader keymap, whose actions all
       // target the same visible article) fall through; only the cycle keys stay
       // here, because onCycle's list path re-filters the LIST in place.
-      if (view === "list") {
+      if (layout().focus === "list") {
          const cycleKey = e.key === "w" || e.key === "ArrowUp" || e.key === "s" || e.key === "ArrowDown"
          if (cycleKey) {
             if (nav.getFilterEntries().length > 1) {
@@ -1340,7 +1296,7 @@ async function init() {
             }
             return
          }
-         if (!readerLive()) {
+         if (layout().listKeys) {
             if (e.key === "a" || e.key === "ArrowLeft") {
                e.preventDefault()
                void list.moveSelection("older")
@@ -1384,6 +1340,11 @@ async function init() {
          hash = localStorage.getItem(HASH_KEY)?.substring(1) || ""
       } catch {}
    await route(hash)
+   // After the first route, not before: route() is what applies the boot lane,
+   // and an [ALL] boot writes laneTokens [] over [] — no change, so a resting
+   // effect registered earlier would keep a probe answered against nav's
+   // pre-route filter (plan L15).
+   initRestingPane()
    // RDR16 — offer back an episode a reload interrupted. After route() so the
    // active store is settled and the first surface has painted; PAUSED, never
    // auto-resumed (browsers block it, and audio starting by itself on a cold

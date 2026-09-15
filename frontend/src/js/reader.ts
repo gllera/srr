@@ -18,11 +18,12 @@ import * as data from "./data"
 import { el } from "./els"
 import { countBadge, stampSrc } from "./fmt"
 import { emptyStateEl } from "./empty-state"
+import { layout } from "./layout"
+import * as model from "./model"
 import { restartAnimation } from "./motion"
 import { mountLabel } from "./mounts"
 import * as nav from "./nav"
 import * as player from "./player"
-import { isSplit } from "./split"
 import { wireTTS } from "./tts"
 
 // The real reader's nodes in article-view's shape. index.html declares these; the
@@ -38,10 +39,7 @@ const readerRefs: ArticleRefs = {
 }
 
 export interface ReaderDeps {
-   // Which surface is showing. A silent chrome re-probe must not paint over a
-   // list that took over while its probe was in flight.
-   view: () => "list" | "reader"
-   // Flip the app to the reader surface (body class, list/article visibility).
+   // Give the reader surface the keyboard; layout.ts derives what that shows.
    showReader: () => void
    // Remember the hash so a reload resumes where you were.
    persistHash: (hash: string) => void
@@ -278,7 +276,7 @@ export function render(o: IShowFeed) {
    const slide = entryTransition === "slide"
    entryTransition = null
    if (o.placeholder) return renderEmptyReader(o)
-   painted = true
+   model.readerPainted.set(true)
    el.article.classList.remove("srr-reader-empty")
    const feed = data.db.feeds[o.article.f]
    // Source tint, source name, desk, title, permalink and dateline in one call —
@@ -387,7 +385,7 @@ export function render(o: IShowFeed) {
 // belong to an arrival — the document title, the reader's scroll, and the focus
 // grab — are skipped. Everything above them is the same panel either way.
 function renderEmptyReader(o: IShowFeed, resting = false) {
-   painted = false
+   model.readerPainted.set(false)
    el.article.classList.add("srr-reader-empty")
    el.article.classList.remove("srr-reader-titleless")
    delete el.article.dataset.src
@@ -435,22 +433,17 @@ function renderEmptyReader(o: IShowFeed, resting = false) {
    d.persistHash(location.hash)
 }
 
-// Has an article been PAINTED into this surface and not replaced since? Set by
-// render()'s article branch, cleared by every placeholder path — rather than
-// inferred from nav.pos, which is the shared cursor the LIST also moves (its
-// anchor seed, its keyboard row selection). Under split those two questions come
-// apart constantly: pos can name an article the pane has never rendered.
-//
-// The flag is what makes the answer true only where a render actually happened.
-// The DOM alone cannot say so at BOOT: index.html ships `.srr-reader` empty, with
-// neither an article in it nor `.srr-reader-empty` on it, so a pure class test
-// reads a never-painted surface as holding an article — and split's showList,
-// which unhides the host before asking, would then skip the resting paint and
-// leave the pane blank. The class test stays beside it: it is the invariant a
-// stray class toggle would otherwise break silently.
-let painted = false
+// Has an article been PAINTED into this surface and not replaced since?
+// model.readerPainted — set by render()'s article branch, cleared by every
+// placeholder path — not nav.pos, which is the shared cursor the LIST also moves.
+// The flag makes the answer true only where a render actually happened:
+// index.html ships `.srr-reader` empty, with neither an article in it nor
+// `.srr-reader-empty` on it. Whether the host is MOUNTED is not this function's
+// question any more: that is layout.ts's readerMounted, and every caller asking
+// this is split-gated already. The class test stays beside the flag as the
+// invariant a stray class toggle would otherwise break silently.
 export function hasArticle(): boolean {
-   return painted && !el.article.hidden && !el.article.classList.contains("srr-reader-empty")
+   return model.readerPainted() && !el.article.classList.contains("srr-reader-empty")
 }
 
 // What this surface has MOUNTED, or null when it holds no article. Not nav.pos:
@@ -463,7 +456,7 @@ export function hasArticle(): boolean {
 // feed id would leave the toolbar's readout and the save button describing an
 // article nothing is showing.
 export function mountedArticle(): { chron: number; feedId: number } | null {
-   return painted && mountedChron >= 0 ? { chron: mountedChron, feedId: mountedFeed } : null
+   return model.readerPainted() && mountedChron >= 0 ? { chron: mountedChron, feedId: mountedFeed } : null
 }
 
 // There USED to be a `restingPane` flag here, telling the split view's resting
@@ -484,7 +477,8 @@ export function mountedArticle(): { chron: number; feedId: number } | null {
 // Not a navigation — no surface flip, no title change, no focus grab (the list
 // keeps the keyboard), no hash write.
 export function renderResting(o: IShowFeed): void {
-   el.article.hidden = false
+   // No unhide: this is only ever painted under split, where the layout record
+   // mounts the reader host (layout.ts readerMounted).
    renderEmptyReader(o, true)
 }
 
@@ -562,21 +556,17 @@ export function refreshFeedLabel() {
 // (-1), or moved because the user just flipped Show-read / rewound a frontier
 // is not an arrival and stays silent.
 //
-// "Is there a reader to re-derive?" is a LAYOUT question under split, and this
-// is the site that WRITES the answer: every caller asks it because the pane's
-// arrows and pill went stale, and gating the write on `view` discarded the probe
-// whenever the LIST held focus — which is most of the time, since the pane is
-// always on screen. That silently defeated all four callers at once (a
-// mark-all-read made from the list left "13 ›" armed beside an All-caught-up
-// list; a Show-read flip left ‹ dead). hasArticle() is the same reader-owned
-// test readerLive() uses, and it excludes the resting panel, which owns its own
-// chrome via renderResting.
+// "Is there a reader to re-derive?" is a LAYOUT question, answered by the
+// record's readerSteppable: the reader holds focus, or a live article sits in
+// the split pane. Not readerMounted — under split that is true beside a RESTING
+// panel too, and the list's seeded cursor would then probe an article the pane
+// is not showing and write its arrows and pill over the resting panel's own.
 export function reprobeReaderChrome(pulseOnGrowth = false) {
    const probed = nav.currentChron()
    void nav
       .probeCurrent()
       .then((o) => {
-         if (o && (d.view() === "reader" || (isSplit() && hasArticle())) && nav.currentChron() === probed) {
+         if (o && layout().readerSteppable && nav.currentChron() === probed) {
             el.prev.disabled = !o.has_left
             el.next.disabled = !o.has_right
             const before = lastNextCount

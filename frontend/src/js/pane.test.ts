@@ -101,14 +101,18 @@ describe("pane", () => {
       expect(localStorage.getItem(PANE_WIDTH_KEY)).toBe("430")
    })
 
-   it("toggles hidden as a body class plus a stored flag", async () => {
+   it("toggles hidden as model state plus a stored flag (layout.ts stamps the class)", async () => {
       const pane = await import("./pane")
+      const model = await import("./model")
       expect(pane.isPaneHidden()).toBe(false)
       pane.setPaneHidden(true)
-      expect(document.body.classList.contains("srr-pane-hidden")).toBe(true)
+      expect(model.paneHidden()).toBe(true)
+      expect(pane.isPaneHidden()).toBe(true)
       expect(localStorage.getItem(PANE_HIDDEN_KEY)).toBe("1")
-      pane.setPaneHidden(false)
+      // The class is layout.ts's to write: pane.ts must not touch it.
       expect(document.body.classList.contains("srr-pane-hidden")).toBe(false)
+      pane.setPaneHidden(false)
+      expect(model.paneHidden()).toBe(false)
       expect(localStorage.getItem(PANE_HIDDEN_KEY)).toBe(null)
    })
 
@@ -120,6 +124,20 @@ describe("pane", () => {
       expect(pane.isPaneHidden()).toBe(true)
       pane.togglePane(false)
       expect(pane.isPaneHidden()).toBe(false)
+   })
+
+   it("mirrors hidden into model.paneHidden through every door", async () => {
+      const pane = await import("./pane")
+      const model = await import("./model") // the post-reset registry pane.ts writes into
+      pane.setPaneHidden(true)
+      expect(model.paneHidden()).toBe(true)
+      pane.applyDragWidth(400, 1600)
+      expect(model.paneHidden()).toBe(false)
+      pane.applyDragWidth(pane.PANE_COLLAPSE_W - 1, 1600)
+      expect(model.paneHidden()).toBe(true)
+      localStorage.clear()
+      pane.restorePane()
+      expect(model.paneHidden()).toBe(false)
    })
 
    it("restores the stored width AND the stored hidden flag", async () => {
