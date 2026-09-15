@@ -50,6 +50,8 @@
 // fmt.ts) so it unit-tests without a pack server or the base.ts URL side effect.
 
 import { SYNC_URL_KEY } from "./keys"
+import * as model from "./model"
+import type { SyncStatus } from "./model"
 import {
    cleanTsMap,
    coerceNumMap,
@@ -122,6 +124,7 @@ export function setSyncUrl(value: string): void {
    lastError = ""
    lastPullAt = 0
    lastRemote = null
+   publishStatus()
 }
 
 export function enabled(): boolean {
@@ -141,15 +144,17 @@ export function normalizeSyncUrl(v: string): string {
    return normalizeHttpish(v, false)
 }
 
-// The status readout consumed by the settings menu's status footer.
-export interface SyncState {
-   on: boolean
-   okAt: number // unix seconds of the last completed cycle; 0 = never
-   error: string // last cycle's failure ("" = healthy)
-}
+// { on, okAt: unix seconds of the last completed cycle (0 = never), error: the
+// last cycle's failure ("" = healthy) } — declared in model.ts, which this
+// module publishes it to after every change.
+export type SyncState = SyncStatus
 
 export function state(): SyncState {
    return { on: enabled(), okAt: lastOkAt, error: lastError }
+}
+
+function publishStatus(): void {
+   model.syncStatus.set(state())
 }
 
 // True when `b` is MISSING seen state that `a` holds: some feed key of `a` is
@@ -322,6 +327,7 @@ export async function syncNow(opts: { manual?: boolean } = {}): Promise<boolean>
       if (navigator.onLine !== false) lastError = e instanceof Error ? e.message : String(e)
    } finally {
       inflight = false
+      publishStatus()
       onStatus?.() // okAt/error moved — let an open settings-menu footer refill
    }
    return changed

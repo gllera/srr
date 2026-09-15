@@ -1,5 +1,6 @@
 import * as data from "./data"
 import { UNREAD_ONLY_KEY } from "./keys"
+import * as model from "./model"
 import { firstUnreadProbe, labelFor, validResume, type Lane, type LaneEntry, type LaneEnv } from "./nav/lane"
 import { MembersLane } from "./nav/lane-members"
 import type { SearchLane } from "./nav/lane-search"
@@ -24,6 +25,7 @@ import {
    unreadCounts,
    type FrontierScope,
 } from "./seen"
+import { batch } from "./signals"
 
 // nav is the FACADE over the four modules split out of it (finding ENG3):
 // ./seen (frontier persistence, the explicit gestures, the unread tallies),
@@ -34,7 +36,7 @@ import {
 // imports nav back, so the module graph stays acyclic. The shared mutable state
 // that stays here — pos, filter, unreadOnly — reaches them as explicit
 // arguments (a FrontierScope, a toggle context, a token list), never by import.
-export { getSavedSet, setSavedHook } from "./saved"
+export { getSavedSet, publishSaved, setSavedHook } from "./saved"
 export {
    clearFrontierUndo,
    frontierUndoSize,
@@ -43,6 +45,7 @@ export {
    markFrontierUndoOffered,
    pendingFrontierUndo,
    pruneSeen,
+   publishSeen,
    undoFrontierMove,
 } from "./seen"
 import { lsGet, lsSet } from "./storage"
@@ -75,6 +78,7 @@ const next: { left?: Promise<number>; right?: Promise<number> } = {}
 // shareable #pos!tokens hash. See setLane / a lane's applyUnseen and
 // dropdown.ts's chip.
 let unreadOnly = lsGet(UNREAD_ONLY_KEY) === "1"
+model.unreadOnly.set(unreadOnly)
 
 // The active filter MODE. Every mode-dependent question is a method on it
 // (nav/lane.ts); nav owns only WHICH lane is active and the cursor over it.
@@ -85,10 +89,18 @@ const env: LaneEnv = {
 // Not makeLane([]): the store is not loaded when this module evaluates, so the boot
 // lane is an EMPTY [ALL] until fromHash/applyFilter resolves the real one — exactly
 // the empty `filter` object it replaces.
+// The lane's identity as the model sees it. Called at the END of every function
+// that changes which lane is active, after its membership resolved, so no
+// effect observes a lane whose bounds are not in place yet.
+function publishLane(): void {
+   model.laneTokens.set([...filter.tokens])
+}
+
 let lane: Lane = new MembersLane([], new Map(), env)
 
 function setLane(tokens: readonly string[], opts: { keepKnownEmpty?: boolean } = {}): void {
    lane = makeLane(tokens, env, opts)
+   publishLane()
 }
 
 export function isUnreadOnly(): boolean {
@@ -103,6 +115,7 @@ export function setUnreadOnly(on: boolean) {
    // Re-apply the current filter so its members immediately pick up (or shed) the
    // raised unseen-only bounds — the caller just flips the mode and rebuilds.
    applyFilter([...lane.tokens])
+   model.unreadOnly.set(on)
 }
 
 // Toggle one article's saved state; returns the new state (./saved owns the set
@@ -422,31 +435,38 @@ async function resolve(target: number, o: Landing = {}): Promise<IShowFeed> {
    const { replace = false, record = true } = o
    // Load first; commit pos only on success so a Retry replays the same chron.
    const article = await data.loadArticle(target)
-   pos = target
-   currentFeed = article.f
-   // A landing the raised unseen-only bounds do NOT cover is an entry anchor
-   // (isValidSeen accepted it by true add_idx: switchFilter's resume position,
-   // a restored/shared #pos). Remember it so feedLeft/feedRight keep it in the
-   // navigable sequence — ← must be able to return to the first article shown
-   // after → steps into the unseen. A matching landing leaves the anchor alone:
-   // stepping forward must not orphan the entry it came from.
-   lane.landed(target, article.f)
-   // Any real landing moves off the just-unsaved ghost article onto a genuine
-   // member (or another article entirely), so the saved ghost is spent. Not a
-   // lane hook: the ghost is saved.ts state that outlives a lane switch, so every
-   // landing clears it, whatever lane it lands in.
-   clearSavedGhost()
-   next.left = next.right = undefined
-   // Arriving at the article being prefetched must NOT abort it: its in-flight
-   // loads are exactly what the rendered content is about to attach to (same-URL
-   // image loads coalesce within a document — aborting here restarted every
-   // image from scratch, which made the prefetch useless for any neighbor whose
-   // images hadn't all finished). Drop the refs instead; the rendered elements
-   // own the loads from here. Any other navigation aborts as before.
-   if (prefetchTarget() === target) releasePrefetch()
-   else abortPrefetch()
-   updateHash(replace)
-   const seen = record ? recordSeen(article.f, pos, frontierScope()) : undefined
+   let seen: Record<string, number> | undefined = undefined
+   // One landing is ONE flush: the cursor and the seen write recordSeen makes
+   // reach the model together, so no effect sees the new article with the old
+   // frontier (state-store spec, "What the commands become").
+   batch(() => {
+      pos = target
+      currentFeed = article.f
+      model.cursor.set({ chron: target, feedId: article.f })
+      // A landing the raised unseen-only bounds do NOT cover is an entry anchor
+      // (isValidSeen accepted it by true add_idx: switchFilter's resume position,
+      // a restored/shared #pos). Remember it so feedLeft/feedRight keep it in the
+      // navigable sequence — ← must be able to return to the first article shown
+      // after → steps into the unseen. A matching landing leaves the anchor alone:
+      // stepping forward must not orphan the entry it came from.
+      lane.landed(target, article.f)
+      // Any real landing moves off the just-unsaved ghost article onto a genuine
+      // member (or another article entirely), so the saved ghost is spent. Not a
+      // lane hook: the ghost is saved.ts state that outlives a lane switch, so every
+      // landing clears it, whatever lane it lands in.
+      clearSavedGhost()
+      next.left = next.right = undefined
+      // Arriving at the article being prefetched must NOT abort it: its in-flight
+      // loads are exactly what the rendered content is about to attach to (same-URL
+      // image loads coalesce within a document — aborting here restarted every
+      // image from scratch, which made the prefetch useless for any neighbor whose
+      // images hadn't all finished). Drop the refs instead; the rendered elements
+      // own the loads from here. Any other navigation aborts as before.
+      if (prefetchTarget() === target) releasePrefetch()
+      else abortPrefetch()
+      updateHash(replace)
+      seen = record ? recordSeen(article.f, pos, frontierScope()) : undefined
+   })
    return showFeed(article, seen)
 }
 
@@ -461,13 +481,25 @@ function frontierScope(): FrontierScope {
 
 // Mark the whole current feed/tag/[ALL] selection read (./seen owns the write).
 export function markAllRead(): boolean {
-   return raiseFilterRead(frontierScope())
+   const moved = raiseFilterRead(frontierScope())
+   if (moved) bumpFrontierEpoch()
+   return moved
 }
 
 // The explicit unread rewind — the ONLY path that lowers a seen frontier
 // (./seen owns the write).
 export function markUnreadFrom(chron: number): boolean {
-   return lowerFilterFrom(chron, frontierScope())
+   const moved = lowerFilterFrom(chron, frontierScope())
+   if (moved) bumpFrontierEpoch()
+   return moved
+}
+
+// A filter-scoped bulk frontier move happened (D1) — the one signal that the
+// unread-only bounds must be re-derived. Deliberately NOT bumped by recordSeen
+// or by a row swipe: ordinary reading never re-derives bounds (onStoreRefreshed
+// documents why). Exported for the frontier-undo button and the boot re-anchor.
+export function bumpFrontierEpoch(): void {
+   model.frontierEpoch.update((n) => n + 1)
 }
 
 // The reader's no-article state. `notStarted` picks which unread-only message the
@@ -477,6 +509,7 @@ function resolveNoMatch(o: Landing & { notStarted?: boolean } = {}): IShowFeed {
    const { replace = false, notStarted = false } = o
    pos = -1
    currentFeed = -1
+   model.cursor.set({ chron: -1, feedId: -1 })
    // Same cleanup as resolve(): the cached neighbor probes, the saved ghost, and
    // any in-flight media prefetch belong to the PREVIOUS filter's article and are
    // now stale.
@@ -728,6 +761,7 @@ export async function goToArticle(chron: number): Promise<IShowFeed> {
 export function select(chron: number, feedId: number): void {
    pos = chron
    currentFeed = feedId
+   model.cursor.set({ chron, feedId })
    next.left = next.right = undefined
    abortPrefetch()
 }

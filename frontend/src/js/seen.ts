@@ -10,7 +10,9 @@
 // writeSeen so no mutation ships without its per-key ordering stamp.
 import * as data from "./data"
 import { seenKey, seenTsKey } from "./keys"
+import * as model from "./model"
 import { feedIdOf } from "./route"
+import { effect, untracked } from "./signals"
 import { stampTsMap } from "./storage"
 import * as sync from "./sync"
 
@@ -64,7 +66,30 @@ export function readSeenFor(mid: string): Record<string, number> {
 function writeSeen(seen: Record<string, number>, touched: string[]): void {
    localStorage.setItem(seenK(), JSON.stringify(seen))
    stampTsMap(seenTsK(), touched)
+   // A copy: callers keep the map they wrote (recordSeen hands it to
+   // pendingRight), and the atom's value must never change under its readers.
+   model.seen.set({ ...seen })
 }
+
+// Publish the ACTIVE store's seen map as stored — for a write that bypassed
+// writeSeen (a profile merge wrote localStorage itself) and for the first
+// publish after boot. The only other writer of model.seen is this module.
+export function publishSeen(): void {
+   model.seen.set(readSeen())
+}
+
+// model.seen names the ACTIVE store's map, so a store switch republishes it.
+// The first run only subscribes: at import time the data layer may not have
+// booted, and app.ts publishes once after data.init().
+let seenPrimed = false
+effect(() => {
+   model.activeMid()
+   if (!seenPrimed) {
+      seenPrimed = true
+      return
+   }
+   untracked(publishSeen)
+})
 
 // The parsed seen map (feed key → last-viewed chronIdx) under its list-surface
 // name — one function, two exports, so the list's per-row read/unread dot and
@@ -477,7 +502,10 @@ export function pruneSeen() {
             changed = true
          }
       }
-      if (changed) localStorage.setItem(seenK(), JSON.stringify(seen))
+      if (changed) {
+         localStorage.setItem(seenK(), JSON.stringify(seen))
+         model.seen.set({ ...seen })
+      }
       // The per-key ordering timestamps shadow the seen map — any st key whose
       // seen entry is gone (pruned above, or never existed) is dead weight too.
       const rawSt = localStorage.getItem(seenTsK())

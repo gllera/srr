@@ -4,6 +4,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 // init(), so each test gets a fresh instance via vi.resetModules() + dynamic
 // import (the sync.test.ts pattern). data/nav/search are mocked.
 const data = vi.hoisted(() => ({
+   db: { total_art: 0 },
    refresh: vi.fn(async () => "updated" as const),
    refreshPeers: vi.fn(async () => false),
    resetMountBackoff: vi.fn(),
@@ -16,6 +17,7 @@ vi.mock("./search", () => search)
 
 type Refresh = typeof import("./refresh")
 let refresh: Refresh
+let model: typeof import("./model")
 let updated: ReturnType<typeof vi.fn>
 
 const exclusive = async (fn: () => Promise<void>) => (await fn(), true)
@@ -45,7 +47,9 @@ beforeEach(async () => {
    nav.onStoreRefreshed.mockClear()
    search.invalidate.mockClear()
    updated = vi.fn()
+   data.db.total_art = 0
    vi.resetModules()
+   model = await import("./model")
    refresh = await import("./refresh")
 })
 
@@ -124,6 +128,52 @@ describe("refreshNow", () => {
       // default (async () => false), so a pre-init tick acts busy and skips.
       expect(await refresh.refreshNow()).toBe("")
       expect(data.refresh).not.toHaveBeenCalled()
+   })
+
+   it("publishes the adopted snapshot only after nav reconciled to it (D2)", async () => {
+      const seenAtReconcile: number[] = []
+      nav.onStoreRefreshed.mockImplementationOnce(async () => void seenAtReconcile.push(model.snapshot()))
+      refresh.init(exclusive, updated)
+      await refresh.refreshNow()
+      expect(seenAtReconcile).toEqual([0])
+      expect(model.snapshot()).toBe(1)
+   })
+
+   it("bumps storeGrown only when the article count rose", async () => {
+      data.db.total_art = 5
+      data.refresh.mockImplementationOnce(async () => {
+         data.db.total_art = 7
+         return "updated"
+      })
+      refresh.init(exclusive, updated)
+      await refresh.refreshNow()
+      expect(model.storeGrown()).toBe(1)
+      await refresh.refreshNow() // "updated" again, same count (an expiration-only cycle)
+      expect(model.snapshot()).toBe(2)
+      expect(model.storeGrown()).toBe(1)
+   })
+
+   it("publishes nothing on 'unchanged'", async () => {
+      data.refresh.mockResolvedValue("unchanged")
+      refresh.init(exclusive, updated)
+      await refresh.refreshNow()
+      expect(model.snapshot()).toBe(0)
+   })
+
+   it("still publishes when the post-swap reload fails", async () => {
+      nav.onStoreRefreshed.mockRejectedValueOnce(new Error("reload failed"))
+      refresh.init(exclusive, updated)
+      await refresh.refreshNow()
+      expect(model.snapshot()).toBe(1)
+   })
+
+   it("mirrors the last refresh error into the model", async () => {
+      data.refresh.mockRejectedValueOnce(new Error("boom"))
+      refresh.init(exclusive, updated)
+      await refresh.refreshNow()
+      expect(model.refreshError()).toBe("boom")
+      await refresh.refreshNow()
+      expect(model.refreshError()).toBe("")
    })
 })
 

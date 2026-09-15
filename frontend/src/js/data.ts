@@ -21,6 +21,7 @@ import {
    type TallyFeed,
 } from "./idx"
 import { RELOAD_GUARD_KEY } from "./keys"
+import * as model from "./model"
 import { activeMounts, loadMounts, reconcileMounts, renameStoreState, saveMounts, type MountRecord } from "./mounts"
 import {
    gunzipJson,
@@ -266,6 +267,7 @@ export function setActive(mid: string): boolean {
    if (!s || !s.db || mountStatus(mid).state !== "ok") return false
    active = s
    db = s.db
+   model.activeMid.set(mid)
    return true
 }
 
@@ -645,6 +647,7 @@ export async function applyMountTable(recs: MountRecord[]): Promise<string[]> {
       }
    }
    await Promise.allSettled(fresh.map((s) => bootStore(s)))
+   model.mountsRev.update((n) => n + 1)
    return fresh.filter((s) => mountStatus(s.mid).state === "ok").map((s) => s.mid)
 }
 
@@ -808,6 +811,8 @@ export async function refreshPeers(): Promise<boolean> {
             }
          }),
    )
+   // A peer changed shape: the picker's per-mount rollups follow this atom (S19).
+   if (anyUpdated) model.mountsRev.update((n) => n + 1)
    return anyUpdated
 }
 

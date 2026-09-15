@@ -181,6 +181,8 @@ describe("pull-merge (legacy v1 remote)", () => {
       fetchMock.mockResolvedValue(res(200, "not json"))
       await sync.syncNow()
       expect(sync.state().error).toBe("invalid profile")
+      const model = await import("./model") // same registry as this test's sync instance
+      expect(model.syncStatus()).toEqual(sync.state())
    })
 })
 

@@ -146,6 +146,17 @@ describe("contract: multi-store mounting", () => {
       data.setActive("0")
    })
 
+   it("setActive and a mount-table adoption publish to the model (state-store P2)", async () => {
+      const model = await import("../../src/js/model") // the registry data.ts was imported into
+      data.setActive(PEER_MID)
+      expect(model.activeMid()).toBe(PEER_MID)
+      data.setActive("0")
+      expect(model.activeMid()).toBe("0")
+      const before = model.mountsRev()
+      await data.applyMountTable(data.mountRecords())
+      expect(model.mountsRev()).toBe(before + 1)
+   })
+
    it("the @<mid> hash grammar round-trips to the peer lane", () => {
       data.setActive(PEER_MID)
       nav.filter.clear()

@@ -87,6 +87,8 @@ vi.mock("./search", () => searchMod)
 
 import * as nav from "./nav"
 import { setImgProxy } from "./fmt"
+import * as model from "./model"
+import { effect } from "./signals"
 
 function makeArticle(overrides: Partial<IArticle> = {}): IArticle {
    return { f: 1, a: 0, p: 0, t: "", l: "", c: "", ...overrides }
@@ -3823,5 +3825,122 @@ describe("§6.3 mount token grammar", () => {
          const tokens = nav.parseHashTokens("#12" + suffix)
          expect(nav.parseHashMount(tokens)).toEqual({ mid: "s3f9a1c22", tokens: ["2"] })
       })
+   })
+})
+
+// state-store P2 — the device-state mirror. nav.test imports nav statically (no
+// vi.resetModules), so this static model import is the instance nav writes.
+describe("model mirror — seen and saved", () => {
+   it("every frontier write publishes the map it wrote", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }])
+      await nav.goTo(1)
+      expect(model.seen()["feed:1"]).toBe(1)
+      nav.markUnreadFrom(1)
+      expect(model.seen()["feed:1"]).toBe(0)
+   })
+
+   it("pruneSeen publishes the pruned map; publishSeen re-reads an out-of-band write", () => {
+      setupIndex([{ feedId: 1 }])
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 0, "feed:99": 3 }))
+      nav.pruneSeen()
+      expect(model.seen()).toEqual({ "feed:1": 0 })
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 7 }))
+      nav.publishSeen()
+      expect(model.seen()).toEqual({ "feed:1": 7 })
+   })
+
+   it("a save toggle publishes the saved order", () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      nav.toggleSaved(2)
+      nav.toggleSaved(0)
+      expect(model.saved()).toEqual([2, 0])
+      nav.toggleSaved(2)
+      expect(model.saved()).toEqual([0])
+      localStorage.setItem("srr-saved", JSON.stringify([1]))
+      nav.publishSaved()
+      expect(model.saved()).toEqual([1])
+   })
+
+   it("a store switch republishes both maps for the new store", () => {
+      localStorage.setItem("srr-seen@s7", JSON.stringify({ "feed:3": 4 }))
+      localStorage.setItem("srr-saved@s7", JSON.stringify([9]))
+      asMid("s7")
+      try {
+         model.activeMid.set("s7") // data.ts's write, standing in for setActive
+         expect(model.seen()).toEqual({ "feed:3": 4 })
+         expect(model.saved()).toEqual([9])
+      } finally {
+         data.activeStore = realActiveStore
+         model.activeMid.set("0")
+      }
+   })
+})
+
+describe("model mirror — cursor, lane, unread-only, frontier epoch", () => {
+   afterEach(() => nav.setUnreadOnly(false))
+
+   it("a landing publishes the cursor; select moves it; a placeholder clears it", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 2 }])
+      await nav.goTo(1)
+      expect(model.cursor()).toEqual({ chron: 1, feedId: 2 })
+      nav.select(0, 1)
+      expect(model.cursor()).toEqual({ chron: 0, feedId: 1 })
+      await nav.switchFilter(nav.SAVED_TOKEN) // nothing saved → the no-match placeholder
+      expect(model.cursor()).toEqual({ chron: -1, feedId: -1 })
+   })
+
+   it("one landing is ONE flush: the cursor and the seen write land together", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }])
+      const log: Array<[number, number | undefined]> = []
+      const stop = effect(() => void log.push([model.cursor().chron, model.seen()["feed:1"]]))
+      log.length = 0
+      await nav.goTo(1)
+      stop()
+      expect(log).toEqual([[1, 1]])
+   })
+
+   it("publishes the lane identity on every lane change", async () => {
+      data.db.feeds[1] = makeFeed({ id: 1, tag: "news" })
+      setupIndex([{ feedId: 1 }, { feedId: 1 }])
+      nav.applyFilter(["news"])
+      expect(model.laneTokens()).toEqual(["news"])
+      nav.applyFilter([])
+      expect(model.laneTokens()).toEqual([])
+      await nav.fromHash("0!1")
+      expect(model.laneTokens()).toEqual(["1"])
+      await nav.switchFilter(nav.SAVED_TOKEN)
+      expect(model.laneTokens()).toEqual([nav.SAVED_TOKEN])
+      await nav.switchFilter("")
+      expect(model.laneTokens()).toEqual([])
+   })
+
+   it("a known feed with no articles re-scopes to its own token", () => {
+      setupIndex([{ feedId: 1 }])
+      data.db.feeds[5] = makeFeed({ id: 5, total_art: 0 })
+      nav.applyFilter(["5"])
+      expect(model.laneTokens()).toEqual(["5"])
+   })
+
+   it("mirrors unread-only", () => {
+      setupIndex([{ feedId: 1 }])
+      nav.setUnreadOnly(true)
+      expect(model.unreadOnly()).toBe(true)
+      nav.setUnreadOnly(false)
+      expect(model.unreadOnly()).toBe(false)
+   })
+
+   it("bumps the frontier epoch only for a filter-scoped bulk move that moved something (D1)", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }])
+      const before = model.frontierEpoch()
+      await nav.goTo(0) // recordSeen — ordinary reading never bumps
+      expect(model.frontierEpoch()).toBe(before)
+      expect(nav.markAllRead()).toBe(true)
+      expect(model.frontierEpoch()).toBe(before + 1)
+      expect(nav.markAllRead()).toBe(false) // nothing moved
+      expect(model.frontierEpoch()).toBe(before + 1)
+      expect(nav.markUnreadFrom(0)).toBe(true)
+      expect(model.frontierEpoch()).toBe(before + 2)
+      nav.bumpFrontierEpoch()
+      expect(model.frontierEpoch()).toBe(before + 3)
    })
 })

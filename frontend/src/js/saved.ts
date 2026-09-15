@@ -17,6 +17,8 @@
 // (vanishingly unlikely) real tag literally named "~saved" is shadowed by it.
 import * as data from "./data"
 import { savedKey, savedTsKey } from "./keys"
+import * as model from "./model"
+import { effect, untracked } from "./signals"
 import { readIdSet, stampTsMap, writeIdSet } from "./storage"
 import * as sync from "./sync"
 
@@ -40,6 +42,25 @@ function readSavedSet(): Set<number> {
 export function savedOrder(): number[] {
    return [...readSavedSet()]
 }
+
+// Publish the ACTIVE store's saved order as stored (a merge wrote localStorage
+// itself; the first publish after boot). toggleSaved is the other writer.
+export function publishSaved(): void {
+   model.saved.set(savedOrder())
+}
+
+// The saved atom names the ACTIVE store's set; a store switch republishes it.
+// First run subscribes only (see seen.ts for why).
+let savedPrimed = false
+effect(() => {
+   model.activeMid()
+   if (!savedPrimed) {
+      savedPrimed = true
+      return
+   }
+   untracked(publishSaved)
+})
+
 // ★ Saved unsave-of-current anchor (the saved cousin of filter.anchor). Un-saving
 // the article on screen drops it from the queue but leaves it in the reader
 // (toggleSave is a state flip, not a navigation). Its save-index neighbors then
@@ -134,6 +155,7 @@ export function toggleSaved(
    if (nowSaved) set.add(chron)
    else set.delete(chron)
    writeIdSet(savedK(), set)
+   model.saved.set([...set])
    stampSaved(chron)
    sync.pushSoon()
    ctx.onQueueChange()

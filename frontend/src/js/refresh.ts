@@ -12,8 +12,10 @@
 // as well as the swap: a dropped tick just retries, whereas splitting fetch
 // from swap would reintroduce the interleave the mutex exists to prevent.
 import * as data from "./data"
+import * as model from "./model"
 import * as nav from "./nav"
 import * as search from "./search"
+import { batch } from "./signals"
 
 const FOCUS_MIN_INTERVAL_MS = 60_000 // at most one check per minute on re-focus
 const POLL_INTERVAL_MS = 300_000 // plus a 5-minute heartbeat while visible
@@ -33,6 +35,23 @@ export function lastRefreshError(): string {
    return lastError
 }
 
+function setError(msg: string): void {
+   lastError = msg
+   model.refreshError.set(msg)
+}
+
+// Announce an adopted snapshot to the model (D2). Only ever called AFTER
+// search.invalidate() and nav.onStoreRefreshed() reconciled to it: effects flush
+// synchronously, so a write any earlier would run them against stale bounds and
+// a stale search snapshot. `grown` = the store gained articles — the reader's
+// arrivals pulse keys on storeGrown, the list's growth on snapshot (S21).
+export function publishSnapshot(grown: boolean): void {
+   batch(() => {
+      model.snapshot.update((n) => n + 1)
+      if (grown) model.storeGrown.update((n) => n + 1)
+   })
+}
+
 // One refresh cycle. Resolves to "" on success or a skipped (busy) tick, else
 // the error message; the background triggers ignore the return and leave the
 // failure on the config status line (there is no manual button — a page reload
@@ -46,6 +65,7 @@ export async function refreshNow(): Promise<string> {
       // contract above; sync.ts likewise stamps after its inflight guard).
       lastAttempt = Date.now()
       try {
+         const before = data.db?.total_art ?? 0
          if ((await data.refresh()) === "updated") {
             try {
                search.invalidate()
@@ -55,13 +75,14 @@ export async function refreshNow(): Promise<string> {
                // the downstream reload half-failed (its error still surfaces
                // via the catch below); without this the next cycle sees
                // "unchanged" and the stranded UI never reconciles.
+               publishSnapshot((data.db?.total_art ?? 0) > before)
                onUpdated()
             }
          }
-         lastError = ""
+         setError("")
       } catch (e) {
          if (navigator.onLine !== false) {
-            lastError = e instanceof Error ? e.message : String(e)
+            setError(e instanceof Error ? e.message : String(e))
             result = lastError
          }
       }
