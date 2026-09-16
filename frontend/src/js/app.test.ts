@@ -2836,6 +2836,24 @@ describe("init() — foreign-hash rejection (OAuth/Access fragment)", () => {
    })
 })
 
+// The boot reads its hash before data.init() (a reading-position boot takes the
+// reader's chrome from the first paint), but the hashchange listener only exists
+// once init is done: a URL that moved while the store loaded is the one to route.
+describe("init() — a hash that moves while the store loads", () => {
+   it("routes the hash the URL holds when init finishes, not the one it booted with", async () => {
+      let release!: () => void
+      data.init.mockImplementationOnce(() => new Promise<void>((r) => (release = r)))
+      const booted = boot("#!news")
+      await vi.waitFor(() => expect(data.init).toHaveBeenCalled())
+      window.location.hash = "#!sport" // a link, or the browser, while db.gz loads
+      release()
+      await booted
+      await flush()
+      expect(nav.applyFilter).toHaveBeenLastCalledWith(["sport"])
+      expect(nav.applyFilter).not.toHaveBeenCalledWith(["news"])
+   })
+})
+
 describe("guard() — busy mutex", () => {
    it("drops an overlapping navigation while one is in flight (fromHash runs once)", async () => {
       await boot()

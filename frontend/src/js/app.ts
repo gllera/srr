@@ -866,6 +866,10 @@ async function init() {
    // reader boots with the READER holding focus, so a phone restoring a reading
    // position never flashes the list's chrome while the article loads.
    const hash = bootHash()
+   // The URL this read saw. The hashchange listener only exists once init is
+   // done, so a hash that moves while the store loads is routed by the boot
+   // itself (below) — never overwritten by it.
+   const bootLocation = location.hash
    if (routesToReader(hash)) model.focus.set("reader")
    // Split view (two-pane desktop): learn the breakpoint, then register the
    // layout record's DOM writer at once — before data.init() — so the first
@@ -1310,7 +1314,7 @@ async function init() {
 
    let routed: Promise<void>
    try {
-      routed = route(hash)
+      routed = route(location.hash === bootLocation ? hash : bootHash())
    } finally {
       endRendering(bootHold)
    }
