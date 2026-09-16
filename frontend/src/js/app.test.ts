@@ -550,8 +550,8 @@ describe("layout inputs mirror into the model", () => {
       nav.fromHash.mockResolvedValue(showFeed())
       hashTo("#2")
       await flush()
-      expect(document.body.classList.contains("srr-reader-shown")).toBe(true)
-      expect(document.body.classList.contains("srr-list-shown")).toBe(false)
+      expect(document.body.classList.contains("srr-view-list")).toBe(false)
+      expect(document.querySelector(".srr-list")!.hasAttribute("hidden")).toBe(true)
       // A focus write alone — no switcher runs — must re-derive the classes.
       model.focus.set("list")
       expect(document.body.classList.contains("srr-view-list")).toBe(true)
@@ -1085,7 +1085,7 @@ describe("split view (body.srr-split)", () => {
    // is the FOCUS back on the list (view/focus === "list") while a real article
    // still sits live in the split pane: the OLD `view === "list"` check would
    // wrongly re-anchor under it, discarding the article's context; the record's
-   // `listShown && !readerLive` gets it right because readerLive is true here.
+   // `listMounted && !readerLive` gets it right because readerLive is true here.
    // So this scenario — not a plain reader-hash boot — is what actually tells
    // the two conditions apart (a boot straight onto the reader leaves `view`
    // "reader" for both checks, which is gentle either way and proves nothing).
@@ -1101,11 +1101,11 @@ describe("split view (body.srr-split)", () => {
       expect(reader().classList.contains("srr-reader-empty")).toBe(false) // readerLive
       list.render.mockClear()
       list.refresh.mockClear()
-      nav.applyFilter.mockClear()
+      nav.reapplyLane.mockClear()
       M!.profileRev.update((n) => n + 1) // profile.ts's announcement…
       seedSeen({ "feed:1": 9 }) // …and seen.ts's republish, as another device's reads
       await flush()
-      expect(nav.applyFilter).not.toHaveBeenCalled()
+      expect(nav.reapplyLane).not.toHaveBeenCalled()
       expect(list.render).not.toHaveBeenCalled()
       expect(list.refresh).toHaveBeenCalled()
    })
@@ -3236,44 +3236,57 @@ describe("profile re-anchor — the boot pull changed read positions", () => {
       await boot()
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }))
       seedUnreadOnly(false) // show-read: membership doesn't key off the frontier at all
-      nav.applyFilter.mockClear()
       nav.reapplyLane.mockClear()
+      nav.bumpFrontierEpoch.mockClear()
       list.render.mockClear()
-      list.rerender.mockClear()
       M!.profileRev.update((n) => n + 1)
       await flush()
+      expect(nav.bumpFrontierEpoch).not.toHaveBeenCalled()
       expect(nav.reapplyLane).not.toHaveBeenCalled()
       expect(list.render).not.toHaveBeenCalled()
-      expect(list.rerender).not.toHaveBeenCalled()
    })
 
-   // The bug this restores: refreshAfterMerge used to unconditionally rebuild the
-   // list on every merge so another device's reads never kept showing beside the
-   // article you're on. The signals refactor lost that for the ongoing-session
-   // case — seen.ts's listRows effect only re-derives the `.srr-row-unread` class
-   // in place, and list.ts's membershipKey() never keys off model.seen under
-   // unread-only, only model.frontierEpoch — so a post-interaction merge left a
-   // just-read row seated in an unread-only list until the mode flipped, a
-   // frontier gesture fired, or the page reloaded. The fix routes through the SAME
-   // mechanism an ordinary bulk frontier move (Mark all read) uses — bumping
-   // model.frontierEpoch — rather than a bespoke reapplyLane()+rerender() call: the
-   // listSurface/laneMode effects that already watch frontierEpoch (exercised in
-   // effects.test.ts and nav.test.ts) are what actually rebuild the list and
-   // re-derive the bounds in a real boot; this suite mocks nav/list, so it can only
-   // pin app.ts's own half of the contract — that a merge calls bumpFrontierEpoch.
-   it("a merge after the first interaction still REBUILDS an open unread-only list (not just a re-anchor)", async () => {
+   // D1: a mid-session merge re-derives nothing. Bumping the frontier epoch here
+   // re-applied the lane under the open article, so another device's read of it
+   // dropped it from the lane and ← went dead. The old refreshAfterMerge rebuilt
+   // with UNCHANGED bounds; the rows now follow the merged seen map in place.
+   it("a merge after the first interaction moves no bounds, even under unread-only — the rows re-derive in place", async () => {
       await boot()
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }))
       seedUnreadOnly(true)
       nav.reapplyLane.mockClear()
       nav.bumpFrontierEpoch.mockClear()
       list.render.mockClear()
-      list.rerender.mockClear()
+      list.refresh.mockClear()
       M!.profileRev.update((n) => n + 1) // profile.ts's announcement…
       seedSeen({ "feed:1": 9 }) // …another device's reads, as seen.ts republishes them
       await flush()
-      expect(nav.bumpFrontierEpoch).toHaveBeenCalledTimes(1) // the general "membership moved" signal…
-      expect(list.render).not.toHaveBeenCalled() // …never the pre-interaction RE-ANCHOR path
+      expect(nav.bumpFrontierEpoch).not.toHaveBeenCalled()
+      expect(nav.reapplyLane).not.toHaveBeenCalled()
+      expect(list.render).not.toHaveBeenCalled()
+      expect(list.refresh).toHaveBeenCalled() // listRows: the weights follow the merge
+   })
+
+   it("re-anchors a hidden split pane too — it stays laid out", async () => {
+      // layout.ts's effect stamps body.srr-split/srr-pane-hidden from the split/
+      // paneHidden written below, and boot()'s innerHTML reset doesn't touch the
+      // body's OWN class attribute (the "split view" describe's own comment on
+      // this) — so this must come off, or the next test's fresh model gets
+      // reseeded from the leftover class (split.ts's no-matchMedia fallback
+      // reads body.srr-split back).
+      try {
+         await boot()
+         await setSplit(true)
+         M!.paneHidden.set(true)
+         nav.reapplyLane.mockClear()
+         list.render.mockClear()
+         M!.profileRev.update((n) => n + 1)
+         await flush()
+         expect(nav.reapplyLane).toHaveBeenCalledTimes(1)
+         expect(list.render).toHaveBeenCalledTimes(1)
+      } finally {
+         document.body.classList.remove("srr-split", "srr-pane-hidden")
+      }
    })
 
    it("exempts the saved/search peek modes (gentle rebuild instead), even under unread-only", async () => {
@@ -3282,18 +3295,14 @@ describe("profile re-anchor — the boot pull changed read positions", () => {
       seedUnreadOnly(true)
       nav.filter.saved = true
       try {
-         nav.applyFilter.mockClear()
          nav.reapplyLane.mockClear()
          nav.bumpFrontierEpoch.mockClear()
          list.render.mockClear()
-         list.rerender.mockClear()
          M!.profileRev.update((n) => n + 1)
          await flush()
-         expect(nav.applyFilter).not.toHaveBeenCalled()
          expect(nav.reapplyLane).not.toHaveBeenCalled()
          expect(nav.bumpFrontierEpoch).not.toHaveBeenCalled()
          expect(list.render).not.toHaveBeenCalled()
-         expect(list.rerender).not.toHaveBeenCalled()
       } finally {
          nav.filter.saved = false
       }
@@ -3305,20 +3314,6 @@ describe("profile re-anchor — the boot pull changed read positions", () => {
       M!.profileRev.update((n) => n + 1)
       await flush()
       expect(list.render).not.toHaveBeenCalled()
-   })
-
-   it("a post-interaction merge under unread-only leaves a hidden list alone (no pointless rebuild)", async () => {
-      await boot("#2") // reader surface — the list is not on screen
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }))
-      seedUnreadOnly(true)
-      nav.reapplyLane.mockClear()
-      nav.bumpFrontierEpoch.mockClear()
-      list.rerender.mockClear()
-      M!.profileRev.update((n) => n + 1)
-      await flush()
-      expect(nav.reapplyLane).not.toHaveBeenCalled()
-      expect(nav.bumpFrontierEpoch).not.toHaveBeenCalled()
-      expect(list.rerender).not.toHaveBeenCalled()
    })
 })
 

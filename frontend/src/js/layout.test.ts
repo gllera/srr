@@ -14,7 +14,7 @@ function resetInputs(): void {
    model.printOverride.set(false)
 }
 
-const DERIVED = ["listMounted", "listShown", "readerMounted", "readerLive", "readerSteppable", "listKeys"] as const
+const DERIVED = ["listMounted", "readerMounted", "readerLive", "readerSteppable", "listKeys"] as const
 const T = true
 const F = false
 
@@ -22,38 +22,38 @@ const F = false
 // Written out, not computed: a table generated from the formulas layout.ts uses
 // would agree with whatever those formulas say.
 const TABLE: Array<[boolean, model.Focus, boolean, boolean, number, string]> = [
-   [F, "list", F, F, -1, "110001"],
-   [F, "list", F, F, 0, "110001"],
-   [F, "list", F, T, -1, "110001"],
-   [F, "list", F, T, 0, "110001"],
-   [F, "list", T, F, -1, "110001"],
-   [F, "list", T, F, 0, "110001"],
-   [F, "list", T, T, -1, "110001"],
-   [F, "list", T, T, 0, "110001"],
-   [F, "reader", F, F, -1, "001010"],
-   [F, "reader", F, F, 0, "001010"],
-   [F, "reader", F, T, -1, "001010"],
-   [F, "reader", F, T, 0, "001110"],
-   [F, "reader", T, F, -1, "001010"],
-   [F, "reader", T, F, 0, "001010"],
-   [F, "reader", T, T, -1, "001010"],
-   [F, "reader", T, T, 0, "001110"],
-   [T, "list", F, F, -1, "111001"],
-   [T, "list", F, F, 0, "111001"],
-   [T, "list", F, T, -1, "111001"],
-   [T, "list", F, T, 0, "111110"],
-   [T, "list", T, F, -1, "101001"],
-   [T, "list", T, F, 0, "101001"],
-   [T, "list", T, T, -1, "101001"],
-   [T, "list", T, T, 0, "101110"],
-   [T, "reader", F, F, -1, "111010"],
-   [T, "reader", F, F, 0, "111010"],
-   [T, "reader", F, T, -1, "111010"],
-   [T, "reader", F, T, 0, "111110"],
-   [T, "reader", T, F, -1, "101010"],
-   [T, "reader", T, F, 0, "101010"],
-   [T, "reader", T, T, -1, "101010"],
-   [T, "reader", T, T, 0, "101110"],
+   [F, "list", F, F, -1, "10001"],
+   [F, "list", F, F, 0, "10001"],
+   [F, "list", F, T, -1, "10001"],
+   [F, "list", F, T, 0, "10001"],
+   [F, "list", T, F, -1, "10001"],
+   [F, "list", T, F, 0, "10001"],
+   [F, "list", T, T, -1, "10001"],
+   [F, "list", T, T, 0, "10001"],
+   [F, "reader", F, F, -1, "01010"],
+   [F, "reader", F, F, 0, "01010"],
+   [F, "reader", F, T, -1, "01010"],
+   [F, "reader", F, T, 0, "01110"],
+   [F, "reader", T, F, -1, "01010"],
+   [F, "reader", T, F, 0, "01010"],
+   [F, "reader", T, T, -1, "01010"],
+   [F, "reader", T, T, 0, "01110"],
+   [T, "list", F, F, -1, "11001"],
+   [T, "list", F, F, 0, "11001"],
+   [T, "list", F, T, -1, "11001"],
+   [T, "list", F, T, 0, "11110"],
+   [T, "list", T, F, -1, "11001"],
+   [T, "list", T, F, 0, "11001"],
+   [T, "list", T, T, -1, "11001"],
+   [T, "list", T, T, 0, "11110"],
+   [T, "reader", F, F, -1, "11010"],
+   [T, "reader", F, F, 0, "11010"],
+   [T, "reader", F, T, -1, "11010"],
+   [T, "reader", F, T, 0, "11110"],
+   [T, "reader", T, F, -1, "11010"],
+   [T, "reader", T, F, 0, "11010"],
+   [T, "reader", T, T, -1, "11010"],
+   [T, "reader", T, T, 0, "11110"],
 ]
 
 describe("deriveLayout — the truth table", () => {
@@ -114,31 +114,31 @@ describe("initLayout — the one DOM writer", () => {
    })
 
    it("stamps the single-surface list on registration", () => {
-      expect(classes()).toEqual(["srr-list-shown", "srr-view-list"])
+      expect(classes()).toEqual(["srr-view-list"])
       expect(hosts.listView.hidden).toBe(false)
       expect(hosts.article.hidden).toBe(true)
    })
 
    it("follows a focus change synchronously", () => {
       model.focus.set("reader")
-      expect(classes()).toEqual(["srr-reader-shown"])
+      expect(classes()).toEqual([])
       expect(hosts.listView.hidden).toBe(true)
       expect(hosts.article.hidden).toBe(false)
    })
 
    it("mounts both hosts under split, whichever surface has focus", () => {
       model.split.set(true)
-      expect(classes()).toEqual(["srr-list-shown", "srr-reader-shown", "srr-split", "srr-view-list"])
+      expect(classes()).toEqual(["srr-split", "srr-view-list"])
       model.focus.set("reader")
-      expect(classes()).toEqual(["srr-list-shown", "srr-reader-shown", "srr-split"])
+      expect(classes()).toEqual(["srr-split"])
       expect(hosts.listView.hidden).toBe(false)
       expect(hosts.article.hidden).toBe(false)
    })
 
-   it("keeps a hidden pane mounted but not shown", () => {
+   it("keeps a hidden pane mounted", () => {
       model.split.set(true)
       model.paneHidden.set(true)
-      expect(classes()).toEqual(["srr-pane-hidden", "srr-reader-shown", "srr-split", "srr-view-list"])
+      expect(classes()).toEqual(["srr-pane-hidden", "srr-split", "srr-view-list"])
       // Laid out, taken off screen by CSS — never [hidden], which would lose its scrollTop.
       expect(hosts.listView.hidden).toBe(false)
    })
@@ -146,7 +146,6 @@ describe("initLayout — the one DOM writer", () => {
    it("stamps srr-pane-hidden at any width (pane.ts restores it at any viewport; the CSS scopes it)", () => {
       model.paneHidden.set(true)
       expect(document.body.classList.contains("srr-pane-hidden")).toBe(true)
-      expect(document.body.classList.contains("srr-list-shown")).toBe(true)
    })
 
    it("does not touch the DOM when an input moves without changing the record", () => {

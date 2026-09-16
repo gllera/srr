@@ -884,40 +884,26 @@ async function init() {
 
    // The boot pull's re-anchor — the device-switch moment, the navigator half of
    // the sync feature: a merge that lands BEFORE the first interaction, while the
-   // list holds focus on a frontier lane, re-derives the unseen bounds from the new
-   // seen map and re-anchors the list at the new oldest unread. Everything else a
-   // merge changes — rows, the badge, the picker, the save star — is derived.
-   // ★ Saved and search are exempt peek modes, and a boot into the READER stays
-   // gentle: that position is a restored mid-article read or a shared deep link.
+   // list is mounted with no live article beside it, re-derives the unseen bounds
+   // from the new seen map and re-anchors the list at the new oldest unread. A
+   // hidden split pane counts: it stays laid out, so its rebuild measures. ★ Saved
+   // and search are exempt peek modes, and a boot into the READER stays gentle:
+   // that position is a restored mid-article read or a shared deep link.
    //
-   // AFTER the first interaction the re-anchor itself must not fire again — it
-   // would yank the list's scroll/cursor out from under a session in progress —
-   // but the OLD `refreshAfterMerge` guarantee this replaced still owes one thing:
-   // under unread-only, a peer's merge (a sync pull, a backup import) can mark an
-   // article this list is showing as read, and unread-only membership is keyed on
-   // model.frontierEpoch (list.ts's membershipKey). So a POST-interaction merge
-   // bumps that epoch itself, exactly as an ordinary bulk frontier move (Mark all
-   // read) does — the existing listSurface effect already depends on
-   // model.frontierEpoch and rebuilds a mounted list whose membershipKey moved, and
-   // nav's own frontierEpoch effect re-derives the raised bounds (reapplyLane) off
-   // the same bump, so nothing here needs to call either directly. Show-read
-   // membership doesn't depend on the frontier at all (list.ts's comment on
-   // membershipKey), so a bump there is a no-op reconcile; peek lanes (★
-   // Saved/search) stay exempt, same as pre-interaction. This still fires only
-   // once per merge (model.profileRev), never per ordinary seen write, which is
-   // what keeps it "reconcile once".
+   // AFTER the first interaction a merge moves nothing. Re-deriving the bounds
+   // under an open article would strand ← (D1), and rebuilding the list would
+   // yank a session in progress. Everything a merge changes — row weights, the
+   // badge, the picker, the ★, the pending pill — is derived; a row another
+   // device read stays in an unread-only list, greyed, until the lane is next
+   // built, exactly like a row read on this device.
    onChange(
       () => model.profileRev(),
       () => {
+         if (hasInteracted) return
          const l = layout()
-         if (!l.listShown || nav.lanePeek()) return
-         if (!hasInteracted) {
-            if (l.readerLive) return
-            nav.reapplyLane()
-            void list.render()
-            return
-         }
-         if (nav.isUnreadOnly()) nav.bumpFrontierEpoch()
+         if (!l.listMounted || l.readerLive || nav.lanePeek()) return
+         nav.reapplyLane()
+         void list.render()
       },
    )
 

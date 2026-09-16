@@ -25,7 +25,6 @@ export interface Layout {
    focus: model.Focus // which pane owns the keyboard — never a visibility answer
    paneHidden: boolean // the L key / the grip / the toggle (stamped at any width)
    listMounted: boolean // the list is laid out and may repaint (a hidden pane counts)
-   listShown: boolean // the list is on screen
    readerMounted: boolean // the reader host is laid out
    readerLive: boolean // an article is painted AND the cursor names one
    readerSteppable: boolean // ←/→ act on the reader (overlay gates stay in app.ts)
@@ -43,7 +42,6 @@ export function deriveLayout(i: LayoutInputs): Layout {
       focus: i.focus,
       paneHidden: i.paneHidden,
       listMounted,
-      listShown: listMounted && !(i.split && i.paneHidden),
       readerMounted,
       readerLive,
       readerSteppable: i.focus === "reader" || readerLive,
@@ -70,23 +68,19 @@ export interface LayoutHosts {
    article: HTMLElement
 }
 
-// The whole DOM contract of the layout. The ONLY writer of these five body
+// The whole DOM contract of the layout. The ONLY writer of these three body
 // classes and of the two hosts' `hidden` (split.ts's print crossing toggles
 // srr-split alone, deliberately) — EXCEPT while split.ts's print override is
 // active (`model.printOverride`), when this effect must skip srr-split
 // entirely: any of the other four inputs moving mid-print would otherwise
 // rerun this effect and re-stamp the class from the (unmoved) screen-truth
 // model.split, reverting split.ts's raw toggle while printing is still live.
-// srr-view-list stays for the CSS and the browser suites that key on it;
-// srr-list-shown / srr-reader-shown are stamped for a later selector
-// migration.
+// srr-view-list stays for the CSS and the browser suites that key on it.
 export function applyLayout(l: Layout, hosts: LayoutHosts): void {
    const body = document.body.classList
    if (!model.printOverride()) body.toggle("srr-split", l.split)
    body.toggle("srr-pane-hidden", l.paneHidden)
    body.toggle("srr-view-list", l.focus === "list")
-   body.toggle("srr-list-shown", l.listShown)
-   body.toggle("srr-reader-shown", l.readerMounted)
    hosts.listView.hidden = !l.listMounted
    hosts.article.hidden = !l.readerMounted
 }
