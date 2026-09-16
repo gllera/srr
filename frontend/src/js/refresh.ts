@@ -15,29 +15,19 @@ import * as data from "./data"
 import * as model from "./model"
 import * as nav from "./nav"
 import * as search from "./search"
-import { batch } from "./signals"
+import { batch, untracked } from "./signals"
 
 const FOCUS_MIN_INTERVAL_MS = 60_000 // at most one check per minute on re-focus
 const POLL_INTERVAL_MS = 300_000 // plus a 5-minute heartbeat while visible
 
 let lastAttempt = 0 // ms; attempt-based like sync.ts, so failures aren't hammered
-let lastError = ""
 // Fails CLOSED until init() wires the real guard — a pre-init trigger acts
 // busy and skips, mirroring sync.ts's inert-before-init posture.
 let runExclusive: (fn: () => Promise<void>) => Promise<boolean> = async () => false
-let onUpdated: () => void = () => {}
-// A peer store (non-active mount) changed shape this cycle — repaint the picker's
-// per-mount rollups. Lighter than onUpdated (no active-lane nav reconciliation).
-let onPeersUpdated: () => void = () => {}
 
-// The last cycle's failure ("" = healthy) — the config status line reads it.
+// The last cycle's failure ("" = healthy) — the settings footer reads it.
 export function lastRefreshError(): string {
-   return lastError
-}
-
-function setError(msg: string): void {
-   lastError = msg
-   model.refreshError.set(msg)
+   return untracked(() => model.refreshError())
 }
 
 // Announce an adopted snapshot to the model (D2). Only ever called AFTER
@@ -71,29 +61,29 @@ export async function refreshNow(): Promise<string> {
                search.invalidate()
                await nav.onStoreRefreshed()
             } finally {
-               // The swap already happened — the UI must reconcile even when
-               // the downstream reload half-failed (its error still surfaces
-               // via the catch below); without this the next cycle sees
-               // "unchanged" and the stranded UI never reconciles.
+               // The swap already happened — the snapshot must still be
+               // published even when the downstream reload half-failed (its
+               // error still surfaces via the catch below); without this the
+               // next cycle sees "unchanged" and the stranded UI never
+               // reconciles.
                publishSnapshot((data.db?.total_art ?? 0) > before)
-               onUpdated()
             }
          }
-         setError("")
+         model.refreshError.set("")
       } catch (e) {
          if (navigator.onLine !== false) {
-            setError(e instanceof Error ? e.message : String(e))
-            result = lastError
+            result = e instanceof Error ? e.message : String(e)
+            model.refreshError.set(result)
          }
       }
       // Background poll of every OTHER mounted store (docs/MULTI-STORE-SPEC.md
       // §6.3). Independent of the active lane: a peer failure never sets
       // lastError (peers surface their own per-mount chip via data.mountStatus)
       // and never reconciles the active nav state. Only a peer that CHANGED
-      // shape repaints the picker's rollups. Single-store (home only) makes this
-      // a no-op — there are no peers.
+      // shape bumps model.mountsRev, which repaints the picker's rollups.
+      // Single-store (home only) makes this a no-op — there are no peers.
       try {
-         if (await data.refreshPeers()) onPeersUpdated()
+         await data.refreshPeers()
       } catch {
          // peer errors are per-mount, already recorded in data.mountStatus
       }
@@ -107,15 +97,10 @@ function due(): boolean {
 
 // Wire the lifecycle: throttled re-check on tab re-focus, immediate on regained
 // connectivity, a slow heartbeat while visible. `exclusive` = app's background
-// guard (false = busy, skip); `updated` = app's after-refresh UI routine.
-export function init(
-   exclusive: (fn: () => Promise<void>) => Promise<boolean>,
-   updated: () => void = () => {},
-   peersUpdated: () => void = () => {},
-): void {
+// guard (false = busy, skip). What follows an adopted snapshot is the model's:
+// publishSnapshot here, and data.ts's mountsRev for a peer that changed shape.
+export function init(exclusive: (fn: () => Promise<void>) => Promise<boolean>): void {
    runExclusive = exclusive
-   onUpdated = updated
-   onPeersUpdated = peersUpdated
    document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible" && due()) void refreshNow()
    })

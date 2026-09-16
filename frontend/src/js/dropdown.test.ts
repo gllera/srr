@@ -244,25 +244,24 @@ describe("backup/restore dialog", () => {
       expect(obj.saved).toEqual([3, 7])
    })
 
-   it("a valid paste into the import area and clicking Import merges and closes", () => {
+   it("a valid paste into the import area and clicking Import merges and closes", async () => {
+      const model = await import("./model")
       const blob = JSON.stringify({ v: 1, seen: { "feed:2": 10 }, saved: [1, 2], unreadOnly: false, imgProxy: "" })
-      const onImport = vi.fn()
-      dropdown.showBackupDialog(onImport)
+      dropdown.showBackupDialog()
       $importArea()!.value = blob
       $btn(".srr-backup-import-btn")!.click()
       expect(isOpen()).toBe(false)
-      expect(onImport).toHaveBeenCalledTimes(1)
+      expect(model.profileRev()).toBe(1)
       // data was merged
       const seen = JSON.parse(localStorage.getItem("srr-seen")!)
       expect(seen["feed:2"]).toBe(10)
    })
 
-   it("forwards mountsChanged to the import hook when the restore moves the mount table", () => {
+   it("announces a restore that moved the mount table through the model", async () => {
       // A restored backup can carry a mount table differing from this device's;
-      // the handler must forward result.mountsChanged so app.ts re-adopts it at
-      // runtime (boot the new root, SW-route it, repaint the picker) instead of
-      // leaving the runtime mounts/SW routes/picker stale until a reload — the
-      // sibling of the sync-pull re-adopt, previously wired only on that path.
+      // profile.ts announces it so menus.ts re-adopts it — the sibling of the
+      // sync-pull re-adopt, previously wired only on that path.
+      const model = await import("./model")
       const blob = JSON.stringify({
          v: 2,
          ts: 0,
@@ -270,24 +269,22 @@ describe("backup/restore dialog", () => {
          saved: [],
          mnt: [{ id: "sP", url: "https://peer/", label: "Peer", ord: 10, role: "peer", cred: false, ts: 9 }],
       })
-      const onImport = vi.fn()
-      dropdown.showBackupDialog(onImport)
+      dropdown.showBackupDialog()
       $importArea()!.value = blob
       $btn(".srr-backup-import-btn")!.click()
-      expect(onImport).toHaveBeenCalledTimes(1)
-      expect(onImport).toHaveBeenCalledWith(true)
+      expect(model.profileMountsRev()).toBe(1)
    })
 
-   it("passes mountsChanged=false to the import hook on a plain seen/saved restore", () => {
+   it("a plain seen/saved restore announces no mount-table move", async () => {
       // The common case: a backup with no differing mount table must NOT trigger
-      // the re-adopt, so the hook is called with false (the gate that keeps an
-      // ordinary restore cheap).
+      // the re-adopt.
+      const model = await import("./model")
       const blob = JSON.stringify({ v: 1, seen: { "feed:2": 10 }, saved: [1], unreadOnly: false, imgProxy: "" })
-      const onImport = vi.fn()
-      dropdown.showBackupDialog(onImport)
+      dropdown.showBackupDialog()
       $importArea()!.value = blob
       $btn(".srr-backup-import-btn")!.click()
-      expect(onImport).toHaveBeenCalledWith(false)
+      expect(model.profileRev()).toBe(1)
+      expect(model.profileMountsRev()).toBe(0)
    })
 
    it("invalid JSON in the import area shows an error message and keeps the dialog open", () => {

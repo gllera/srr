@@ -781,8 +781,8 @@ export async function refresh(store: Store = active): Promise<"unchanged" | "upd
 // the background peer poll (§6.3 "refresh.ts polls every enabled mount"). Each
 // peer respects its backoff window (§8.3) and a failed OR not-yet-booted peer is
 // retried here — a booted peer that recovers becomes a usable lane. Returns
-// whether ANY peer changed shape, so the caller can repaint the picker (peer
-// unread rollups). A peer refresh never touches the active lane's nav state.
+// whether ANY peer changed shape; the mountsRev bump below is what repaints the
+// picker's per-mount rollups. A peer refresh never touches the active lane's nav state.
 export async function refreshPeers(): Promise<boolean> {
    const now = Date.now()
    let anyUpdated = false

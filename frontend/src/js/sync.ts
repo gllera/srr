@@ -73,8 +73,6 @@ import { isValidHttpish, normalizeHttpish } from "./urlish"
 const PUSH_DEBOUNCE_MS = 1000
 const PULL_MIN_INTERVAL_MS = 60_000
 
-let onMerged: ((mountsChanged: boolean) => void) | null = null
-let onStatus: (() => void) | null = null
 let pushTimer: ReturnType<typeof setTimeout> | undefined
 let dirty = false // local seen/saved changes not yet pushed
 let inflight = false
@@ -282,7 +280,6 @@ export async function syncNow(opts: { manual?: boolean } = {}): Promise<boolean>
    inflight = true
    lastPullAt = Date.now()
    let changed = false
-   let mountsChanged = false
    try {
       const remote = await pullRemote(url)
       if (remote) {
@@ -290,7 +287,6 @@ export async function syncNow(opts: { manual?: boolean } = {}): Promise<boolean>
          const r = importProfile(remote.raw, { prefs: false, mode: remote.v === 1 ? "merge" : "sync" })
          if (!r.ok) throw new Error(r.error ?? "invalid profile")
          changed = r.changed === true
-         mountsChanged = r.mountsChanged === true
          // A v1 remote always upgrade-pushes so the endpoint moves to v2; a v2
          // remote that PREDATES multi-store (no `mnt`) gets the same one-time
          // upgrade push ONLY when this device actually has multi-store state to
@@ -303,7 +299,6 @@ export async function syncNow(opts: { manual?: boolean } = {}): Promise<boolean>
          // below has nothing to regress against.
          lastRemote = null
       }
-      if (changed) onMerged?.(mountsChanged)
       // Push whenever the endpoint is behind, derived from the pulled blob
       // itself (see the module docblock): `dirty` alone is an in-memory flag a
       // reload loses, and a transiently-regressed endpoint must heal on any
@@ -328,7 +323,6 @@ export async function syncNow(opts: { manual?: boolean } = {}): Promise<boolean>
    } finally {
       inflight = false
       publishStatus()
-      onStatus?.() // okAt/error moved — let an open settings-menu footer refill
    }
    return changed
 }
@@ -392,19 +386,14 @@ export function flush(): void {
 }
 
 // Wire the lifecycle: boot pull (when enabled), re-pull on tab re-focus
-// (throttled) and on regaining connectivity, flush on hide/pagehide. `merged`
-// is now purely a test seam (S19): a merge that changes local state announces
-// itself through profile.ts's model write instead (model.profileRev /
-// model.profileMountsRev, S14), and every owner — seen.ts, saved.ts, nav.ts,
-// menus.ts — republishes off that, so no production caller passes a callback
-// here any more; `app.ts` calls `sync.init()` with none. `status` is likewise a
-// test seam now: a cycle's outcome announces itself through `model.syncStatus`,
-// and it's the `pickerStatus` effect (not this callback) that refills an open
-// settings-menu footer off that write, so enabling sync from the dialog
-// confirms itself without a re-open.
-export function init(merged?: (mountsChanged: boolean) => void, status?: () => void): void {
-   onMerged = merged ?? null
-   onStatus = status ?? null
+// (throttled) and on regaining connectivity, flush on hide/pagehide. A merge
+// that changes local state announces itself through profile.ts's model write
+// (model.profileRev / model.profileMountsRev, S14), and every owner —
+// seen.ts, saved.ts, nav.ts, menus.ts — republishes off that. A cycle's
+// outcome likewise announces itself through `model.syncStatus`, and it's the
+// `pickerStatus` effect that refills an open settings-menu footer off that
+// write, so enabling sync from the dialog confirms itself without a re-open.
+export function init(): void {
    document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") flush()
       else if (Date.now() - lastPullAt >= PULL_MIN_INTERVAL_MS) void syncNow()

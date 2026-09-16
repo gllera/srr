@@ -31,6 +31,7 @@ const v2Blob = (ts: number, seen: Record<string, number> = { "feed:1": 50 }, sav
 
 let fetchMock: ReturnType<typeof vi.fn>
 let sync: Sync
+let model: typeof import("./model")
 
 // init() wires visibilitychange/pagehide/online listeners on the SHARED jsdom
 // document/window with no teardown, so each test records what its module
@@ -56,6 +57,7 @@ beforeEach(async () => {
    recordListeners(document)
    recordListeners(window)
    vi.resetModules()
+   model = await import("./model")
    sync = await import("./sync")
 })
 
@@ -125,27 +127,21 @@ describe("pull-merge (legacy v1 remote)", () => {
       expect(fetchMock.mock.calls[1][1].method).toBe("PUT")
    })
 
-   it("notifies onMerged only when the pull changed local state", async () => {
-      const merged = vi.fn()
-      sync.init(merged)
+   it("announces a merge through the model only when the pull changed local state", async () => {
+      sync.init()
       sync.setSyncUrl(URL)
-
       await sync.syncNow()
-      expect(merged).toHaveBeenCalledTimes(1) // remote seen/saved were new here
-      expect(merged).toHaveBeenLastCalledWith(false) // no mnt in the blob → no re-adopt
-
+      expect(model.profileRev()).toBe(1) // remote seen/saved were new here
+      expect(model.profileMountsRev()).toBe(0) // no mnt in the blob → no re-adopt
       await sync.syncNow()
-      expect(merged).toHaveBeenCalledTimes(1) // second pull merges nothing new
+      expect(model.profileRev()).toBe(1) // the second pull merges nothing new
    })
 
-   it("passes mountsChanged=true to onMerged when the pull adds a peer mount (FIX 2)", async () => {
+   it("announces a moved mount table when the pull adds a peer mount (FIX 2)", async () => {
       // A sync-pulled `mnt` must reach app.ts so the new root boots at runtime;
-      // sync threads mergeMountState's changed bit through onMerged, which is
-      // now optional (S19) — a caller that still wants it can re-adopt the
-      // table when it's true, exactly as menus.ts's model.profileMountsRev
-      // subscription does.
-      const merged = vi.fn()
-      sync.init(merged)
+      // sync's merge writes profile.ts's model.profileMountsRev, and the
+      // re-adoption follows that write (menus.ts).
+      sync.init()
       sync.setSyncUrl(URL)
       fetchMock.mockResolvedValue(
          res(
@@ -162,8 +158,7 @@ describe("pull-merge (legacy v1 remote)", () => {
 
       await sync.syncNow()
 
-      expect(merged).toHaveBeenCalledTimes(1)
-      expect(merged).toHaveBeenLastCalledWith(true)
+      expect(model.profileMountsRev()).toBe(1)
    })
 
    it("treats 404 as 'nothing stored yet', not an error", async () => {
@@ -626,7 +621,7 @@ describe("push", () => {
 describe("init", () => {
    it("runs a boot pull when enabled", async () => {
       sync.setSyncUrl(URL)
-      sync.init(vi.fn())
+      sync.init()
       await vi.advanceTimersByTimeAsync(0)
       // The default fetchMock answers a v1 blob, which always merges + forces
       // an upgrade push (see "pull-merge" above) — GET then PUT.
@@ -634,27 +629,26 @@ describe("init", () => {
    })
 
    it("stays quiet when disabled", async () => {
-      sync.init(vi.fn())
+      sync.init()
       await vi.advanceTimersByTimeAsync(0)
       expect(fetchMock).not.toHaveBeenCalled()
    })
 
-   it("fires the status callback after every cycle, success or failure", async () => {
-      const status = vi.fn()
-      sync.init(vi.fn(), status)
+   it("publishes the status after every cycle, success or failure", async () => {
+      sync.init()
       sync.setSyncUrl(URL)
       await sync.syncNow()
-      expect(status).toHaveBeenCalledTimes(1)
+      expect(model.syncStatus().okAt).toBeGreaterThan(0)
       fetchMock.mockResolvedValue(res(500))
       await sync.syncNow()
-      expect(status).toHaveBeenCalledTimes(2)
+      expect(model.syncStatus().error).toBe("HTTP 500")
    })
 })
 
 describe("init triggers", () => {
    it("re-pulls on the online event", async () => {
       sync.setSyncUrl(URL)
-      sync.init(vi.fn())
+      sync.init()
       await vi.advanceTimersByTimeAsync(0) // boot pull settles
       fetchMock.mockClear()
       window.dispatchEvent(new Event("online"))
@@ -665,7 +659,7 @@ describe("init triggers", () => {
 
    it("throttles the focus re-pull to the pull interval", async () => {
       sync.setSyncUrl(URL)
-      sync.init(vi.fn())
+      sync.init()
       await vi.advanceTimersByTimeAsync(0) // boot pull → lastPullAt = now
       fetchMock.mockClear()
       const fire = () => document.dispatchEvent(new Event("visibilitychange"))
@@ -679,7 +673,7 @@ describe("init triggers", () => {
    })
 
    it("flushes on hide/pagehide", async () => {
-      sync.init(vi.fn())
+      sync.init()
       sync.setSyncUrl(URL) // enable AFTER init, so the boot pull never fired
       sync.pushSoon() // dirty; this tab never pulled → flush is unguarded
       vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden")

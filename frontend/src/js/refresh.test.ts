@@ -18,7 +18,6 @@ vi.mock("./search", () => search)
 type Refresh = typeof import("./refresh")
 let refresh: Refresh
 let model: typeof import("./model")
-let updated: ReturnType<typeof vi.fn>
 
 const exclusive = async (fn: () => Promise<void>) => (await fn(), true)
 
@@ -46,7 +45,6 @@ beforeEach(async () => {
    data.refresh.mockClear().mockResolvedValue("updated")
    nav.onStoreRefreshed.mockClear()
    search.invalidate.mockClear()
-   updated = vi.fn()
    data.db.total_art = 0
    vi.resetModules()
    model = await import("./model")
@@ -63,62 +61,56 @@ afterEach(() => {
 
 describe("refreshNow", () => {
    it("runs the full chain on 'updated' and returns ''", async () => {
-      refresh.init(exclusive, updated)
+      refresh.init(exclusive)
       expect(await refresh.refreshNow()).toBe("")
       expect(data.refresh).toHaveBeenCalledTimes(1)
       expect(search.invalidate).toHaveBeenCalledTimes(1)
       expect(nav.onStoreRefreshed).toHaveBeenCalledTimes(1)
-      expect(updated).toHaveBeenCalledTimes(1)
+      expect(model.snapshot()).toBe(1)
    })
 
    it("skips the chain on 'unchanged'", async () => {
       data.refresh.mockResolvedValue("unchanged")
-      refresh.init(exclusive, updated)
+      refresh.init(exclusive)
       await refresh.refreshNow()
       expect(search.invalidate).not.toHaveBeenCalled()
-      expect(updated).not.toHaveBeenCalled()
    })
 
    it("returns the error message on failure (and remembers it)", async () => {
       data.refresh.mockRejectedValue(new Error("boom"))
-      refresh.init(exclusive, updated)
+      refresh.init(exclusive)
       expect(await refresh.refreshNow()).toBe("boom")
       expect(refresh.lastRefreshError()).toBe("boom")
    })
 
    it("a busy mutex skips the tick entirely", async () => {
-      refresh.init(async () => false, updated)
+      refresh.init(async () => false)
       expect(await refresh.refreshNow()).toBe("")
       expect(data.refresh).not.toHaveBeenCalled()
    })
 
-   it("chains in order: invalidate → onStoreRefreshed → updated", async () => {
+   it("chains in order: invalidate → onStoreRefreshed → the snapshot publish", async () => {
       // The ordering contract: nav's search-snapshot reload must hit the
       // already-invalidated caches (search.invalidate()'s docblock), and the
       // UI routine runs last, over fully reconciled state.
-      refresh.init(exclusive, updated)
+      const { effect } = await import("./signals")
+      const published = vi.fn()
+      effect(() => {
+         if (model.snapshot() > 0) published()
+      })
+      refresh.init(exclusive)
       await refresh.refreshNow()
       const [inv] = search.invalidate.mock.invocationCallOrder
       const [reload] = nav.onStoreRefreshed.mock.invocationCallOrder
-      const [ui] = updated.mock.invocationCallOrder
+      const [ui] = published.mock.invocationCallOrder
       expect(inv).toBeLessThan(reload)
       expect(reload).toBeLessThan(ui)
-   })
-
-   it("reconciles the UI even when the post-swap reload fails", async () => {
-      // Once data.refresh() returned "updated" the in-memory store IS swapped;
-      // a downstream throw must still run the UI routine — the next cycle
-      // would see "unchanged" and a skipped onUpdated would strand the UI.
-      nav.onStoreRefreshed.mockRejectedValueOnce(new Error("reload failed"))
-      refresh.init(exclusive, updated)
-      expect(await refresh.refreshNow()).toBe("reload failed")
-      expect(updated).toHaveBeenCalledTimes(1)
    })
 
    it("offline failures stay silent", async () => {
       vi.spyOn(navigator, "onLine", "get").mockReturnValue(false)
       data.refresh.mockRejectedValue(new Error("net down"))
-      refresh.init(exclusive, updated)
+      refresh.init(exclusive)
       expect(await refresh.refreshNow()).toBe("")
       expect(refresh.lastRefreshError()).toBe("")
    })
@@ -133,7 +125,7 @@ describe("refreshNow", () => {
    it("publishes the adopted snapshot only after nav reconciled to it (D2)", async () => {
       const seenAtReconcile: number[] = []
       nav.onStoreRefreshed.mockImplementationOnce(async () => void seenAtReconcile.push(model.snapshot()))
-      refresh.init(exclusive, updated)
+      refresh.init(exclusive)
       await refresh.refreshNow()
       expect(seenAtReconcile).toEqual([0])
       expect(model.snapshot()).toBe(1)
@@ -145,7 +137,7 @@ describe("refreshNow", () => {
          data.db.total_art = 7
          return "updated"
       })
-      refresh.init(exclusive, updated)
+      refresh.init(exclusive)
       await refresh.refreshNow()
       expect(model.storeGrown()).toBe(1)
       await refresh.refreshNow() // "updated" again, same count (an expiration-only cycle)
@@ -155,21 +147,21 @@ describe("refreshNow", () => {
 
    it("publishes nothing on 'unchanged'", async () => {
       data.refresh.mockResolvedValue("unchanged")
-      refresh.init(exclusive, updated)
+      refresh.init(exclusive)
       await refresh.refreshNow()
       expect(model.snapshot()).toBe(0)
    })
 
    it("still publishes when the post-swap reload fails", async () => {
       nav.onStoreRefreshed.mockRejectedValueOnce(new Error("reload failed"))
-      refresh.init(exclusive, updated)
+      refresh.init(exclusive)
       await refresh.refreshNow()
       expect(model.snapshot()).toBe(1)
    })
 
    it("mirrors the last refresh error into the model", async () => {
       data.refresh.mockRejectedValueOnce(new Error("boom"))
-      refresh.init(exclusive, updated)
+      refresh.init(exclusive)
       await refresh.refreshNow()
       expect(model.refreshError()).toBe("boom")
       await refresh.refreshNow()
@@ -179,7 +171,7 @@ describe("refreshNow", () => {
 
 describe("triggers", () => {
    it("visibilitychange → visible refreshes, throttled to one per minute", async () => {
-      refresh.init(exclusive, updated)
+      refresh.init(exclusive)
       const fire = () => document.dispatchEvent(new Event("visibilitychange"))
       fire()
       await vi.advanceTimersByTimeAsync(0)
@@ -194,20 +186,20 @@ describe("triggers", () => {
    })
 
    it("the 5-minute heartbeat fires while visible", async () => {
-      refresh.init(exclusive, updated)
+      refresh.init(exclusive)
       await vi.advanceTimersByTimeAsync(300_000)
       expect(data.refresh).toHaveBeenCalled()
    })
 
    it("online refreshes immediately", async () => {
-      refresh.init(exclusive, updated)
+      refresh.init(exclusive)
       window.dispatchEvent(new Event("online"))
       await vi.advanceTimersByTimeAsync(0)
       expect(data.refresh).toHaveBeenCalledTimes(1)
    })
 
    it("visibilitychange while hidden does not refresh", async () => {
-      refresh.init(exclusive, updated)
+      refresh.init(exclusive)
       vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden")
       document.dispatchEvent(new Event("visibilitychange"))
       await vi.advanceTimersByTimeAsync(0)
@@ -218,7 +210,7 @@ describe("triggers", () => {
       // The stamp lands only once the guard is acquired: a busy skip leaves
       // due() true, so the very next trigger retries instead of waiting ~60s.
       let busy = true
-      refresh.init(async (fn) => (busy ? false : (await fn(), true)), updated)
+      refresh.init(async (fn) => (busy ? false : (await fn(), true)))
       const fire = () => document.dispatchEvent(new Event("visibilitychange"))
       fire() // busy — skipped, must not disarm due()
       await vi.advanceTimersByTimeAsync(0)

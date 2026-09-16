@@ -635,22 +635,19 @@ export function showContextMenu(anchor: HTMLElement, items: MenuItem[], opts?: {
    menu.focus()
 }
 
-// showBackupDialog opens the backup/restore modal. An optional `onImported`
-// callback hears about a successful import (tests use it); the app follows the
-// import through the model, which profile.ts updates. Its `mountsChanged`
-// argument lets the caller re-adopt the mount table at runtime when a RESTORE
-// merged a differing `mnt` — the same re-adoption the sync-pull path does.
-export function showBackupDialog(onImported?: (mountsChanged: boolean) => void): void {
+// showBackupDialog opens the backup/restore modal. A successful import is
+// followed through the model: profile.ts bumps profileRev (and
+// profileMountsRev when the restore moved the mount table), which nav, seen,
+// saved and menus follow.
+export function showBackupDialog(): void {
    if (!backupDialog) return
-   openModal(backupDialog, backupDialog.querySelector<HTMLElement>(".srr-backup-body")!, (close) =>
-      backupBody(close, onImported),
-   )
+   openModal(backupDialog, backupDialog.querySelector<HTMLElement>(".srr-backup-body")!, (close) => backupBody(close))
 }
 
 // backupBody builds the backup/restore modal's content: the export textarea
 // (+ copy / download), a divider, and the import textarea + prefs checkbox +
 // Import button.
-function backupBody(close: () => void, onImported?: (mountsChanged: boolean) => void): DocumentFragment {
+function backupBody(close: () => void): DocumentFragment {
    const frag = document.createDocumentFragment()
 
    // Export section: read-only textarea pre-filled with the current profile.
@@ -739,10 +736,6 @@ function backupBody(close: () => void, onImported?: (mountsChanged: boolean) => 
          return
       }
       close()
-      // A restore runs mergeMountState (both modes), which may have moved the
-      // `mnt` table; forward that so app.ts re-adopts it at runtime instead of
-      // leaving the runtime mounts/SW routes/picker stale until a reload.
-      onImported?.(result.mountsChanged === true)
    })
 
    frag.append(importLabel, prefsRow, errEl, importBtn)
