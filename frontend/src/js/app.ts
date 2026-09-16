@@ -82,25 +82,18 @@ function held(): boolean {
 // when a live owner holds it and the caller must skip.
 function acquire(): number | null {
    if (held()) return null
-   // Reclaiming a STALE mutex (busy, but past BUSY_STUCK_MS): the wedged owner's
-   // rendering holds will never be released, so drop them here. Its late finally
-   // then deletes a token that is already gone, which is a no-op.
-   //
-   // This must also reset model.rendering itself, not just the holds Set: a
-   // reclaim can be performed by ANY caller of acquire(), and guardBg() (unlike
-   // guard()/renderListSurface()) never calls beginRendering()/endRendering() —
-   // it has no render of its own to gate. Leaving the model.rendering flip to
-   // the caller's begin/endRendering pair means a reclaim performed FROM
-   // guardBg would clear renderingHolds to empty while model.rendering stayed
-   // latched true forever (nothing left to flip it back), silently wedging
-   // every effect gated on rendering() — the list surface, the reader chrome,
-   // the resting-pane paint — until some LATER guarded navigation happened to
-   // fix it as a side effect of its own begin/endRendering pair. Clearing both
-   // together, here, keeps the invariant enforced in ONE place regardless of
-   // which caller triggers the reclaim.
+   // Reclaiming a STALE mutex (busy, but past BUSY_STUCK_MS): the wedged
+   // owner's rendering holds will never be released, so drop them — every hold
+   // taken before the mutex went stale. A hold taken since is live: the list
+   // commands (route, selectTokens, selectFilter, switchMount) take their outer
+   // hold BEFORE acquiring, and dropping it would flip rendering false in the
+   // middle of the reclaiming command. model.rendering is re-derived here too,
+   // not left to the caller's begin/endRendering pair: guardBg() takes no hold,
+   // so a reclaim it performs would otherwise leave rendering latched true.
    if (busy) {
-      renderingHolds.clear()
-      model.rendering.set(false)
+      const staleSince = busyAt + BUSY_STUCK_MS
+      for (const [hold, at] of renderingHolds) if (at < staleSince) renderingHolds.delete(hold)
+      if (renderingHolds.size === 0) model.rendering.set(false)
    }
    busy = true
    busyAt = Date.now()
@@ -117,13 +110,14 @@ function release(token: number): void {
 // count: those commands nest (selectTokens' pane follow-up is a guard()), so an
 // inner release must not drop the outer hold — and a command wedged past
 // BUSY_STUCK_MS never reaches its finally, so acquire()'s stale reclaim clears
-// every hold it orphaned. A depth count could only leak there, stranding
-// `rendering` true and silencing every effect that waits it out (the self-heal
-// the Layout plan's render generation gave guard(), L20, kept for every holder).
-const renderingHolds = new Set<symbol>()
+// every hold taken before the mutex went stale. A depth count could only leak
+// there, stranding `rendering` true and silencing every effect that waits it
+// out (the self-heal the Layout plan's render generation gave guard(), L20,
+// kept for every holder).
+const renderingHolds = new Map<symbol, number>() // hold → Date.now() when taken
 function beginRendering(): symbol {
    const hold = Symbol("rendering")
-   renderingHolds.add(hold)
+   renderingHolds.set(hold, Date.now())
    model.rendering.set(true)
    return hold
 }
@@ -294,8 +288,13 @@ async function guard(fn: () => Promise<IShowFeed>) {
       if (token === busyToken) showError(e, () => guard(fn))
    } finally {
       if (token === busyToken) document.body.classList.remove("srr-loading", "srr-loading-reader")
-      endRendering(hold)
-      release(token)
+      // endRendering flushes the deferred paints; whatever one of them throws,
+      // the mutex is released.
+      try {
+         endRendering(hold)
+      } finally {
+         release(token)
+      }
    }
 }
 
@@ -462,9 +461,12 @@ async function renderListSurface() {
    const onInteractive = () => {
       if (interactive) return
       interactive = true
-      endRendering(hold)
-      if (token === busyToken) document.body.classList.remove("srr-loading")
-      release(token)
+      try {
+         endRendering(hold)
+      } finally {
+         if (token === busyToken) document.body.classList.remove("srr-loading")
+         release(token)
+      }
    }
    try {
       await list.show(anchorNow, onInteractive)
@@ -1225,6 +1227,7 @@ async function init() {
       listGrown: () => void list.onStoreGrown(),
       pickerOpen: picker.isOpen,
       renderPicker: picker.render,
+      onPaintError: (e) => showError(e),
    })
 
    let hash = location.hash.substring(1)

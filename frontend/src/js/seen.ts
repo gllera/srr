@@ -63,17 +63,23 @@ export function readSeenFor(mid: string): Record<string, number> {
 // unix-second that lets sync order a key's latest local action (raise or
 // explicit rewind) against other devices. Every seen write goes through here
 // so no mutation ships unordered.
-function writeSeen(seen: Record<string, number>, touched: string[]): void {
+function persistSeen(seen: Record<string, number>, touched: string[]): void {
    localStorage.setItem(seenK(), JSON.stringify(seen))
    stampTsMap(seenTsK(), touched)
-   // A copy: callers keep the map they wrote (recordSeen hands it to
-   // pendingRight), and the atom's value must never change under its readers.
+}
+
+// Publish a map just persisted — a COPY: callers keep the map they wrote
+// (recordSeen hands it to pendingRight), and the atom's value must never change
+// under its readers. Every writer calls this LAST, outside its try: the flush it
+// triggers runs every effect over the seen map, and a throwing one must neither
+// skip the writer's bookkeeping nor be swallowed as "nothing moved".
+function publishMap(seen: Record<string, number>): void {
    model.seen.set({ ...seen })
 }
 
 // Publish the ACTIVE store's seen map as stored — for a write that bypassed
-// writeSeen (a profile merge wrote localStorage itself) and for the first
-// publish after boot. The only other writer of model.seen is this module.
+// persistSeen (a profile merge wrote localStorage itself) and for the first
+// publish after boot. The only other writer of model.seen is publishMap.
 export function publishSeen(): void {
    model.seen.set(readSeen())
 }
@@ -212,8 +218,10 @@ export function recordSeen(feedId: number, pos: number, scope: FrontierScope): R
    if (scope.peek) return
    const ch = data.db.feeds[feedId]
    if (!ch) return
+   let seen: Record<string, number>
+   let touched: string[]
    try {
-      const seen = readSeen()
+      seen = readSeen()
       // Opening an article marks every OLDER article in the navigation list as
       // seen: for the article's own feed AND each other feed in the active
       // filter (the list you're reading), raise its seen frontier to pos so
@@ -231,14 +239,17 @@ export function recordSeen(feedId: number, pos: number, scope: FrontierScope): R
       const raise = (id: number) => writeFrontier(seen, moved, id, (prev) => prev === undefined || prev < pos, pos)
       raise(feedId)
       for (const id of scope.members) if (id !== feedId) raise(id)
-      const touched = Object.keys(moved)
+      touched = Object.keys(moved)
       if (touched.length > 0) {
-         writeSeen(seen, touched)
+         persistSeen(seen, touched)
          snapshotRaise(moved, pos)
          sync.pushSoon()
       }
-      return seen
-   } catch {}
+   } catch {
+      return undefined
+   }
+   if (touched.length > 0) publishMap(seen)
+   return seen
 }
 
 // RDR1/RDR2 — reversibility for the frontier RAISES.
@@ -365,8 +376,9 @@ export function undoFrontierMove(u: FrontierUndo): boolean {
    if (!u || u.mid !== data.activeStore().mid) return false
    lastRaise = null
    raiseOffered = false
+   let seen: Record<string, number>
    try {
-      const seen = readSeen()
+      seen = readSeen()
       const touched: string[] = []
       for (const [key, prev] of Object.entries(u.prev)) {
          const want = prev ?? -1
@@ -375,12 +387,13 @@ export function undoFrontierMove(u: FrontierUndo): boolean {
          touched.push(key)
       }
       if (touched.length === 0) return false
-      writeSeen(seen, touched)
+      persistSeen(seen, touched)
       sync.pushSoon()
-      return true
    } catch {
       return false
    }
+   publishMap(seen)
+   return true
 }
 
 // Drop the pending offer outright. Any newer raise replaces it anyway, so this
@@ -443,19 +456,21 @@ function moveFrontier(
    scope: FrontierScope,
 ): boolean {
    if (scope.peek) return false
+   let seen: Record<string, number>
    try {
-      const seen = readSeen()
+      seen = readSeen()
       const moved: Record<string, number | undefined> = {}
       for (const feedId of scope.members) writeFrontier(seen, moved, feedId, shouldMove, value)
       const touched = Object.keys(moved)
       if (touched.length === 0) return false
-      writeSeen(seen, touched)
+      persistSeen(seen, touched)
       if (undoable) snapshotRaise(moved, value)
       sync.pushSoon()
-      return true
    } catch {
       return false
    }
+   publishMap(seen)
+   return true
 }
 
 // Mark the whole current feed/tag/[ALL] selection read: raise every filter
@@ -487,6 +502,7 @@ export function markUnreadFrom(chron: number, scope: FrontierScope): boolean {
 }
 
 export function pruneSeen() {
+   let pruned = null as Record<string, number> | null
    try {
       const seen = readSeen()
       let changed = false
@@ -504,7 +520,7 @@ export function pruneSeen() {
       }
       if (changed) {
          localStorage.setItem(seenK(), JSON.stringify(seen))
-         model.seen.set({ ...seen })
+         pruned = seen
       }
       // The per-key ordering timestamps shadow the seen map — any st key whose
       // seen entry is gone (pruned above, or never existed) is dead weight too.
@@ -518,4 +534,5 @@ export function pruneSeen() {
          }
       if (stChanged) localStorage.setItem(seenTsK(), JSON.stringify(st))
    } catch {}
+   if (pruned) publishMap(pruned)
 }

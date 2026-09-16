@@ -61,6 +61,9 @@ export interface EffectSurfaces {
    // pickerRows: repaint an OPEN picker.
    pickerOpen(): boolean
    renderPicker(): void
+
+   // A surface threw: report it. The flush and the write that triggered it go on.
+   onPaintError(e: unknown): void
 }
 
 export interface Effects {
@@ -71,6 +74,19 @@ export interface Effects {
 }
 
 export function registerEffects(s: EffectSurfaces): Effects {
+   // A surface that throws is that surface's bug, not the writer's. Signals
+   // semantic 7 would rethrow it from whichever model write triggered the flush
+   // — an owner half-way through its bookkeeping, or guard() about to release
+   // the mutex — so every surface call goes through here and is reported
+   // instead.
+   const paint = (fn: () => void): void => {
+      try {
+         untracked(fn)
+      } catch (e) {
+         s.onPaintError(e)
+      }
+   }
+
    const stops: Array<() => void> = []
 
    // ── titleAndBadge (RDR12) ───────────────────────────────────────────────────
@@ -87,7 +103,7 @@ export function registerEffects(s: EffectSurfaces): Effects {
    stops.push(
       effect(() => {
          const n = total.value()
-         if (n !== undefined) untracked(() => s.applyUnreadTotal(n))
+         if (n !== undefined) paint(() => s.applyUnreadTotal(n))
       }),
    )
    // The LIST's tab title, whenever the list holds focus and whenever what it
@@ -97,7 +113,7 @@ export function registerEffects(s: EffectSurfaces): Effects {
       deferred(
          () => [layout().focus, model.laneTokens(), model.activeMid(), model.snapshot()],
          ([focus]) => {
-            if (focus === "list") s.setListTitle()
+            if (focus === "list") paint(s.setListTitle)
          },
       ),
    )
@@ -110,7 +126,7 @@ export function registerEffects(s: EffectSurfaces): Effects {
          model.syncStatus()
          model.refreshError()
          model.snapshot()
-         untracked(() => s.refreshSettingsStatus())
+         paint(s.refreshSettingsStatus)
       }),
    )
 
@@ -159,7 +175,7 @@ export function registerEffects(s: EffectSurfaces): Effects {
          // Reading pending() here is what makes a settled fetch retrigger this
          // effect regardless of the resolved value's identity.
          if (!o || chrome.pending()) return
-         untracked(() => {
+         paint(() => {
             const grown = model.storeGrown()
             s.applyChrome(o, grown !== paintedGrowth)
             paintedGrowth = grown
@@ -176,7 +192,7 @@ export function registerEffects(s: EffectSurfaces): Effects {
          const c = model.cursor()
          model.saved()
          const painted = model.readerPainted()
-         untracked(() => {
+         paint(() => {
             const canSave = painted && c.chron >= 0
             s.paintSaveButton(canSave, canSave && s.isSaved(c.chron))
          })
@@ -192,7 +208,7 @@ export function registerEffects(s: EffectSurfaces): Effects {
          model.activeMid()
          model.mountsRev()
          model.snapshot()
-         untracked(() => s.paintFeedLabel())
+         paint(s.paintFeedLabel)
       }),
    )
 
@@ -204,12 +220,14 @@ export function registerEffects(s: EffectSurfaces): Effects {
       deferred(
          () => [layout().listMounted, model.laneTokens(), model.unreadOnly(), model.frontierEpoch(), model.activeMid()],
          ([listMounted]) => {
-            const build = s.reconcileList(listMounted as boolean)
-            if (build)
-               build.then(
-                  () => s.afterListBuild(),
-                  (e: unknown) => s.onListError(e),
-               )
+            paint(() => {
+               const build = s.reconcileList(listMounted as boolean)
+               if (build)
+                  build.then(
+                     () => s.afterListBuild(),
+                     (e: unknown) => s.onListError(e),
+                  )
+            })
          },
       ),
    )
@@ -227,8 +245,8 @@ export function registerEffects(s: EffectSurfaces): Effects {
             const wasLive = prev?.[2] as boolean | undefined
             const moved = prev !== null && (prev[3] as model.Cursor).chron !== (c as model.Cursor).chron
             const becameLive = wasLive !== undefined && !wasLive && readerLive
-            if (split && readerLive && (moved || becameLive)) s.followListCursor()
-            else s.refreshListRows()
+            if (split && readerLive && (moved || becameLive)) paint(s.followListCursor)
+            else paint(s.refreshListRows)
          },
       ),
    )
@@ -241,7 +259,7 @@ export function registerEffects(s: EffectSurfaces): Effects {
          () => [layout().listMounted, model.snapshot()],
          ([listMounted, n], prev) => {
             if (prev === null || prev[1] === n) return
-            if (listMounted) s.listGrown()
+            if (listMounted) paint(s.listGrown)
          },
       ),
    )
@@ -261,7 +279,7 @@ export function registerEffects(s: EffectSurfaces): Effects {
             model.activeMid(),
          ],
          (_now, prev) => {
-            if (prev !== null && s.pickerOpen()) s.renderPicker()
+            if (prev !== null && s.pickerOpen()) paint(s.renderPicker)
          },
       ),
    )

@@ -3939,6 +3939,47 @@ describe("model mirror — seen and saved", () => {
          model.activeMid.set("0")
       }
    })
+
+   // A throwing effect over the atom rethrows from the write that triggered the
+   // flush (signals semantic 7). The owner's bookkeeping must be done by then.
+   it("a frontier raise finishes its bookkeeping before a throwing effect can interrupt it", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }])
+      nav.clearFrontierUndo()
+      localStorage.removeItem("srr-profile-ts")
+      const { recordSeen } = await import("./seen")
+      let armed = false
+      const stop = effect(() => {
+         model.seen()
+         if (armed) throw new Error("paint")
+      })
+      try {
+         armed = true
+         // The row swipe's path: recordSeen outside any batch, so its publish flushes at once.
+         expect(() => recordSeen(1, 1, { peek: false, members: [] })).toThrow("paint")
+         expect(nav.pendingFrontierUndo()).not.toBeNull() // snapshotRaise ran
+         expect(localStorage.getItem("srr-profile-ts")).not.toBeNull() // sync.pushSoon ran
+      } finally {
+         armed = false
+         stop()
+      }
+   })
+
+   it("a save toggle finishes its bookkeeping before a throwing effect can interrupt it", () => {
+      setupIndex([{ feedId: 1 }])
+      let armed = false
+      const stop = effect(() => {
+         model.saved()
+         if (armed) throw new Error("paint")
+      })
+      try {
+         armed = true
+         expect(() => nav.toggleSaved(0)).toThrow("paint")
+         expect(JSON.parse(localStorage.getItem("srr-saved-ts")!)).toHaveProperty("0")
+      } finally {
+         armed = false
+         stop()
+      }
+   })
 })
 
 describe("model mirror — cursor, lane, unread-only, frontier epoch", () => {

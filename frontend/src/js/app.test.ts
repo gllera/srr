@@ -2603,6 +2603,74 @@ describe("guard() — busy mutex", () => {
       expect(bgFn).not.toHaveBeenCalled()
       expect(model.rendering()).toBe(true) // untouched — not reset, still held by the live navigation
    })
+
+   it("a paint that throws as a landing ends is reported, and the mutex is released", async () => {
+      // jsdom fires a real, delayed (task-queued) "hashchange" of its own on a
+      // location.hash assignment, IN ADDITION to hashTo()'s explicit dispatch.
+      // The explicit one settles within a microtask drain (the mocks below have
+      // no internal awaits); the delayed one only shows up across several real
+      // ticks. Assert against the microtask-settled state (so the delayed
+      // duplicate can't double-count a fast-resolving mock's calls), then drain
+      // real ticks so the duplicate doesn't fire during a LATER test.
+      const settle = async () => {
+         for (let i = 0; i < 10; i++) await Promise.resolve()
+      }
+      const drainReal = async () => {
+         for (let i = 0; i < 10; i++) await flush()
+      }
+      try {
+         await boot()
+         await setSplit(true)
+         list.followCursor.mockImplementationOnce(() => {
+            throw new Error("paint broke")
+         })
+         nav.fromHash.mockImplementationOnce(async () => {
+            seedCursor(2)
+            return showFeed()
+         })
+         hashTo("#2")
+         await settle()
+         expect(document.querySelector(".srr-popup-text")!.textContent).toBe("paint broke")
+         await drainReal() // drain #2's delayed native duplicate before it can leak
+         nav.fromHash.mockClear()
+         hashTo("#3")
+         await settle()
+         expect(nav.fromHash).toHaveBeenCalledTimes(1) // not skipped as busy
+         await drainReal() // drain #3's delayed native duplicate before it can leak
+      } finally {
+         // split.ts's initSplit() has no matchMedia stub in jsdom to reset from
+         // on the next boot() — it reads body.srr-split BACK (see the "split
+         // view" describe's own comment) — so a leftover class here reseeds
+         // model.split true for every later test in the file.
+         document.body.classList.remove("srr-split")
+      }
+   })
+
+   it("a stale-mutex reclaim keeps the reclaiming command's own rendering hold", async () => {
+      await boot()
+      nav.fromHash.mockImplementationOnce(() => new Promise<never>(() => {}))
+      hashTo("#2") // wedges the mutex, holding rendering
+      await flush()
+      const log: boolean[] = []
+      const stop = S!.effect(() => void log.push(M!.rendering()))
+      let atShow: boolean[] = []
+      list.show.mockImplementationOnce(async () => {
+         atShow = [...log]
+      })
+      try {
+         vi.useFakeTimers()
+         vi.setSystemTime(Date.now() + 10 * 60_000)
+         hashTo("#!news") // route() holds rendering, THEN renderListSurface reclaims
+         await vi.advanceTimersByTimeAsync(0)
+      } finally {
+         vi.useRealTimers()
+         stop()
+      }
+      // Dropping route()'s hold too flickered rendering false mid-command, and
+      // every deferred paint ran against a half-applied lane.
+      expect(atShow).toEqual([true])
+      expect(M!.rendering()).toBe(false) // …and the command still released at its end
+   })
 })
 
 describe("reader edge — margin bell", () => {

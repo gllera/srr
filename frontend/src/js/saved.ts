@@ -148,9 +148,11 @@ export function toggleSaved(
    if (nowSaved) set.add(chron)
    else set.delete(chron)
    writeIdSet(savedK(), set)
-   model.saved.set([...set])
    stampSaved(chron)
    sync.pushSoon()
    ctx.onQueueChange()
+   // Last: the flush this write triggers runs every effect over the saved set,
+   // and nothing above may depend on all of them succeeding.
+   model.saved.set([...set])
    return nowSaved
 }

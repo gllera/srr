@@ -36,6 +36,7 @@ function fakes() {
       listGrown: vi.fn(),
       pickerOpen: vi.fn(() => false),
       renderPicker: vi.fn(),
+      onPaintError: vi.fn(),
    }
 }
 
@@ -398,5 +399,19 @@ describe("one landing, one run each", () => {
       expect(s.paintFeedLabel).not.toHaveBeenCalled()
       expect(s.refreshSettingsStatus).not.toHaveBeenCalled()
       expect(s.applyUnreadTotal).not.toHaveBeenCalled() // the tally came back equal
+   })
+})
+
+describe("a surface that throws", () => {
+   it("is reported, and neither the flush nor the writer sees the error", () => {
+      const s = fakes()
+      s.paintFeedLabel.mockImplementation(() => {
+         throw new Error("paint broke")
+      })
+      effects.registerEffects(s) // the first run throws too
+      s.onPaintError.mockClear()
+      expect(() => model.laneTokens.set(["news"])).not.toThrow()
+      expect(s.onPaintError).toHaveBeenCalledExactlyOnceWith(new Error("paint broke"))
+      expect(s.reconcileList).toHaveBeenCalled() // later effects in the same flush still ran
    })
 })
