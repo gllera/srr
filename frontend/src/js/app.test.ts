@@ -41,6 +41,7 @@ const nav = vi.hoisted(() => {
       SAVED_TOKEN: "~saved",
       SEARCH_PREFIX: "q:",
       WATCH_PREFIX: "w:",
+      isWatchKey: vi.fn((k: string) => k.startsWith("w:")),
       pruneSeen: vi.fn(),
       fromHash: vi.fn(async () => sf()),
       applyFilter: vi.fn((tokens: string[]) => M?.laneTokens.set([...tokens])),

@@ -1,8 +1,7 @@
 // nav/make-lane.ts — the ONE place a token list becomes a lane. It lives apart
 // from lane.ts so the interface and its implementations never import each other.
-import * as data from "../data"
 import { readSeen } from "../seen"
-import { classifyTokens, type Lane, type LaneEnv } from "./lane"
+import { classifyTokens, isWatchKey, type Lane, type LaneEnv } from "./lane"
 import { isKnownToken, MembersLane, resolveMembership } from "./lane-members"
 import { SavedLane } from "./lane-saved"
 import { SearchLane } from "./lane-search"
@@ -18,7 +17,7 @@ export function makeLane(tokens: readonly string[], env: LaneEnv, opts: { keepKn
    if (c.kind === "search") return new SearchLane(tokens, c.q, env)
    // A rule the store no longer lists is an unknown token like any other: it falls
    // through to membership resolution, which finds nothing and lands on [ALL].
-   if (c.kind === "watch" && Object.hasOwn(data.watchRules(), c.rule)) return new WatchLane(tokens, c.rule)
+   if (c.kind === "watch" && isWatchKey(tokens[0])) return new WatchLane(tokens, c.rule)
    if (tokens.length > 0) {
       const members = resolveMembership(tokens)
       if (members.size > 0) return withUnseen(new MembersLane(tokens, members, env))

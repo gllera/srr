@@ -35,6 +35,7 @@ const nav = vi.hoisted(() => ({
    savedCount: vi.fn(() => 0),
    SAVED_TOKEN: "~saved",
    WATCH_PREFIX: "w:",
+   isWatchKey: vi.fn((k: string) => k.startsWith("w:")),
    watchLaneCount: vi.fn<(rule: string) => Promise<number>>(async () => 0),
    feedIdOf: (token: string) => (/^\d+$/.test(token) ? Number(token) : null),
    isUnreadOnly: vi.fn(() => false),

@@ -17,6 +17,14 @@ import { keyOf, labelFor, type Lane, type LaneEntry } from "./lane"
 
 const NO_FEEDS: ReadonlyMap<number, number> = new Map()
 
+// The highest add_idx any feed carries. At or above it no article is expired,
+// so live() needs no idx lookup there.
+function maxAddIdx(): number {
+   let m = 0
+   for (const f of Object.values(data.db.feeds)) m = Math.max(m, f.add_idx ?? 0)
+   return m
+}
+
 export class WatchLane implements Lane {
    readonly kind = "watch" as const
    readonly tokens: readonly string[]
@@ -30,6 +38,12 @@ export class WatchLane implements Lane {
    // that is not resident reads as "no match"; the walks are what fault regions
    // in, exactly as findLeft/findRight fault idx packs in for a membership lane.
    private readonly planes = new Map<number, WatchPlane>()
+   // Bumped by refreshed(): a region load that started against the previous
+   // snapshot must not overwrite what the refresh just installed.
+   private gen = 0
+   // maxAddIdx() for the snapshot this lane last saw; refreshed() is the only
+   // place a feed's add_idx can move under an open lane.
+   private liveFrom = maxAddIdx()
 
    constructor(tokens: readonly string[], rule: string) {
       this.tokens = tokens
@@ -37,8 +51,12 @@ export class WatchLane implements Lane {
       this.rule = rule
    }
 
+   // A rule the store no longer lists covers nothing — an open lane whose rule
+   // was removed goes empty rather than widening to every chron its stale bits
+   // mark.
    private floor(): number {
-      return data.watchRules()[this.rule] ?? 0
+      const rules = data.watchRules()
+      return Object.hasOwn(rules, this.rule) ? rules[this.rule] : Infinity
    }
 
    private end(): number {
@@ -48,15 +66,17 @@ export class WatchLane implements Lane {
    private async plane(p: number): Promise<WatchPlane> {
       const resident = this.planes.get(p)
       if (resident) return resident
+      const my = this.gen
       const loaded = await data.loadWatchPlane(p)
-      this.planes.set(p, loaded)
+      if (my === this.gen) this.planes.set(p, loaded)
       return loaded
    }
 
    // Expired articles (chron < their feed's add_idx) are logically deleted
-   // everywhere else; they are here too. A deleted feed keeps the tombstone status
-   // quo, as search does.
+   // everywhere else; they are here too. A deleted feed keeps the tombstone
+   // status quo, as search does.
    private async live(chron: number): Promise<boolean> {
+      if (chron >= this.liveFrom) return true
       const feed = data.db.feeds[await data.getFeedId(chron)]
       return !feed || chron >= (feed.add_idx ?? 0)
    }
@@ -126,8 +146,11 @@ export class WatchLane implements Lane {
       return Promise.resolve(-1)
    }
 
-   // Set bits in (floor, wc) ∩ [wf, wc). Expiration is not subtracted (the spec's
-   // count), so a badge can exceed what the walk reaches by the expired hits.
+   // Set bits in (floor, wc) ∩ [wf, wc). The whole-coverage badge (floor -1) is
+   // the spec's count and does not subtract expiration. A cursor-relative count
+   // (the pending pill) must agree with the Next button, so it drops the expired
+   // hits the walk skips — which only exist below liveFrom, where a reader's
+   // cursor rarely sits.
    async ahead(floor: number): Promise<number> {
       const lo = Math.max(floor + 1, this.floor())
       const hi = this.end()
@@ -139,6 +162,24 @@ export class WatchLane implements Lane {
          const a = Math.max(lo, plane.base) - plane.base
          const b = Math.min(hi, plane.base + plane.n) - plane.base
          n += a === 0 && b === plane.n ? (plane.pop.get(this.rule) ?? 0) : popcountRange(bits, a, b)
+      }
+      const expiredHi = Math.min(hi, this.liveFrom)
+      if (floor >= 0 && lo < expiredHi) n -= await this.expiredIn(lo, expiredHi)
+      return n
+   }
+
+   private async expiredIn(lo: number, hi: number): Promise<number> {
+      let n = 0
+      for (let c = lo; c < hi; ) {
+         const p = Math.floor(c / WATCH_PACK_SIZE)
+         const plane = await this.plane(p)
+         const bits = plane.bits.get(this.rule)
+         if (bits) {
+            const stop = Math.min(hi, plane.base + WATCH_PACK_SIZE) - plane.base
+            for (let i = nextSet(bits, c - plane.base, stop); i !== -1; i = nextSet(bits, i + 1, stop))
+               if (!(await this.live(plane.base + i))) n++
+         }
+         c = (p + 1) * WATCH_PACK_SIZE
       }
       return n
    }
@@ -169,6 +210,8 @@ export class WatchLane implements Lane {
    // so the new tail and every dropped position — a stale former-tail included,
    // never just the new tail — are reloaded together in the one pass below.
    async refreshed(): Promise<void> {
+      this.gen++
+      this.liveFrom = maxAddIdx()
       const end = this.end()
       if (end <= this.floor()) return
       const tail = Math.floor((end - 1) / WATCH_PACK_SIZE)

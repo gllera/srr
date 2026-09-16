@@ -58,7 +58,7 @@ export {
 } from "./seen"
 import { lsGet, lsSet } from "./storage"
 export type { FrontierUndo } from "./seen"
-export { SEARCH_PREFIX, WATCH_PREFIX } from "./nav/lane"
+export { isWatchKey, SEARCH_PREFIX, WATCH_PREFIX } from "./nav/lane"
 export { resetSearchStream, searchCard, searchTruncated } from "./nav/lane-search"
 export {
    feedIdOf,
@@ -196,6 +196,11 @@ function anchorChron(): number {
 // Async because findRight may touch an idx pack; anchorChron stays synchronous
 // for the live-position callers.
 export async function listAnchor(): Promise<number> {
+   // A lane rebuilt for the same tokens (Show read, a re-pick, reapplyLane)
+   // starts with none of its regions resident, and a watch lane's matches()
+   // answers only for a resident region — fault the cursor's in first.
+   const chron = cursorChron()
+   if (chron >= 0) await lane.ensureRegion?.(chron)
    const live = anchorChron()
    return live >= 0 ? live : lane.anchor()
 }
@@ -314,12 +319,25 @@ export function laneChronOrdered(): boolean {
 }
 
 // The picker's badge for one watch rule: the lane's own count over its whole
-// coverage, from a lane built for the question alone — a watch lane carries no
-// state a speculative construction could disturb (unlike a search lane, whose
-// snapshot is shared). 0 for a rule the store no longer lists.
+// coverage, from a lane built for the question alone. A count only moves with
+// the store, while the picker re-renders on every seen/saved/lane write — so it
+// is memoized per snapshot, keyed on the db object data.ts replaces wholesale on
+// every adopted snapshot and on a store switch. A failed count is forgotten, so
+// the next render retries. 0 for a rule the store no longer lists.
+const watchCounts = new WeakMap<object, Map<string, Promise<number>>>()
 export function watchLaneCount(rule: string): Promise<number> {
+   let memo = watchCounts.get(data.db)
+   if (!memo) watchCounts.set(data.db, (memo = new Map()))
+   const hit = memo.get(rule)
+   if (hit) return hit
    const l = makeLane([WATCH_PREFIX + rule], env)
-   return l.kind === "watch" ? l.ahead(-1) : Promise.resolve(0)
+   const count = l.kind === "watch" ? l.ahead(-1) : Promise.resolve(0)
+   const slots = memo
+   slots.set(rule, count)
+   count.catch(() => {
+      if (slots.get(rule) === count) slots.delete(rule)
+   })
+   return count
 }
 
 // After data.refresh() swapped the store snapshot: reconcile the filter and the

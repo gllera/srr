@@ -5,6 +5,7 @@ const data = vi.hoisted(() => ({
    ids: [] as number[],
    getFeedId: vi.fn(async (chron: number) => data.ids[chron]),
    feedTitle: vi.fn((id: number) => data.db.feeds[id]?.title ?? "[DELETED]"),
+   watchRules: vi.fn((): Record<string, number> => ({ hot: 0 })),
    activeStore: () => ({ mid: "0", base: new URL("http://localhost/") }),
 }))
 vi.mock("../data", () => data)
@@ -12,6 +13,7 @@ vi.mock("../data", () => data)
 import {
    classifyTokens,
    firstUnreadProbe,
+   isWatchKey,
    keyOf,
    labelFor,
    minOf,
@@ -98,6 +100,13 @@ describe("keyOf / labelFor / minOf", () => {
 
    it("labels a watch lane by its rule name", () => {
       expect(labelFor("w:hot")).toBe("hot")
+   })
+
+   it("labels a tag spelled like a watch token as the tag it is", () => {
+      expect(labelFor("w:hot")).toBe("hot") // the store lists `hot`
+      expect(labelFor("w:news")).toBe("w:news")
+      expect(isWatchKey("w:hot")).toBe(true)
+      expect(isWatchKey("w:news")).toBe(false)
    })
 
    it("takes a minimum without spreading, 0 for nothing", () => {

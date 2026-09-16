@@ -848,7 +848,7 @@ export function renderStatus(box: HTMLElement): void {
 function openRowInfo(value: string): void {
    if (value === "") return openStoreInfo()
    if (value === nav.SAVED_TOKEN) return
-   if (value.startsWith(nav.WATCH_PREFIX)) return openWatchInfo(value.slice(nav.WATCH_PREFIX.length))
+   if (nav.isWatchKey(value)) return openWatchInfo(value.slice(nav.WATCH_PREFIX.length))
    const id = nav.feedIdOf(value)
    if (id !== null) {
       const ch = data.db.feeds[id]

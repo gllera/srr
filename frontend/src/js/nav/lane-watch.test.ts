@@ -26,8 +26,8 @@ const WPS = 50000
 // refreshed() must tell apart from an already-finalized region.
 function plane(p: number, rules: Record<string, number[]>, n = WPS): WatchPlane {
    const bits: Record<string, string> = {}
-   for (const [rule, set] of Object.entries(rules)) bits[rule] = b64(bytesOf(WPS, set))
-   return parseWatchPlane({ v: 1, base: p * WPS, n, bits }, p * WPS)
+   for (const [rule, set] of Object.entries(rules)) bits[rule] = b64(bytesOf(n, set))
+   return parseWatchPlane({ v: 1, base: p * WPS, n, bits }, p * WPS, WPS)
 }
 
 let planes: Map<number, WatchPlane>
@@ -124,8 +124,44 @@ describe("WatchLane — matches, counts, entry, refresh", () => {
    it("counts set bits inside coverage strictly after the floor", async () => {
       const l = lane()
       expect(await l.ahead(-1)).toBe(4) // 20, 49999, 50005, 50030 — expiry is not subtracted
-      expect(await l.ahead(20)).toBe(3)
+      expect(await l.ahead(20)).toBe(2) // 49999, 50030 — 50005 is expired
       expect(await l.ahead(50030)).toBe(0)
+   })
+
+   it("the badge (floor -1) keeps the spec's count; a cursor-relative count drops the expired hits", async () => {
+      const l = lane()
+      expect(await l.ahead(-1)).toBe(4) // 20, 49999, 50005, 50030
+      expect(await l.ahead(50000)).toBe(1) // only 50030 is reachable from 50000
+   })
+
+   it("covers nothing once the store stops listing its rule", async () => {
+      const l = lane()
+      expect(await l.newest()).toBe(50030)
+      data.rules = { cold: 0 } // `srr watch rm hot`, adopted by a refresh
+      expect(await l.newest()).toBe(-1)
+      expect(await l.oldest()).toBe(-1)
+      expect(await l.ahead(-1)).toBe(0)
+      await l.ensureRegion(20)
+      expect(l.matches(1, 20)).toBe(false)
+   })
+
+   it("a region load that straddles a refresh does not overwrite the refreshed region", async () => {
+      const l = lane()
+      let release!: (p: WatchPlane) => void
+      data.loadWatchPlane.mockImplementationOnce(() => new Promise<WatchPlane>((r) => (release = r)))
+      const stale = l.newest() // a region-1 load in flight against the old snapshot
+      planes.set(1, plane(1, { hot: [5, 30, 35] }))
+      await l.refreshed() // installs the fresh region 1
+      release(plane(1, { hot: [5, 30] }, 20)) // the old, partial copy lands last
+      await stale
+      expect(l.matches(2, 50035)).toBe(true)
+   })
+
+   it("an unexpired chron needs no idx lookup", async () => {
+      data.db.feeds = { 1: { id: 1, title: "A", url: "u", total_art: 1, add_idx: 0 } as IFeed }
+      const l = lane()
+      expect(await l.newest()).toBe(50030)
+      expect(data.getFeedId).not.toHaveBeenCalled()
    })
 
    it("uses each region's cached popcount when the whole region is inside the range", async () => {

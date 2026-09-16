@@ -3784,10 +3784,11 @@ describe("lane reads (laneDividers / lanePeek / laneChronOrdered)", () => {
 describe("watch lane (w:<rule>)", () => {
    // Ten articles alternating feeds 1/2; the rule "hot" marks chrons 2, 5 and 7.
    function setupWatch() {
+      data.db = { ...data.db } as IDB // a fresh snapshot: the count memo keys on it
       setupIndex(Array.from({ length: 10 }, (_, i) => ({ feedId: i % 2 ? 2 : 1 })))
       const bytes = new Uint8Array(2)
       for (const i of [2, 5, 7]) bytes[i >> 3] |= 1 << (i & 7)
-      const plane = parseWatchPlane({ v: 1, base: 0, n: 10, bits: { hot: btoa(String.fromCharCode(...bytes)) } }, 0)
+      const plane = parseWatchPlane({ v: 1, base: 0, n: 10, bits: { hot: btoa(String.fromCharCode(...bytes)) } }, 0, 10)
       data.watchRules.mockReturnValue({ hot: 0 })
       data.watchCovered.mockReturnValue(10)
       data.loadWatchPlane.mockResolvedValue(plane)
@@ -3838,6 +3839,41 @@ describe("watch lane (w:<rule>)", () => {
       await nav.fromHash("5!w%3Ahot")
       expect(nav.currentChron()).toBe(5)
       expect(nav.getCurrentFilterKey()).toBe("w:hot")
+   })
+
+   it("a rebuilt lane keeps the list anchored on the hit being read", async () => {
+      setupWatch()
+      await nav.switchFilter("w:hot")
+      await nav.left() // 5
+      expect(await nav.listAnchor()).toBe(5)
+      nav.reapplyLane() // a fresh WatchLane: no region resident
+      expect(await nav.listAnchor()).toBe(5)
+   })
+
+   it("a #pos!w: deep link into an older region faults that region in", async () => {
+      setupIndex(Array.from({ length: 50010 }, () => ({ feedId: 1 })))
+      const region = (base: number, n: number, set: number[]) => {
+         const bytes = new Uint8Array(Math.ceil(n / 8))
+         for (const i of set) bytes[i >> 3] |= 1 << (i & 7)
+         return parseWatchPlane({ v: 1, base, n, bits: { hot: btoa(String.fromCharCode(...bytes)) } }, base, n)
+      }
+      const planes = [region(0, 50000, [5]), region(50000, 10, [3])]
+      data.watchRules.mockReturnValue({ hot: 0 })
+      data.watchCovered.mockReturnValue(50010)
+      data.loadWatchPlane.mockImplementation(async (p: number) => planes[p])
+      await nav.fromHash("5!w%3Ahot")
+      expect(nav.currentChron()).toBe(5)
+   })
+
+   it("watchLaneCount is computed once per snapshot", async () => {
+      setupWatch()
+      data.loadWatchPlane.mockClear()
+      expect(await nav.watchLaneCount("hot")).toBe(3)
+      expect(await nav.watchLaneCount("hot")).toBe(3)
+      expect(data.loadWatchPlane).toHaveBeenCalledTimes(1)
+      data.db = { ...data.db } as IDB // a refresh adopted a new snapshot
+      expect(await nav.watchLaneCount("hot")).toBe(3)
+      expect(data.loadWatchPlane).toHaveBeenCalledTimes(2)
    })
 })
 

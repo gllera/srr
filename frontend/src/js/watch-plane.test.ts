@@ -5,7 +5,7 @@ import { b64, bytesOf } from "./watch-plane.testfixtures"
 
 describe("parseWatchPlane", () => {
    it("decodes each rule's base64 plane LSB-first and caches its popcount", () => {
-      const p = parseWatchPlane({ v: 1, base: 50000, n: 20, bits: { hot: b64(bytesOf(20, [0, 9, 19])) } }, 50000)
+      const p = parseWatchPlane({ v: 1, base: 50000, n: 20, bits: { hot: b64(bytesOf(20, [0, 9, 19])) } }, 50000, 20)
       expect([p.base, p.n]).toEqual([50000, 20])
       const hot = p.bits.get("hot")!
       expect([bitAt(hot, 0), bitAt(hot, 1), bitAt(hot, 9), bitAt(hot, 19)]).toEqual([true, false, true, true])
@@ -14,18 +14,26 @@ describe("parseWatchPlane", () => {
    })
 
    it("reads byte 0's SECOND bit as chron base+1", () => {
-      const p = parseWatchPlane({ v: 1, base: 0, n: 8, bits: { r: btoa(String.fromCharCode(0b00000010)) } }, 0)
+      const p = parseWatchPlane({ v: 1, base: 0, n: 8, bits: { r: btoa(String.fromCharCode(0b00000010)) } }, 0, 8)
       expect(nextSet(p.bits.get("r")!, 0, 8)).toBe(1)
    })
 
    it("an object with no hits carries no planes", () => {
-      expect(parseWatchPlane({ v: 1, base: 0, n: 5 }, 0).bits.size).toBe(0)
+      expect(parseWatchPlane({ v: 1, base: 0, n: 5 }, 0, 5).bits.size).toBe(0)
    })
 
    it("refuses an unknown version, a foreign region, or a non-object", () => {
-      expect(() => parseWatchPlane({ v: 2, base: 0, n: 1 }, 0)).toThrow("unsupported version 2")
-      expect(() => parseWatchPlane({ v: 1, base: 50000, n: 1 }, 0)).toThrow("expected 0")
-      expect(() => parseWatchPlane(null, 0)).toThrow("not an object")
+      expect(() => parseWatchPlane({ v: 2, base: 0, n: 1 }, 0, 1)).toThrow("unsupported version 2")
+      expect(() => parseWatchPlane({ v: 1, base: 50000, n: 1 }, 0, 1)).toThrow("expected 0")
+      expect(() => parseWatchPlane(null, 0, 1)).toThrow("not an object")
+   })
+
+   it("refuses a plane whose byte length does not match n, and an n the region cannot hold", () => {
+      expect(() => parseWatchPlane({ v: 1, base: 0, n: 9, bits: { r: b64(bytesOf(8, [1])) } }, 0, 9)).toThrow(
+         "want 2 for 9",
+      )
+      expect(() => parseWatchPlane({ v: 1, base: 0, n: 9 }, 0, 8)).toThrow("the region holds 8")
+      expect(() => parseWatchPlane({ v: 1, base: 0, n: -1 }, 0, 8)).toThrow("covers -1")
    })
 
    it("emptyPlane is an all-zero region, and the version matches the writer's", () => {

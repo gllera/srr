@@ -28,17 +28,24 @@ export function emptyPlane(base: number, n: number): WatchPlane {
 }
 
 // STRICT, like the writer's parseWatchDoc: a body that cannot prove which chrons
-// it describes is worse than no body.
-export function parseWatchPlane(doc: unknown, wantBase: number): WatchPlane {
+// it describes is worse than no body. `maxN` is the region's size in the
+// snapshot reading it — a plane never covers more chrons than the store holds
+// there (the tail region only grows).
+export function parseWatchPlane(doc: unknown, wantBase: number, maxN: number): WatchPlane {
    if (!doc || typeof doc !== "object") throw new Error("watch bitmap: not an object")
    const d = doc as WatchDocWire
    if (d.v !== WATCH_DOC_VERSION) throw new Error(`watch bitmap: unsupported version ${d.v}`)
    if (d.base !== wantBase) throw new Error(`watch bitmap: describes chrons from ${d.base}, expected ${wantBase}`)
    const n = d.n ?? 0
+   if (!Number.isInteger(n) || n < 0 || n > maxN)
+      throw new Error(`watch bitmap: covers ${n} chron(s), the region holds ${maxN}`)
+   const want = Math.ceil(n / 8)
    const bits = new Map<string, Uint8Array>()
    const pop = new Map<string, number>()
    for (const [rule, b64] of Object.entries(d.bits ?? {})) {
       const bin = atob(b64)
+      if (bin.length !== want)
+         throw new Error(`watch bitmap: rule "${rule}" has ${bin.length} plane byte(s), want ${want} for ${n} chron(s)`)
       const plane = new Uint8Array(bin.length)
       for (let i = 0; i < bin.length; i++) plane[i] = bin.charCodeAt(i)
       bits.set(rule, plane)

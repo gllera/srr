@@ -16,8 +16,10 @@ import { mountReader, type MountedReader } from "./mount"
 // Titles by publish index (= chron). Items 0–2 are fetched BEFORE the rule exists,
 // so the two "hot" ones among them sit below its coverage floor.
 const TITLES = ["hot early", "cold early", "hot too early", "cold", "hot one", "hot two", "cold again", "hot three"]
+// The refresh case's second batch appends two more.
+const MORE = [...TITLES, "cold late", "hot late"]
 const item = (i: number): FeedItem => ({
-   title: TITLES[i],
+   title: MORE[i],
    link: `http://example.com/w/${i}`,
    guid: `w-${i}`,
    pubDate: pubDate(i),
@@ -114,5 +116,24 @@ describe("contract: keyword-watchlist lane", () => {
       expect(reader.nav.currentChron()).toBe(5)
       expect(reader.nav.getCurrentFilterKey()).toBe("w:hot")
       expect(reader.nav.tokensSuffix()).toBe("!w%3Ahot")
+   })
+
+   it("a refresh adopts new hits into the open lane", async () => {
+      await reader.nav.fromHash("7!w%3Ahot")
+      feeds.set(
+         "/w.xml",
+         rssFeed(
+            "Wire",
+            MORE.map((_, i) => item(i)),
+         ),
+      )
+      await srr(store, "fetch")
+      const man = readDb<{ wc?: number }>(store)
+      expect(markedChrons(store, "hot", wf, man.wc ?? -1)).toEqual([4, 5, 7, 9])
+      expect(await reader.data.refresh()).toBe("updated")
+      await reader.nav.onStoreRefreshed()
+      await reader.nav.right()
+      expect(reader.nav.currentChron()).toBe(9)
+      expect(await reader.nav.watchLaneCount("hot")).toBe(4)
    })
 })

@@ -1253,7 +1253,7 @@ export function loadWatchPlane(p: number, store: Store = active): Promise<WatchP
       const key = list?.keys[p]
       if (!list || !key) return emptyPlane(base, n)
       const buf = await fetchPackBytes(key, p === list.tail, store)
-      return parseWatchPlane(JSON.parse(new TextDecoder().decode(buf)), base)
+      return parseWatchPlane(JSON.parse(new TextDecoder().decode(buf)), base, n)
    })
 }
 

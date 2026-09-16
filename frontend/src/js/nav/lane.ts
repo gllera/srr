@@ -111,6 +111,12 @@ export function keyOf(tokens: readonly string[]): string {
    return tokens.length === 1 ? tokens[0] : ""
 }
 
+// A `w:<rule>` key names a watch lane only while the store lists that rule — a
+// TAG that happens to be spelled `w:x` is still a tag.
+export function isWatchKey(key: string): boolean {
+   return key.startsWith(WATCH_PREFIX) && Object.hasOwn(data.watchRules(), key.slice(WATCH_PREFIX.length))
+}
+
 // A filter key's human label — total over every key shape nav produces, so no
 // surface can print a raw feed id or a raw `q:` token.
 export function labelFor(key: string): string {
@@ -120,7 +126,7 @@ export function labelFor(key: string): string {
       const q = key.slice(SEARCH_PREFIX.length)
       return q ? `Search: ${q}` : "Search"
    }
-   if (key.startsWith(WATCH_PREFIX)) return key.slice(WATCH_PREFIX.length)
+   if (isWatchKey(key)) return key.slice(WATCH_PREFIX.length)
    const id = feedIdOf(key)
    return id !== null ? data.feedTitle(id) : key
 }
