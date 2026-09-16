@@ -445,7 +445,7 @@ function renderEmptyReader(o: IShowFeed, resting = false) {
 
 // Has an article been PAINTED into this surface and not replaced since?
 // model.readerPainted — set by render()'s article branch, cleared by every
-// placeholder path — not nav.pos, which is the shared cursor the LIST also moves.
+// placeholder path — not model.cursor, which the LIST also moves.
 // The flag makes the answer true only where a render actually happened:
 // index.html ships `.srr-reader` empty, with neither an article in it nor
 // `.srr-reader-empty` on it. Whether the host is MOUNTED is not this function's
@@ -456,8 +456,8 @@ export function hasArticle(): boolean {
    return model.readerPainted() && !el.article.classList.contains("srr-reader-empty")
 }
 
-// What this surface has MOUNTED, or null when it holds no article. Not nav.pos:
-// that is the shared cursor the list moves too, so under split the two come
+// What this surface has MOUNTED, or null when it holds no article. Not model.cursor:
+// the list moves that cursor too, so under split the two come
 // apart routinely. The question this answers is narrower and physical — "which
 // exact article is on screen?" — which is what lets split's Escape treat
 // re-entering the reader as a focus change rather than a navigation, and what

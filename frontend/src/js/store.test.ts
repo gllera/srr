@@ -45,7 +45,7 @@ describe("keys.ts: mid ⇒ key", () => {
 describe("two contexts do not see each other's seen/saved state", () => {
    it("writes under one mid never touch the other's key space; mid '0' uses bare names", () => {
       // Write each store's seen + seen-ts + saved through the mid-keyed helpers
-      // (exactly as nav.ts's writeSeen / toggleSaved do).
+      // (exactly as seen.ts's persistSeen / saved.ts's toggleSaved do).
       localStorage.setItem(seenKey(home.mid), JSON.stringify({ "feed:3": 41 }))
       localStorage.setItem(seenTsKey(home.mid), JSON.stringify({ "feed:3": 1000 }))
       localStorage.setItem(savedKey(home.mid), JSON.stringify([1201, 87]))

@@ -988,7 +988,7 @@ function mountRows(rows: HTMLElement[]): void {
 // left unselected. `renderSearch` selects the newest hit for a query. Sets
 // builtKey so show() can later refresh-vs-rebuild.
 //
-// May this REBUILD seed the shared cursor? nav.pos is one cursor for two
+// May this REBUILD seed the shared cursor? model.cursor is one cursor for two
 // surfaces, and under split the reader is on screen holding an article of its
 // own: re-seeding from the list's anchor there would leave the pane highlighting
 // one article while the reader shows another, and — worse — step the toolbar
@@ -998,9 +998,9 @@ function mountRows(rows: HTMLElement[]): void {
 // list IS the cursor there) or a split pane with no article open. Explicit
 // navigation — a row tap, a picker lane pick, the arrows — still moves it.
 //
-// The test is "a live READER holds it", not "the cursor is set". `pos >= 0` was
+// The test is "a live READER holds it", not "the cursor is set". `cursor >= 0` was
 // the first cut and it is not the same thing: this module's own anchor seed sets
-// pos at boot, so from the first paint onward the list could never re-seed
+// the cursor at boot, so from the first paint onward the list could never re-seed
 // ITSELF — pick a lane beside a resting pane and the rebuilt rows carried no
 // .srr-row-current at all, the cursor still naming an article from the lane you
 // had just left.
@@ -1219,9 +1219,9 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    const allRows = (): HTMLElement[] => (rowsEl ? [...rowsEl.querySelectorAll<HTMLElement>("a.srr-row")] : [])
    const commit = (): void => {
       // The list and the reader share the window scroll. This scroll is DEFERRED
-      // (fonts.ready + a settle loop), so a row opened meanwhile — app.ts
-      // showReader() sets container.hidden (el.listView.hidden) — makes the reader
-      // the visible surface before we land. Centering the list's seed row now
+      // (fonts.ready + a settle loop), so a row opened meanwhile — layout.ts's effect
+      // sets container.hidden (el.listView.hidden) once focus moves to the reader —
+      // makes the reader the visible surface before we land. Centering the list's seed row now
       // would yank the article view off the top it just scrolled to. Skip the
       // scroll when we're no longer the visible surface; still start the observer
       // so infinite scroll is live when the list returns (its offscreen guard
@@ -1752,7 +1752,7 @@ function teardownObserver(): void {
 // the OLDER neighbor (the row below) and D/→ the NEWER (the row above), mirroring
 // the reader's left()/right() so the same key reaches the same article on either
 // surface. The selected row carries .srr-row-current (the reader's highlight) and
-// nav.select() tracks it in nav.pos, so opening it (tap) or re-anchoring the list
+// nav.select() tracks it in model.cursor, so opening it (tap) or re-anchoring the list
 // later stays consistent. The neighbor is just the adjacent row — no feed walk —
 // and the infinite window pages one batch when the neighbor isn't loaded yet.
 // Returns the now-selected chronIdx, or -1 when there's nowhere to move.
@@ -1831,7 +1831,7 @@ function syncRovingTab(): void {
    lastTabbable = tabbable
 }
 
-// Make `row` the cursor: move the highlight, sync nav.pos (so the selection IS
+// Make `row` the cursor: move the highlight, sync model.cursor (so the selection IS
 // the reader's "current article"), and scroll it into view. notifyScroll resyncs
 // the gesture toolbar baseline so the programmatic scroll doesn't read as a
 // downward swipe and hide the toolbar (same contract as render/fetchNewer).
@@ -1849,7 +1849,7 @@ function selectRow(row: HTMLElement): void {
    // moves focus, so the cursor was invisible to assistive tech).
    row.focus({ preventScroll: true })
    // Skeleton rows have no dataset.feed yet — Number(undefined) = NaN which
-   // poisons nav.currentFeed and breaks anchorChron().  Defer nav.select until
+   // poisons the cursor's feedId and breaks anchorChron().  Defer nav.select until
    // fillRow stamps the feed; mark the row so fillRow knows to pick it up.
    if (row.dataset.feed !== undefined) {
       nav.select(Number(row.dataset.chron), Number(row.dataset.feed))

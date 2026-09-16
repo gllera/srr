@@ -288,7 +288,7 @@ async function guardBg(fn: () => Promise<void>): Promise<boolean> {
 // correctly. Under split it blanks two thirds of the window beside a list that
 // has just built the new lane and highlighted its first unread — and the
 // identical pick made while the LIST holds focus lands the pane on that article.
-// `view` is only which surface the keyboard drives here, and nothing on screen
+// `focus` is only which surface the keyboard drives here, and nothing on screen
 // says which one that is, so one control must not answer two ways.
 //
 // record: FALSE, exactly as selectTokens' landing — a lane change must not
@@ -605,7 +605,7 @@ async function selectTokens(tokens: string[], paneLive = layout().readerLive) {
    // switchFilter, so recording here would make one pick mean two different
    // things depending on which surface had focus. On the phone none of this
    // runs: the reader is hidden and re-derives on its next open. A pane that is
-   // RESTING is left resting — showList repaints its panel for the new lane; a
+   // RESTING is left resting — the restingPane effect repaints its panel for the new lane; a
    // pick is not a reason to start reading something.
    //
    // SEARCH is exempt, and not as a special case: a query is a LIST presentation
@@ -721,8 +721,8 @@ function onCycle(dir: number) {
 // toolbar's prev/next buttons have their own listeners (they are `disabled` at a
 // dead edge, so they never need the bell). They act only on the reader surface.
 // The picker overlay can be open OVER the reader (via the reader's filter
-// button, view stays "reader"), so a key pressed under it must be inert too —
-// a bare view check no longer covers it now that the picker isn't list-only.
+// button, focus stays on the reader), so a key pressed under it must be inert too —
+// a bare focus check no longer covers it now that the picker isn't list-only.
 // Gating on the record's readerSteppable additionally makes them a clean no-op on
 // a list with no live pane beside it.
 // The image lightbox is the same class of overlay: it covers the reader while a

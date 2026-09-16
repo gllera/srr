@@ -143,7 +143,7 @@ const nav = vi.hoisted(() => {
       first: vi.fn(async () => sf()),
       last: vi.fn(async () => sf()),
       listAnchor: vi.fn(async () => -1),
-      // The split view's resting-pane placeholder (paintRestingPane): a paint,
+      // The split view's resting-pane placeholder (the restingPane effect): a paint,
       // not a navigation, so the mock is a plain placeholder IShowFeed.
       restingState: vi.fn(async () => ({ ...sf(), placeholder: true, notStarted: true, has_right: true })),
       switchFilter: vi.fn(async () => sf()),
@@ -684,11 +684,9 @@ describe("route() — surface selection from the hash", () => {
    })
 })
 
-// Split view (two-pane desktop): isSplit() reads body.srr-split back rather
-// than caching a boolean, so stamping the class directly drives every split
-// branch with no matchMedia stub (jsdom has none, so initSplit() no-ops and
-// can't clear it). The class MUST come off in afterEach — every other suite
-// in this file depends on narrow mode.
+// Split view (two-pane desktop): jsdom has no matchMedia, so initSplit() seeds model.split from
+// body.srr-split: stamping the class before boot() drives every split branch. The class MUST
+// come off in afterEach — every other suite in this file depends on narrow mode.
 describe("split view (body.srr-split)", () => {
    const reader = () => document.querySelector(".srr-reader") as HTMLElement
    const listPane = () => document.querySelector(".srr-list") as HTMLElement
@@ -733,7 +731,6 @@ describe("split view (body.srr-split)", () => {
       expect(document.body.classList.contains("srr-view-list")).toBe(true)
       expect(listPane().hasAttribute("hidden")).toBe(false)
       expect(reader().hasAttribute("hidden")).toBe(false)
-      // Narrow showList force-disables prev/next; the split branch must not.
       expect(prevBtn().disabled).toBe(false)
       expect(nextBtn().disabled).toBe(false)
       // No article on screen (-1): the pane RESTS rather than blanking — two
@@ -964,7 +961,7 @@ describe("split view (body.srr-split)", () => {
    })
 
    // …but landing somewhere NEW is a real navigation and must still render. The
-   // guard is the MOUNTED chron, not nav.pos: the list moves that cursor too.
+   // guard is the MOUNTED chron, not model.cursor: the list moves that cursor too.
    it("still renders when the cursor has moved off the article the pane shows", async () => {
       await boot()
       nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
@@ -1148,7 +1145,7 @@ describe("split view (body.srr-split)", () => {
       expect(nav.probeCurrent).toHaveBeenCalled() // …and the reader re-probes
    })
 
-   // The chrome re-probe's write gate is the record's readerSteppable, NOT
+   // The readerChrome effect's gate is the record's readerLive, NOT
    // readerMounted: under split the reader is mounted beside a RESTING panel too,
    // and the list has already seeded the cursor there — so a readerMounted gate
    // would write the cursor article's arrows and pill over the resting panel.
@@ -1234,7 +1231,7 @@ describe("split view (body.srr-split)", () => {
    // the reader-surface path through this picker IS switchFilter).
    describe("a lane pick brings the resting pane along without consuming an article", () => {
       // The pane must really HOLD an article — the follow-up asks the reader,
-      // not nav.pos (which the list moves too), so these open one for real.
+      // not model.cursor (which the list moves too), so these open one for real.
       const withArticleOpen = async () => {
          await boot()
          nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
@@ -1347,7 +1344,7 @@ describe("split view (body.srr-split)", () => {
       })
 
       // A lane that DOES resume onto an article is switchFilter's own answer and
-      // must not be second-guessed — the follow-up asks the pane, not nav.pos.
+      // must not be second-guessed — the follow-up asks the pane, not model.cursor.
       it("leaves a lane that resumed onto an article alone", async () => {
          await readingWhenPicked()
          nav.switchFilter.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
@@ -1529,10 +1526,10 @@ describe("split view (body.srr-split)", () => {
 
    // Before the layout record, showList/showReader both closed the picker, so
    // an open overlay closed on a breakpoint crossing along with everything
-   // else. onSplitChange's replacement body (cursor re-seat, chrome re-probe,
-   // relayoutPane) dropped that call — an open picker silently survived a
-   // crossing instead. A crossing is a surface-changing gesture like Escape or
-   // a filter pick, both of which close it too.
+   // else. onSplitChange's replacement body (relayoutPane) dropped that call —
+   // an open picker silently survived a crossing instead. A crossing is a
+   // surface-changing gesture like Escape or a filter pick, both of which
+   // close it too.
    //
    // setSplit() (used throughout this describe block) writes model.split
    // directly and so never runs split.ts's onSplitChange listeners — those

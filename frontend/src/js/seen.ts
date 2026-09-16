@@ -7,7 +7,7 @@
 //
 // A feed's seen position is its read high-water: recordSeen only RAISES it,
 // markUnreadFrom is the one explicit rewind, and every write goes through
-// writeSeen so no mutation ships without its per-key ordering stamp.
+// persistSeen so no mutation ships without its per-key ordering stamp.
 import * as data from "./data"
 import { seenKey, seenTsKey } from "./keys"
 import * as model from "./model"
@@ -284,7 +284,7 @@ export interface FrontierUndo {
    // across a store switch — switchMount, a mount pick in the filter picker
    // and a back/forward setActive all leave the snackbar up and clickable. So
    // without this field, replaying a snapshot after a switch would write store
-   // A's frontiers into `srr-seen@<B>`, and it would not self-heal: writeSeen
+   // A's frontiers into `srr-seen@<B>`, and it would not self-heal: persistSeen
    // stamps every touched key at NOW and sync.pushSoon() publishes, so
    // profile.ts's per-key LWW would propagate the wrong frontier fleet-wide —
    // lowering one re-floods a lane, raising one eats an unread backlog.
@@ -356,7 +356,7 @@ export async function frontierUndoSize(u: FrontierUndo): Promise<number> {
    return n
 }
 
-// Put the snapshotted frontiers back. It writes through writeSeen like every
+// Put the snapshotted frontiers back. It writes through persistSeen like every
 // other mutation, so the per-key `st` stamps are refreshed to NOW — an undo is
 // itself the newest thing that happened to those keys, and only a newer stamp
 // makes profile.ts's per-key LWW propagate a lowering instead of letting another
@@ -499,7 +499,7 @@ export function markAllRead(scope: FrontierScope): boolean {
 // chron−1 (members already below stay put — their older unread is untouched).
 // −1 (chron 0) is stored, not deleted: a stored −1 reads exactly like
 // never-seen everywhere, and keeping the key preserves the per-key timestamp
-// that lets this rewind outrank older raises on other devices (writeSeen
+// that lets this rewind outrank older raises on other devices (persistSeen
 // stamps it; profile.ts's per-key LWW propagates it). Peek modes are exempt,
 // mirroring recordSeen. Returns whether anything changed.
 export function markUnreadFrom(chron: number, scope: FrontierScope): boolean {

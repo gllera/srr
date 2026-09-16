@@ -132,8 +132,8 @@ const nav = vi.hoisted(() => {
       filterLabel: vi.fn((key: string) => (/^\d+$/.test(key) ? data.feedTitle(Number(key)) : key)),
       tokensSuffix: vi.fn(() => (filter.saved ? "!~saved" : filter.active ? "!F" : "")),
       currentChron: vi.fn(() => pos),
-      // The list's keyboard cursor sets nav.pos to the selected row (the feed arg
-      // is still recorded for assertions; the real setter also clears prefetch).
+      // The list's keyboard cursor sets model.cursor to the selected row (the feed
+      // arg is still recorded for assertions; the real setter also clears prefetch).
       select: vi.fn((chron: number) => (pos = chron)),
       anchorChron: vi.fn(() => anchor),
       // The real listAnchor resolves resume/oldest per filter; the list only
@@ -1253,8 +1253,8 @@ describe("list", () => {
       expect(nav.currentChron()).toBe(3)
    })
 
-   // …but under split that same seeding would STEAL the cursor: nav.pos is one
-   // cursor for two surfaces, and the reader pane is on screen holding an
+   // …but under split that same seeding would STEAL the cursor: model.cursor is
+   // one cursor for two surfaces, and the reader pane is on screen holding an
    // article of its own. A Show-read flip or a search keystroke rebuilds the
    // list underneath it, and re-seeding there left the pane highlighting one
    // article while the reader showed another — with the toolbar arrows stepping
@@ -1262,8 +1262,8 @@ describe("list", () => {
    describe("split view: a rebuild must not claim the reader's cursor", () => {
       // Who holds the shared cursor is app.ts's readerLive, injected (setCursorOwner).
       // These cases drive it directly, because the distinction that matters —
-      // "a LIVE READER holds it" vs "it is merely set" — is invisible in nav.pos:
-      // the list's own anchor seed sets pos too.
+      // "a LIVE READER holds it" vs "it is merely set" — is invisible in model.cursor:
+      // the list's own anchor seed sets it too.
       let readerLive = false
       beforeEach(() => {
          document.body.classList.add("srr-split")

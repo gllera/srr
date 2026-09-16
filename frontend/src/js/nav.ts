@@ -41,8 +41,9 @@ import { batch, onChange, untracked } from "./signals"
 // media warm-up — the one DOM-touching concern, which is why nav itself is
 // DOM-free), and ./route (the #pos[!tokens] grammar). Everything they used to
 // export from here is re-exported unchanged, so no consumer moved; none of them
-// imports nav back, so the module graph stays acyclic. The shared mutable state
-// that stays here — pos, filter, unreadOnly — reaches them as explicit
+// imports nav back, so the module graph stays acyclic. The shared state that
+// stays here — the active lane and unreadOnly (the cursor lives in the model) —
+// reaches them as explicit
 // arguments (a FrontierScope, a toggle context, a token list), never by import.
 export { getSavedSet, publishSaved } from "./saved"
 export {
@@ -101,16 +102,18 @@ const env: LaneEnv = {
    unreadOnly: () => unreadOnly,
    searchKey: () => searchLane()?.searchKey ?? "",
 }
-// Not makeLane([]): the store is not loaded when this module evaluates, so the boot
-// lane is an EMPTY [ALL] until fromHash/applyFilter resolves the real one — exactly
-// the empty `filter` object it replaces.
-// The lane's identity as the model sees it. Called at the END of every function
-// that changes which lane is active, after its membership resolved, so no
-// effect observes a lane whose bounds are not in place yet.
+// The lane's identity as the model sees it, published the moment a lane becomes
+// active (setLane). A lane whose membership loads asynchronously (search, watch)
+// publishes before its prepare() resolves; the commands that switch to one hold
+// model.rendering across the prepare, and every effect that reads membership
+// waits that out.
 function publishLane(): void {
    model.laneTokens.set([...filter.tokens])
 }
 
+// Not makeLane([]): the store is not loaded when this module evaluates, so the boot
+// lane is an EMPTY [ALL] until fromHash/applyFilter resolves the real one — exactly
+// the empty `filter` object it replaces.
 let lane: Lane = new MembersLane([], new Map(), env)
 
 function setLane(tokens: readonly string[], opts: { keepKnownEmpty?: boolean } = {}): void {

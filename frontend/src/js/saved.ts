@@ -99,7 +99,7 @@ export function savedAhead(pos: number): number {
    return order.length - 1 - i
 }
 
-// Stamp this chron's membership change (RDR18) — the exact seam writeSeen is
+// Stamp this chron's membership change (RDR18) — the exact seam persistSeen is
 // for the seen frontier: srr-saved-ts records the unix-second of each chron's
 // last LOCAL save/un-save, and profile.ts merges the set per key by it, in
 // EITHER direction. That is what makes a save on one device and an un-save of

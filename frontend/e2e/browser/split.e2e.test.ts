@@ -461,7 +461,7 @@ describe("browser: split view (two-pane desktop)", () => {
       }
    })
 
-   // nav.pos is ONE cursor for two surfaces. A rebuild of the list — a Show-read
+   // model.cursor is ONE cursor for two surfaces. A rebuild of the list — a Show-read
    // flip, a search keystroke — used to re-seed it from the list's own anchor
    // while the reader kept its article: the pane then highlighted one article,
    // the reader showed another, and the toolbar arrows stepped from the
@@ -627,13 +627,11 @@ describe("browser: split view (two-pane desktop)", () => {
    })
 
    // The same crossing made from the LIST surface, which is where it broke. The
-   // single-surface layout HIDES the article and DISABLES the reader-only
-   // prev/next; readerLive() reads that hidden flag, so on the way back the
-   // question was being asked of a pane still marked hidden by the layout being
-   // left. It answered "no article here" for a reader holding a perfectly good
-   // one, and the resting paint replaced it with "Not started" — and the arrows
-   // stayed disabled underneath, because the split branch deliberately doesn't
-   // touch the chrome the narrow branch turned off.
+   // single-surface layout HIDES the article; readerLive() reads that hidden
+   // flag, so on the way back the question was being asked of a pane still
+   // marked hidden by the layout being left. It answered "no article here" for
+   // a reader holding a perfectly good one, and the resting paint replaced it
+   // with "Not started".
    it("keeps the open article — and its chrome — when the LIST surface re-enters split", async () => {
       const ctx = await browser.createBrowserContext()
       try {

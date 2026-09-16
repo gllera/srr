@@ -237,7 +237,7 @@ function engage(s: PagerSide): "page" | "resist" | "skip" {
    fillTok++
    side = s
    // The neighbor probes already answered availability — the disabled state IS
-   // has_left/has_right (reader.render/showList keep it current).
+   // has_left/has_right (reader.render and the readerChrome effect keep it current).
    const dead = s === "prev" ? el.prev.disabled : el.next.disabled
    mode = dead ? "resist" : "page"
    if (mode === "page") void fillPage(s)
