@@ -3893,6 +3893,22 @@ describe("§6.3 mount token grammar", () => {
    })
 })
 
+describe("store switch", () => {
+   afterEach(() => {
+      data.activeStore = realActiveStore
+      model.activeMid.set("0")
+   })
+
+   it("clears the cursor: a chron from the previous store names nothing here", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }])
+      await nav.goTo(1)
+      expect(nav.currentChron()).toBe(1)
+      asMid("s7")
+      model.activeMid.set("s7") // data.setActive's write
+      expect(model.cursor()).toEqual({ chron: -1, feedId: -1 })
+   })
+})
+
 // state-store P2 — the device-state mirror. nav.test imports nav statically (no
 // vi.resetModules), so this static model import is the instance nav writes.
 describe("model mirror — seen and saved", () => {

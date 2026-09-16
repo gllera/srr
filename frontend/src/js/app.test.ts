@@ -623,6 +623,7 @@ describe("split view (body.srr-split)", () => {
       seedCursor(-1)
       nav.isSearchFilter.mockReturnValue(false)
       nav.tagUnreadFromCounts.mockReturnValue(0)
+      nav.listAnchor.mockResolvedValue(-1)
       data.db.feeds = {} as unknown as IDB["feeds"]
    })
 
@@ -1471,6 +1472,26 @@ describe("split view (body.srr-split)", () => {
       } finally {
          vi.unstubAllGlobals()
       }
+   })
+
+   it("a peer-lane pick beside a live pane lands the pane in the new store", async () => {
+      await boot()
+      nav.fromHash.mockImplementationOnce(async () => {
+         seedCursor(2)
+         return showFeed()
+      })
+      hashTo("#2")
+      await flush()
+      M!.focus.set("list") // the list holds the keyboard; the article stays live in the pane
+      // The real nav clears the cursor on a store switch; the mock does it by hand.
+      nav.resolveMountToken.mockImplementationOnce((t: string) => {
+         seedCursor(-1)
+         return t.slice(t.indexOf(":") + 1)
+      })
+      nav.last.mockClear()
+      pickerHooks()!.onSelect("@s7:5")
+      await flush()
+      expect(nav.last).toHaveBeenCalledTimes(1) // listAnchor answered -1: the lane's newest
    })
 })
 

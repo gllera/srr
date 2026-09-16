@@ -14,6 +14,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest"
 let mid = "0"
 const data = vi.hoisted(() => ({
    activeStore: vi.fn(() => ({ mid: "0" })),
+   applyMountTable: vi.fn(async (): Promise<string[]> => []),
 }))
 vi.mock("./data", () => data)
 
@@ -35,10 +36,12 @@ const nav = vi.hoisted(() => ({
 vi.mock("./nav", () => nav)
 
 import * as menus from "./menus"
+import * as model from "./model"
 
 const showSnackbar = vi.fn<(text: string, action?: { label: string; run: () => void }) => void>()
 const hideSnackbar = vi.fn()
 const reReadReader = vi.fn()
+const showHomeList = vi.fn()
 
 // The action the snackbar was handed — the thing that outlives the offer.
 const undoButton = () => showSnackbar.mock.calls.at(-1)![1]!
@@ -56,6 +59,7 @@ beforeEach(() => {
       showSnackbar,
       hideSnackbar,
       rerunPlaceholder: reReadReader,
+      showHomeList,
    })
 })
 
@@ -98,5 +102,27 @@ describe("offerFrontierUndo", () => {
       // …and no surface was reconciled for a move that did not happen.
       expect(nav.bumpFrontierEpoch).not.toHaveBeenCalled()
       expect(reReadReader).not.toHaveBeenCalled()
+   })
+})
+
+describe("mount-table changes", () => {
+   it("adopts a mount table a merge moved (profileMountsRev)", () => {
+      model.profileMountsRev.update((n) => n + 1)
+      expect(data.applyMountTable).toHaveBeenCalledTimes(1)
+   })
+
+   it("lands on the home list when the active store was unmounted", () => {
+      mid = "s7"
+      data.applyMountTable.mockImplementationOnce(async () => {
+         mid = "0" // data.ts falls back to home before its first await
+         return []
+      })
+      menus.afterMountChange([])
+      expect(showHomeList).toHaveBeenCalledTimes(1)
+   })
+
+   it("leaves the surface alone when the active store survived", () => {
+      menus.afterMountChange([])
+      expect(showHomeList).not.toHaveBeenCalled()
    })
 })

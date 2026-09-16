@@ -959,6 +959,22 @@ onChange(
    },
 )
 
+// A store switch leaves nothing under the cursor. chronIdx is only unique within
+// a mount (S38), so the previous store's chron names an unrelated article here:
+// the ★, the arrows, the pill and the list anchor would all describe it. The
+// cached neighbour probes, the saved ghost and any in-flight prefetch belong to
+// that article too. A landing in the new store (fromHash, a peer lane pick) sets
+// its own cursor right after.
+onChange(
+   () => model.activeMid(),
+   () => {
+      model.cursor.set({ chron: -1, feedId: -1 })
+      next.left = next.right = undefined
+      clearSavedGhost()
+      abortPrefetch()
+   },
+)
+
 // Membership is derived (state-store spec rule 2, as amended by D1). The
 // unread-only bounds re-derive when the MODE flips, and — under unread-only —
 // when a filter-scoped bulk frontier move bumps model.frontierEpoch. Never on

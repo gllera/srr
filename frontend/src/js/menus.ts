@@ -43,6 +43,9 @@ export interface MenuDeps {
    // (a real article's chrome is the readerChrome effect's). A navigation, so
    // app.ts owns it (S17).
    rerunPlaceholder: () => void
+   // Land on the home store's [ALL] list — after the ACTIVE store was unmounted.
+   // A navigation, so app.ts owns it.
+   showHomeList: () => void
 }
 
 let d: MenuDeps
@@ -197,14 +200,16 @@ function settingsMenuItems(): MenuItem[] {
 }
 
 // Apply a changed mount table: adopt it in data (boots new mounts, drops gone
-// ones), re-post the roots to the SW (§5.1), and repaint an open picker. The
-// list/reader keep their current lane unless it was unmounted (data falls back
-// to home), so no forced re-render here.
+// ones) and re-post the roots to the SW (§5.1). An open picker repaints through
+// the pickerRows effect (data bumps mountsRev). The surfaces keep their lane —
+// unless the ACTIVE store was unmounted: data then falls back to home before its
+// first await, but the lane, the list and the hash still name the store that is
+// gone.
 export function afterMountChange(recs: MountRecord[]): void {
-   void data.applyMountTable(recs).then(() => {
-      postMounts()
-      if (picker.isOpen()) picker.render()
-   })
+   const was = data.activeStore().mid
+   const adopted = data.applyMountTable(recs)
+   if (data.activeStore().mid !== was) d.showHomeList()
+   void adopted.then(() => postMounts())
 }
 
 // Open the Stores dialog (§3): mount by URL, unmount a peer, or forget its

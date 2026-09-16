@@ -574,7 +574,7 @@ async function goToList(push: boolean) {
 // and it resolves a mount-qualified token before coming through here. Tokens
 // arriving this way are already in the active store's context (nav hands them
 // back bare — the mount rides in tokensSuffix), so there is no `@mid:` to strip.
-async function selectTokens(tokens: string[]) {
+async function selectTokens(tokens: string[], paneLive = layout().readerLive) {
    // Bail BEFORE applyFilter/goToList: goToList drops on a held mutex, but
    // applyFilter would already have mutated nav.filter (and goToList's pushState
    // the URL) for a render that never ran. Dropping the whole handler keeps
@@ -596,7 +596,7 @@ async function selectTokens(tokens: string[]) {
       endRendering(hold)
    }
    await listed
-   // Split view: the reader pane never left, so the article on screen may not
+   // Split view (paneLive — read when the command started): the reader pane never left, so the article on screen may not
    // belong to the lane just picked — and the still-live toolbar arrows would
    // then step from a position nothing on screen names. Ask the SAME question
    // the list just asked (nav.listAnchor: the live article while it still
@@ -618,11 +618,14 @@ async function selectTokens(tokens: string[]) {
    // about row order, not a landing), and it is typed WHILE reading. Following it
    // would yank the pane onto the newest hit at every keystroke — and onto the
    // no-match placeholder the moment the bar opens empty.
-   if (layout().readerLive && !nav.isSearchFilter()) {
+   if (paneLive && !nav.isSearchFilter()) {
       const anchor = await nav.listAnchor()
       // replace, not push: goToList already pushed this filter change, and a
       // second entry would make the first browser-back a visual no-op.
-      if (anchor !== beforeChron) {
+      // beforeChron < 0 with a live pane means a store switch cleared the cursor
+      // (selectFilter's peer pick): the pane's article belongs to the store just
+      // left, so even a newest (-1) answer is a landing.
+      if (anchor !== beforeChron || beforeChron < 0) {
          await guard(() => (anchor < 0 ? nav.last(RESUME) : nav.goTo(anchor, RESUME)))
          // The follow-up is the PANE catching up with a pick made on the list —
          // it must not be mistaken for going to the reader. Two things do
@@ -642,13 +645,16 @@ async function selectTokens(tokens: string[]) {
 async function selectFilter(token: string) {
    if (held()) return
    searchUI.clearSearchDebounce()
+   // Read BEFORE the mount token resolves: a peer pick switches the store, which
+   // clears the cursor, and a pane that was showing an article must still land.
+   const paneLive = layout().readerLive
    // A mount-qualified token (a peer lane picked from the picker) switches the
    // active lane and resolves to its bare half — nav owns that grammar (§6.3).
    let selected: Promise<void>
    const hold = beginRendering() // S16: the store switch is a write the list must not react to alone
    try {
       token = nav.resolveMountToken(token)
-      selected = selectTokens(token === "" ? [] : [token])
+      selected = selectTokens(token === "" ? [] : [token], paneLive)
    } finally {
       endRendering(hold)
    }
@@ -958,6 +964,7 @@ async function init() {
       showSnackbar,
       hideSnackbar,
       rerunPlaceholder,
+      showHomeList: () => route(""),
    })
 
    // The filter picker overlay: a pick closes it and routes per surface — from
