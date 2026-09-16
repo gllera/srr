@@ -6,7 +6,7 @@ import * as model from "./model"
 import { effect } from "./signals"
 
 // The ownership table (docs/superpowers/plans/2026-09-15-frontend-architecture-trio-index.md
-// §3, plus S14): the ONLY module allowed to write each atom. A write from
+// §3, plus S14 and the print override): the ONLY module allowed to write each atom. A write from
 // anywhere else is a review finding, and this test is that review.
 const OWNERS: Record<string, string> = {
    cursor: "nav.ts",
@@ -64,7 +64,8 @@ describe("model", () => {
       expect(model.focus()).toBe("list")
       for (const n of [model.frontierEpoch, model.snapshot, model.storeGrown, model.mountsRev]) expect(n()).toBe(0)
       for (const n of [model.profileRev, model.profileMountsRev]) expect(n()).toBe(0)
-      for (const b of [model.rendering, model.split, model.paneHidden, model.readerPainted]) expect(b()).toBe(false)
+      for (const b of [model.rendering, model.split, model.paneHidden, model.readerPainted, model.printOverride])
+         expect(b()).toBe(false)
    })
 
    it("cursor, laneTokens, syncStatus, seen and saved ignore structurally equal writes", () => {
@@ -105,6 +106,14 @@ describe("model", () => {
             else if (owner !== base) offenders.push(`${relative(here, file)} writes model.${m[1]} (owner: ${owner})`)
          }
       }
+      expect(offenders).toEqual([])
+   })
+
+   it("every module imports the model as a namespace — the ownership scan only sees `model.<atom>`", () => {
+      const named = /import\s+(?!type\b)\{[^}]*\}\s+from\s+["'](?:\.\.?\/)+model["']/g
+      const offenders: string[] = []
+      for (const file of sources(here))
+         for (const m of readFileSync(file, "utf8").matchAll(named)) offenders.push(`${relative(here, file)}: ${m[0]}`)
       expect(offenders).toEqual([])
    })
 })

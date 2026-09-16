@@ -26,9 +26,6 @@ const nav = vi.hoisted(() => ({
    markFrontierUndoOffered: vi.fn(),
    undoFrontierMove: vi.fn(() => true),
    bumpFrontierEpoch: vi.fn(),
-   isUnreadOnly: vi.fn(() => false),
-   applyFilter: vi.fn(),
-   filterTokens: vi.fn(() => [] as string[]),
    markAllRead: vi.fn(() => true),
    markUnreadFrom: vi.fn(() => true),
    currentChron: vi.fn(() => -1),
@@ -40,7 +37,7 @@ import * as model from "./model"
 
 const showSnackbar = vi.fn<(text: string, action?: { label: string; run: () => void }) => void>()
 const hideSnackbar = vi.fn()
-const reReadReader = vi.fn()
+const rerunPlaceholder = vi.fn()
 const showHomeList = vi.fn()
 
 // The action the snackbar was handed — the thing that outlives the offer.
@@ -53,12 +50,11 @@ beforeEach(() => {
    nav.pendingFrontierUndo.mockReturnValue(null)
    nav.frontierUndoSize.mockResolvedValue(0)
    nav.undoFrontierMove.mockReturnValue(true)
-   nav.isUnreadOnly.mockReturnValue(false)
    menus.setup({
       showError: vi.fn(),
       showSnackbar,
       hideSnackbar,
-      rerunPlaceholder: reReadReader,
+      rerunPlaceholder,
       showHomeList,
    })
 })
@@ -80,7 +76,7 @@ describe("offerFrontierUndo", () => {
       expect(nav.undoFrontierMove).toHaveBeenCalledWith(pending)
       expect(hideSnackbar).toHaveBeenCalled()
       expect(nav.bumpFrontierEpoch).toHaveBeenCalled() // the bulk move is announced (D1)
-      expect(reReadReader).toHaveBeenCalled() // and a placeholder re-resolves (S17)
+      expect(rerunPlaceholder).toHaveBeenCalled() // and a placeholder re-resolves (S17)
    })
 
    // The reader is multi-store, the snackbar lives 8s, and NOTHING takes it
@@ -101,7 +97,7 @@ describe("offerFrontierUndo", () => {
       expect(hideSnackbar).toHaveBeenCalled()
       // …and no surface was reconciled for a move that did not happen.
       expect(nav.bumpFrontierEpoch).not.toHaveBeenCalled()
-      expect(reReadReader).not.toHaveBeenCalled()
+      expect(rerunPlaceholder).not.toHaveBeenCalled()
    })
 })
 

@@ -695,6 +695,7 @@ describe("multi-store mnt/ms (§4.4)", () => {
    })
 
    it("importProfile merges an incoming peer mount + its substate", () => {
+      const before = model.profileMountsRev()
       const incoming = JSON.stringify({
          v: 2,
          ts: 0,
@@ -707,7 +708,7 @@ describe("multi-store mnt/ms (§4.4)", () => {
       expect(r.ok).toBe(true)
       expect(r.changed).toBe(true)
       expect(r.mountsChanged).toBe(true) // app.ts re-adopts the table on this
-      expect(model.profileMountsRev()).toBeGreaterThan(0) // …through the model now (S14)
+      expect(model.profileMountsRev()).toBe(before + 1) // …through the model (S14)
       const mounts = JSON.parse(localStorage.getItem("srr-mounts")!)
       expect(mounts.some((m: { id: string }) => m.id === "sP")).toBe(true)
       expect(JSON.parse(localStorage.getItem("srr-seen@sP")!)).toEqual({ "feed:3": 8 })
