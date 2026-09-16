@@ -58,6 +58,7 @@ describe("bit scans", () => {
       expect(popcountRange(plane, 0, 40)).toBe(4)
       expect(popcountRange(plane, 4, 39)).toBe(2)
       expect(popcountRange(plane, 18, 19)).toBe(1)
+      expect(popcountRange(plane, 18, 18)).toBe(0) // an empty range, even ON a set bit
    })
 
    it("reads past the plane's bytes as zeros", () => {

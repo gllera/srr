@@ -67,17 +67,31 @@ describe("model", () => {
       for (const b of [model.rendering, model.split, model.paneHidden, model.readerPainted]) expect(b()).toBe(false)
    })
 
-   it("cursor, laneTokens and syncStatus ignore structurally equal writes", () => {
+   it("cursor, laneTokens, syncStatus, seen and saved ignore structurally equal writes", () => {
       const runs = vi.fn()
-      const stop = effect(() => void runs(model.cursor(), model.laneTokens(), model.syncStatus()))
+      const stop = effect(
+         () => void runs(model.cursor(), model.laneTokens(), model.syncStatus(), model.seen(), model.saved()),
+      )
       model.cursor.set({ chron: -1, feedId: -1 })
       model.laneTokens.set([])
       model.syncStatus.set({ on: false, okAt: 0, error: "" })
+      model.seen.set({}) // a fresh object, content-equal to the default
+      model.saved.set([]) // a fresh array, content-equal to the default
       expect(runs).toHaveBeenCalledTimes(1)
       model.laneTokens.set(["news"])
       expect(runs).toHaveBeenCalledTimes(2)
+      model.seen.set({ "feed:1": 9 }) // a genuine change still gets through
+      expect(runs).toHaveBeenCalledTimes(3)
+      model.seen.set({ "feed:1": 9 }) // a fresh object, same content as just written
+      expect(runs).toHaveBeenCalledTimes(3)
+      model.saved.set([1, 2])
+      expect(runs).toHaveBeenCalledTimes(4)
+      model.saved.set([1, 2])
+      expect(runs).toHaveBeenCalledTimes(4)
       stop()
       model.laneTokens.set([])
+      model.seen.set({})
+      model.saved.set([])
    })
 
    it("every model write in the shipped app comes from the atom's owner", () => {

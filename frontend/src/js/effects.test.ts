@@ -191,6 +191,22 @@ describe("readerChrome (D3)", () => {
       expect(s.applyChrome).toHaveBeenLastCalledWith(PROBED, false)
    })
 
+   it("skips a redundant probe when layout() moves but chromeKey() lands back on what was just painted", async () => {
+      const s = fakes()
+      effects.registerEffects(s)
+      goLive()
+      await tick()
+      expect(s.probeChrome).toHaveBeenCalledTimes(1) // the initial probe+apply, which stamps paintedKey
+      s.probeChrome.mockClear()
+      // A pane hide/show moves layout()'s identity (the resource's deps function
+      // reads layout().readerLive, which subscribes to the WHOLE computed) without
+      // touching readerLive's value or any of chromeKey()'s nine tracked fields —
+      // exactly the shape the paintedKey/arrayEqual dedup exists to absorb.
+      model.paneHidden.set(true)
+      await tick()
+      expect(s.probeChrome).not.toHaveBeenCalled()
+   })
+
    it("drops a probe superseded by a newer input", async () => {
       const lands: Array<(o: IShowFeed) => void> = []
       const s = fakes()

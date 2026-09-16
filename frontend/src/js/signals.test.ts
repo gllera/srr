@@ -3,8 +3,10 @@ import {
    arrayEqual,
    batch,
    computed,
+   diffedForEffects,
    effect,
    MAX_FLUSH_ITERATIONS,
+   onChange,
    resource,
    shallowEqual,
    signal,
@@ -366,6 +368,73 @@ describe("resource (semantic 9)", () => {
       land(5)
       await tick()
       expect(r.value()).toBeUndefined()
+   })
+})
+
+describe("onChange / diffed (the shared prime-then-diff primitive)", () => {
+   it("onChange: the first run primes without firing, then fires on every real change", () => {
+      const s = signal(1)
+      const body = vi.fn()
+      onChange(s, body)
+      expect(body).not.toHaveBeenCalled() // priming, not a change
+      s.set(1) // equal write — signal's own equals no-ops before onChange sees it
+      expect(body).not.toHaveBeenCalled()
+      s.set(2)
+      expect(body).toHaveBeenCalledExactlyOnceWith(2, 1)
+   })
+
+   it("onChange: equals short-circuits a content-equal-but-reference-different value on the SECOND post-prime call", () => {
+      // The exact class of bug this session hit in test helpers: a fresh []/{}
+      // that is content-equal to the last one must not re-fire.
+      const s = signal<number[]>([1], () => false) // never equal at the signal level, forces onChange's own equals to do the work
+      const body = vi.fn()
+      onChange(s, body, arrayEqual)
+      s.set([2]) // first real change after priming
+      expect(body).toHaveBeenCalledTimes(1)
+      s.set([2]) // a NEW array, same contents as the last one onChange recorded
+      expect(body).toHaveBeenCalledTimes(1) // still 1 — arrayEqual caught it
+      s.set([3])
+      expect(body).toHaveBeenCalledTimes(2)
+   })
+
+   it("diffed: fireOnFirst runs the very first invocation with prev === null", () => {
+      const s = signal("a")
+      const seen: Array<[string, string | null]> = []
+      diffedForEffects(s, (now, prev) => seen.push([now, prev]), { fireOnFirst: true })
+      expect(seen).toEqual([["a", null]])
+      s.set("b")
+      expect(seen).toEqual([
+         ["a", null],
+         ["b", "a"],
+      ])
+   })
+
+   it("diffed: a skip gate true on the very first run defers priming until it clears", () => {
+      const s = signal(1)
+      let skip = true
+      const body = vi.fn()
+      diffedForEffects(s, body, { fireOnFirst: true, skip: () => skip })
+      expect(body).not.toHaveBeenCalled()
+      s.set(2) // still gated — must not prime on a value it never actually saw fire
+      expect(body).not.toHaveBeenCalled()
+      skip = false
+      s.set(3) // the write that flips the effect while skip is now false
+      expect(body).toHaveBeenCalledExactlyOnceWith(3, null) // its first real fire, still "first"
+   })
+
+   it("diffed: a change made WHILE the skip gate is true is not lost — it is compared against the correct stale value once the gate clears", () => {
+      const s = signal(1)
+      let skip = false
+      const body = vi.fn()
+      diffedForEffects(s, body, { fireOnFirst: true, skip: () => skip })
+      expect(body).toHaveBeenCalledExactlyOnceWith(1, null)
+      skip = true
+      s.set(2) // moves while gated — must not be swallowed nor treated as "unchanged" later
+      expect(body).toHaveBeenCalledTimes(1)
+      skip = false
+      s.set(3) // an effect only reruns on a WRITE, so unblocking alone doesn't refire it
+      expect(body).toHaveBeenCalledTimes(2)
+      expect(body).toHaveBeenLastCalledWith(3, 1) // prev is 1 (the last value it actually processed), not the missed 2
    })
 })
 

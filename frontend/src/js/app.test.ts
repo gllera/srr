@@ -2581,6 +2581,28 @@ describe("guard() — busy mutex", () => {
       // outstanding holds.
       expect(model.rendering()).toBe(false)
    })
+
+   it("guardBg() skips cleanly, touching nothing, while a LIVE (non-stale) guard() hold is in progress", async () => {
+      // The inverse of the reclaim above: acquire()'s held() check must return
+      // first for a hold that is merely in-flight, not stale — guardBg() has no
+      // business running its background work, or resetting rendering state it
+      // never held, just because something else currently holds the mutex.
+      await boot()
+      const model = await import("./model")
+      const guardBg = refresh.init.mock.calls[0][0] as (fn: () => Promise<void>) => Promise<boolean>
+
+      nav.fromHash.mockImplementationOnce(() => new Promise<never>(() => {}))
+      hashTo("#2")
+      await flush()
+      expect(model.rendering()).toBe(true)
+
+      const bgFn = vi.fn(async () => {})
+      const ran = await guardBg(bgFn) // well within BUSY_STUCK_MS — a live hold
+
+      expect(ran).toBe(false)
+      expect(bgFn).not.toHaveBeenCalled()
+      expect(model.rendering()).toBe(true) // untouched — not reset, still held by the live navigation
+   })
 })
 
 describe("reader edge — margin bell", () => {

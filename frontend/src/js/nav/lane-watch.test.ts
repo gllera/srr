@@ -92,6 +92,9 @@ describe("WatchLane — walk", () => {
       const l = lane("late")
       expect(await l.oldest()).toBe(50025) // region 0's bit 100 predates the rule
       expect(await l.older(50025)).toBe(-1)
+      // The floor excludes region 0 entirely — the walk must never even fetch
+      // it to discover that, not merely skip past its (irrelevant) bit 100.
+      expect(data.loadWatchPlane).not.toHaveBeenCalledWith(0)
    })
 
    it("walks nothing when nothing is covered, and loads nothing to prepare", async () => {
@@ -194,5 +197,29 @@ describe("WatchLane — matches, counts, entry, refresh", () => {
       expect(data.loadWatchPlane).toHaveBeenCalledWith(1)
       expect(data.loadWatchPlane).toHaveBeenCalledWith(3)
       expect(l.matches(2, 50050)).toBe(true) // now visible, reloaded by refreshed() itself
+   })
+
+   it("ensureRegion is a no-op below the floor or at/above wc", async () => {
+      const l = lane() // floor 15, wc 50040
+      await l.ensureRegion(10) // below the floor
+      await l.ensureRegion(50040) // == wc, not yet published
+      expect(data.loadWatchPlane).not.toHaveBeenCalled()
+      expect(l.matches(1, 10)).toBe(false)
+   })
+
+   it("ensureRegion faults in an in-range, unresident region exactly once", async () => {
+      const l = lane()
+      expect(l.matches(1, 20)).toBe(false) // region 0 not resident yet
+      await l.ensureRegion(20)
+      expect(data.loadWatchPlane).toHaveBeenCalledExactlyOnceWith(0)
+      expect(l.matches(1, 20)).toBe(true)
+   })
+
+   it("ensureRegion is a no-op when the chron's region is already resident", async () => {
+      const l = lane()
+      await l.atOrAbove(0) // faults in region 0
+      data.loadWatchPlane.mockClear()
+      await l.ensureRegion(20) // same region, still resident
+      expect(data.loadWatchPlane).not.toHaveBeenCalled()
    })
 })

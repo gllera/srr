@@ -1277,4 +1277,38 @@ describe("the Watch group (keyword-watchlist lanes)", () => {
       expect($(".srr-info-coverage").textContent).toBe("D1005 – D1009") // loadMeta(5).w, loadMeta(9).w
       expect($(".srr-info-unread").textContent).toBe("3")
    })
+
+   it("one rule's rejected count fetch leaves only its own row unbadged — the others still fill in", async () => {
+      data.watchRules.mockReturnValue({ hot: 5, cve: 3 })
+      nav.watchLaneCount.mockImplementation(async (rule: string) => {
+         if (rule === "cve") throw new Error("region failed to load")
+         return 3
+      })
+      const picker = await mount()
+      picker.open()
+      await flush()
+      const rows = $$<HTMLAnchorElement>(".srr-watch-group [data-value]")
+      const hot = rows.find((r) => r.dataset.value === "w:hot")!
+      const cve = rows.find((r) => r.dataset.value === "w:cve")!
+      expect(hot.querySelector(".srr-unread")!.textContent).toBe("×3")
+      expect(cve.querySelector(".srr-unread")).toBeNull() // the rejecting rule's row is simply left unbadged
+   })
+
+   it("a re-render supersedes a still-pending watch count fetch, so a stale badge never lands on the rebuilt rows", async () => {
+      data.watchRules.mockReturnValue({ hot: 5 })
+      let resolveStale!: (n: number) => void
+      nav.watchLaneCount.mockImplementation(() => new Promise<number>((res) => (resolveStale = res)))
+      const picker = await mount()
+      picker.open() // the first render's fetch never settles before the re-render below
+
+      nav.watchLaneCount.mockImplementation(async () => 7) // the rebuild's own fetch
+      picker.render() // e.g. the Show-read flip or a favorite mark, mid-fetch
+      await flush()
+      const row = $<HTMLAnchorElement>(".srr-watch-group [data-value='w:hot']")
+      expect(row.querySelector(".srr-unread")!.textContent).toBe("×7")
+
+      resolveStale(3) // the superseded pass's promise finally lands, late
+      await flush()
+      expect(row.querySelector(".srr-unread")!.textContent).toBe("×7") // unchanged, no stray/duplicate badge
+   })
 })
