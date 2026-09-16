@@ -3992,6 +3992,15 @@ describe("model mirror — seen and saved", () => {
       }
    })
 
+   it("another tab's write republishes the maps (the storage event)", () => {
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 4 }))
+      localStorage.setItem("srr-saved", JSON.stringify([7]))
+      window.dispatchEvent(new StorageEvent("storage", { key: "srr-seen" }))
+      window.dispatchEvent(new StorageEvent("storage", { key: "srr-saved" }))
+      expect(model.seen()).toEqual({ "feed:1": 4 })
+      expect(model.saved()).toEqual([7])
+   })
+
    // A throwing effect over the atom rethrows from the write that triggered the
    // flush (signals semantic 7). The owner's bookkeeping must be done by then.
    it("a frontier raise finishes its bookkeeping before a throwing effect can interrupt it", async () => {

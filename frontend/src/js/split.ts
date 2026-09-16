@@ -1,9 +1,11 @@
 // Split-view (two-pane desktop) breakpoint owner: ONE matchMedia subscription,
 // written to model.split — the layout record's input (layout.ts), whose effect
 // stamps `body.srr-split` for the CSS and for the dependency-free modules
-// (gestures.ts reads the class, never this module). isSplit() reads that class
-// back rather than caching a boolean, so every caller agrees with the CSS.
+// (gestures.ts reads the class, never this module). isSplit() reads the model,
+// so it agrees with every layout effect — including while printing, when the
+// class alone follows the page box.
 import * as model from "./model"
+import { untracked } from "./signals"
 
 const QUERY = "(min-width: 1000px)"
 
@@ -58,8 +60,11 @@ export function initSplit(): void {
    window.addEventListener("afterprint", () => model.printOverride.set(false))
 }
 
+// The split breakpoint as the model holds it, for callers outside an effect.
+// Untracked: a command's read must never subscribe an effect it happens to run
+// under. (gestures.ts reads body.srr-split instead — it imports nothing.)
 export function isSplit(): boolean {
-   return document.body.classList.contains("srr-split")
+   return untracked(() => model.split())
 }
 
 export function onSplitChange(fn: (on: boolean) => void): void {

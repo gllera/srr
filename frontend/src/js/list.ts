@@ -29,6 +29,17 @@ import { isSplit } from "./split"
 // undo machinery — still comes through nav.
 import { feedKey, markUnreadFrom as lowerFeedFrom, recordSeen as raiseFeedTo } from "./seen"
 
+// The device state as the model holds it: seen.ts/saved.ts publish every write
+// — this tab's and, through their storage listeners, every other tab's — so a
+// row pass never re-parses localStorage. Untracked: list code runs inside
+// effect surfaces.
+function seenNow(): Record<string, number> {
+   return untracked(() => model.seen()) as Record<string, number>
+}
+function savedNow(): Set<number> {
+   return new Set(untracked(() => model.saved()))
+}
+
 // The list surface — the app's home: a scannable feed of headlines under the
 // current filter, newest-first, source-keyed with read/unread weighting. Tapping a row
 // opens the reader (app wires that via setup's `open`). The list owns no nav
@@ -390,7 +401,7 @@ function swipeAction(row: HTMLElement, dir: -1 | 1): RowAction | null {
    if (frontierPeek()) return null
    const feed = Number(row.dataset.feed)
    if (!Number.isFinite(feed)) return null
-   const unread = nav.isRowUnread(chron, feed, nav.getSeenMap())
+   const unread = nav.isRowUnread(chron, feed, seenNow())
    return {
       kind: "read",
       icon: unread ? "✓" : "↺",
@@ -450,13 +461,13 @@ function endRowSwipe(row: HTMLElement, dir: -1 | 0 | 1): void {
    if (!act) return
    swipeClickGuard = true
    act.run()
-   // A frontier move reads across the row's whole feed and a save can drop the
-   // row, so re-derive the loaded window from live state instead of patching one
-   // row. Deliberately NOT a rebuild: under unread-only the membership has
-   // changed, but re-snapshotting it here would move the ground out from under a
-   // gesture aimed at a single row — so the swiped row greys in place, exactly as
-   // a row read in the reader does on the way back (show() → refresh()), and the
-   // membership re-derives on the next natural rebuild.
+   // Re-derive the loaded window from live state instead of patching one row: a
+   // frontier move reads across the row's whole feed and a save can drop the
+   // row. The listRows effect makes the same pass, but it is DEFERRED — while a
+   // command holds model.rendering (a landing in flight beside the pane) it
+   // waits — and a swipe owes its feedback now. Deliberately NOT a rebuild:
+   // under unread-only the membership has changed, but re-snapshotting it here
+   // would move the ground out from under a gesture aimed at a single row.
    refresh()
    // The pill, the badge and the other pane follow the frontier/saved write the
    // action made (model.seen / model.saved) — nothing to announce from here.
@@ -467,6 +478,8 @@ function endRowSwipe(row: HTMLElement, dir: -1 | 0 | 1): void {
 function toggleRowSave(a: HTMLElement): void {
    const chron = Number(a.dataset.chron)
    const nowSaved = nav.toggleSaved(chron)
+   // Painted here, not left to the deferred listRows effect: a ★ tap owes its
+   // feedback now, even while a command holds rendering.
    a.classList.toggle("srr-row-saved", nowSaved)
    a.querySelector(".srr-row-star")?.setAttribute("aria-pressed", String(nowSaved))
    if (nav.isSavedFilter() && !nowSaved) {
@@ -521,7 +534,7 @@ function markRowUnread(chron: number, feed: number): void {
    // Exact restore while this row's own mark-read swipe is still the last thing
    // that touched the feed's frontier — ON THE MOUNT IT WAS TAKEN ON (the mid
    // term is first because everything after it is only meaningful within one
-   // store: chrons and feed ids are per-mount, and getSeenMap() is the ACTIVE
+   // store: chrons and feed ids are per-mount, and seenNow() is the ACTIVE
    // mount's map). If anything moved it since (reading in the reader, another
    // swipe, a sync merge), replaying the snapshot would un-read articles that
    // have since been read — so the explicit rewind takes over.
@@ -530,7 +543,7 @@ function markRowUnread(chron: number, feed: number): void {
       u.mid === data.activeStore().mid &&
       u.chron === chron &&
       u.feed === feed &&
-      nav.getSeenMap()[feedKey(feed)] === chron
+      seenNow()[feedKey(feed)] === chron
    ) {
       if (nav.undoFrontierMove(u.undo)) return
    }
@@ -555,7 +568,7 @@ export function rowEl(
    seen: Record<string, number>,
    // One saved-set parse per BATCH, threaded by the render/page/refresh passes
    // (the default covers direct one-off callers, e.g. tests).
-   savedSet: Set<number> = nav.getSavedSet(),
+   savedSet: Set<number> = savedNow(),
 ): HTMLElement {
    const a = document.createElement("a")
    a.className = "srr-row"
@@ -1114,8 +1127,8 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    exhaustedTop = newer.exhausted || atNewestEnd(newest)
 
    const chronsDesc = newer.chrons.slice().reverse().concat(older.chrons) // newest-first
-   const seen = nav.getSeenMap()
-   const savedSet = nav.getSavedSet()
+   const seen = seenNow()
+   const savedSet = savedNow()
 
    const rows = chronsDesc.map((c) => rowEl(c, null, seen, savedSet)) // skeletons, in order
    mountRows(rows)
@@ -1282,8 +1295,8 @@ async function renderSearch(my: object, onInteractive?: () => void): Promise<voi
    exhaustedBottom = older.exhausted || atOldestEnd(oldest)
    exhaustedTop = true // nothing newer than the newest hit
 
-   const seen = nav.getSeenMap()
-   const savedSet = nav.getSavedSet()
+   const seen = seenNow()
+   const savedSet = savedNow()
    const rows = older.chrons.map((c) => rowEl(c, nav.searchCard(c) ?? null, seen, savedSet))
    mountRows(rows)
    sc.to(0)
@@ -1403,13 +1416,8 @@ export function followCursor(): void {
 // re-anchoring.
 export function refresh(): void {
    if (!rowsEl) return
-   // model.seen/model.saved already hold exactly what nav.getSeenMap()/
-   // getSavedSet() would re-parse from localStorage — seen.ts/saved.ts publish
-   // them on every write — so read the model instead of paying a
-   // localStorage.getItem + JSON.parse on every refresh() (untracked: this can
-   // run inside an effect's surface call, same as membershipKey() above).
-   const seen = untracked(() => model.seen())
-   const savedSet = new Set(untracked(() => model.saved()))
+   const seen = seenNow()
+   const savedSet = savedNow()
    const savedView = nav.isSavedFilter()
    const current = nav.currentChron()
    let removedAny = false
@@ -1573,8 +1581,8 @@ async function fetchOlder(my: object): Promise<void> {
          exhaustedBottom = true
          return
       }
-      const seen = nav.getSeenMap()
-      const savedSet = nav.getSavedSet()
+      const seen = seenNow()
+      const savedSet = savedNow()
       const arts = await Promise.all(chrons.map((c) => data.loadMeta(c)))
       if (my !== tok || !rowsEl) return
       // Commit the window cursor only after loadMeta resolves: a transient
@@ -1618,8 +1626,8 @@ async function fetchNewer(my: object): Promise<void> {
          exhaustedTop = true
          return
       }
-      const seen = nav.getSeenMap()
-      const savedSet = nav.getSavedSet()
+      const seen = seenNow()
+      const savedSet = savedNow()
       const arts = await Promise.all(chrons.map((c) => data.loadMeta(c)))
       if (my !== tok) return
       // Commit the cursor only after loadMeta resolves (see fetchOlder).

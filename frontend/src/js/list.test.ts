@@ -1267,11 +1267,13 @@ describe("list", () => {
       let readerLive = false
       beforeEach(() => {
          document.body.classList.add("srr-split")
+         model.split.set(true)
          readerLive = false
          list.setCursorOwner(() => readerLive)
       })
       afterEach(() => {
          document.body.classList.remove("srr-split")
+         model.split.set(false)
          list.setCursorOwner(() => false)
       })
 
@@ -2072,7 +2074,7 @@ describe("list", () => {
          // in the reader, a Mark-all-read, a sync merge — all write a high-water
          // that may be a foreign chron). The snapshot no longer describes the live
          // frontier, so replaying it would un-read what has been read since.
-         nav.getSeenMap()["feed:1"] = 7
+         nav._setSeen({ ...nav.getSeenMap(), "feed:1": 7 })
          swipe(row, READ)
          expect(nav.undoFrontierMove).not.toHaveBeenCalled()
          expect(seenMod.markUnreadFrom).toHaveBeenCalledTimes(1)

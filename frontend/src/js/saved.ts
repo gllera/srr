@@ -54,6 +54,11 @@ export function publishSaved(): void {
 // why).
 onChange(() => [model.activeMid(), model.profileRev()] as const, publishSaved)
 
+// Another tab saved or un-saved here: republish (see seen.ts).
+window.addEventListener("storage", (e) => {
+   if (e.key === null || e.key === savedK()) publishSaved()
+})
+
 // ★ Saved unsave-of-current anchor (the saved cousin of filter.anchor). Un-saving
 // the article on screen drops it from the queue but leaves it in the reader
 // (toggleSave is a state flip, not a navigation). Its save-index neighbors then

@@ -97,6 +97,13 @@ onChange(
    },
 )
 
+// Another tab wrote this store's seen map (the event fires in every OTHER tab;
+// a null key is a clear()): republish, so this tab's rows, badge and pill follow
+// — the list reads the model, never localStorage.
+window.addEventListener("storage", (e) => {
+   if (e.key === null || e.key === seenK()) publishSeen()
+})
+
 // The parsed seen map (feed key → last-viewed chronIdx) under its list-surface
 // name — one function, two exports, so the list's per-row read/unread dot and
 // nav's own reads are visibly the same map.
