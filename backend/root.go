@@ -278,6 +278,13 @@ func memoManifestFetch(storeTarget string, root []byte, fetch keyGetter) keyGett
 	}
 }
 
+// isFutureFormat is the one comparison behind errFutureFormat, so "too new"
+// has a single definition every caller shares rather than five independent
+// `v > dbFormatVersion` spellings.
+func isFutureFormat(v int) bool {
+	return v > dbFormatVersion
+}
+
 // errFutureFormat refuses a store document from the future — the one-way door
 // the format cutover documents, stated once for every gzip-JSON document that
 // carries a `v` (the root, each manifest, the config sidecar). This binary
@@ -312,7 +319,7 @@ func parseStoreRoot(data []byte, fetch keyGetter) (*DBCore, error) {
 	// Refuse a store from the future: this binary cannot represent fields it
 	// does not know, so opening it — even read-only, since any later Commit
 	// would write back the truncated state — is how skew silently loses data.
-	if root.Version > dbFormatVersion {
+	if isFutureFormat(root.Version) {
 		return nil, fmt.Errorf("%w — refusing to open; update srr", errFutureFormat(dbFileKey, root.Version))
 	}
 	if root.Version < dbFormatVersion {
@@ -354,7 +361,7 @@ func parseStoreRoot(data []byte, fetch keyGetter) (*DBCore, error) {
 	if man.Num != root.ManifestNum {
 		return nil, fmt.Errorf("%s declares generation %d but %s names %d", key, man.Num, dbFileKey, root.ManifestNum)
 	}
-	if man.Version > dbFormatVersion {
+	if isFutureFormat(man.Version) {
 		return nil, errFutureFormat(key, man.Version)
 	}
 	c := &DBCore{

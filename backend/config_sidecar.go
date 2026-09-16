@@ -220,7 +220,7 @@ func (o *DB) loadConfig(ctx context.Context) error {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return fmt.Errorf("decode %s: %w", configFileKey, err)
 	}
-	if c.Version > dbFormatVersion {
+	if isFutureFormat(c.Version) {
 		return errFutureFormat(configFileKey, c.Version)
 	}
 	o.core.StoreConfig = c.StoreConfig

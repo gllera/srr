@@ -33,14 +33,30 @@ import (
 //     resolves its own snapshot through exactly those objects, so a missing one
 //     is a reader that cannot boot.
 func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
+	// core came from root.go's loadStore/parseStoreRoot — the one root resolver
+	// the writer and every checker share — which reads db.gz + manifest/<m>.gz
+	// alone and never config.gz, so core.Watch is empty here even on a healthy
+	// store. The roster check needs the PATTERNS, so read the sidecar once here
+	// and hand its rule set over explicitly; the caller's core stays exactly what
+	// the manifest says. A sidecar this binary cannot trust — absent, unreadable,
+	// corrupt, or from a newer format (DB.loadConfig's own rule) — reports its
+	// own issue through checkConfigSidecar, and the roster↔pattern cross-check
+	// is skipped rather than fabricating one "no pattern" error per rule.
+	cfg, cfgErr := loadConfigSidecar(fetch)
+	patternsKnown := cfg != nil && !isFutureFormat(cfg.Version)
+	var patterns map[string]string
+	if patternsKnown {
+		patterns = cfg.Watch
+	}
+
 	if core.legacyRoot != nil {
 		fmt.Fprintf(o.w(), "[manifest] store is still on the pre-cutover root (v%d): the next locked session migrates it to v%d\n",
 			core.legacyRoot.Version, dbFormatVersion)
-		return o.checkConfigSidecar(fetch, core, false)
+		return o.checkConfigSidecar(cfg, cfgErr, core, false)
 	}
 	if core.ManifestNum == 0 {
 		fmt.Fprintln(o.w(), "[manifest] empty store: no manifest published yet")
-		return o.checkConfigSidecar(fetch, core, false)
+		return o.checkConfigSidecar(cfg, cfgErr, core, false)
 	}
 
 	key := manifestKey(core.ManifestNum)
@@ -114,7 +130,7 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 	names := man.Names
 	if names == nil {
 		bad("%s carries no names object", key)
-		return issues + o.checkConfigSidecar(fetch, core, true)
+		return issues + o.checkConfigSidecar(cfg, cfgErr, core, true)
 	}
 	seen := map[string]bool{}
 	// M3, stated once for everything that draws a stem. Positional entries and
@@ -195,7 +211,7 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 	if names.SSum != nil && names.SSum.Covers != core.metaPacks() {
 		bad("the meta bloom summary covers %d shard(s) but %d are listed", names.SSum.Covers, core.metaPacks())
 	}
-	o.checkWatchNames(bad, names, core)
+	o.checkWatchNames(bad, names, core, patterns, patternsKnown)
 
 	// (3) Existence of every singleton and every tail. Rm is silent on missing
 	// keys, so a name the manifest lists and the store does not hold is exactly
@@ -289,7 +305,7 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 			holes, core.ManifestNum-from, from-1, core.ManifestNum)
 	}
 
-	issues += o.checkConfigSidecar(fetch, core, true)
+	issues += o.checkConfigSidecar(cfg, cfgErr, core, true)
 	if issues == 0 {
 		fmt.Fprintf(o.w(), "[manifest] %s consistent: %d feed(s), %d object name(s) probed, %d generation(s) in the grace window\n",
 			key, len(man.Feeds), len(probe), core.ManifestNum-from+1)
@@ -307,7 +323,11 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 // A roster that claims coverage the name list cannot address is a lane that
 // reads as empty — silently, since a missing bit and a missing object both look
 // like "no match" to a consumer that does not check.
-func (o *InspectCmd) checkWatchNames(bad func(string, ...any), names *ManifestNames, core *DBCore) {
+// patterns is config.gz's rule set and known says whether it could be trusted
+// at all. Without it the roster's positions are still checked; only the
+// roster↔patterns cross-check needs the sidecar, and checkConfigSidecar already
+// reports why it is missing.
+func (o *InspectCmd) checkWatchNames(bad func(string, ...any), names *ManifestNames, core *DBCore, patterns map[string]string, known bool) {
 	s := names.Series[watchSeries]
 	if len(core.WatchFrom) == 0 {
 		// No rules ⇒ no roster, no coverage, no series row (resetWatch). A row
@@ -331,7 +351,7 @@ func (o *InspectCmd) checkWatchNames(bad func(string, ...any), names *ManifestNa
 			bad("watch rule %q starts at chron %d, outside [0, %d]", name, f, core.TotalArticles)
 			continue
 		}
-		if _, ok := core.Watch[name]; !ok {
+		if _, ok := patterns[name]; known && !ok {
 			// The roster and the patterns are two objects written by one Commit
 			// (§6.4), so a crash between them can leave a lane with no rule. It
 			// self-heals at the next SyncWatch; until then the lane is published
@@ -370,8 +390,12 @@ func (o *InspectCmd) checkWatchNames(bad func(string, ...any), names *ManifestNa
 // the v2 root always has, and its absence is then a real gap; a store still on
 // the pre-cutover root legitimately has none (absence means "all defaults",
 // which is exactly how the store behaves without it).
-func (o *InspectCmd) checkConfigSidecar(fetch keyGetter, core *DBCore, expected bool) int {
-	got, err := loadConfigSidecar(fetch)
+//
+// `got`/`err` are the result of loadConfigSidecar(fetch), read once at the top
+// of checkManifest (whose roster check needs the same rule set), so this
+// function only reports on it. An absent sidecar arrives as an error, exactly
+// like a corrupt one: both are "missing or corrupt" when one is expected.
+func (o *InspectCmd) checkConfigSidecar(got *configSidecar, err error, core *DBCore, expected bool) int {
 	if err != nil || got == nil {
 		if !expected {
 			fmt.Fprintln(o.w(), "[manifest] no config.gz (legal: absence means all-default configuration)")
@@ -380,7 +404,7 @@ func (o *InspectCmd) checkConfigSidecar(fetch keyGetter, core *DBCore, expected 
 		fmt.Fprintf(o.w(), "[manifest] %s missing or corrupt: %v\n", configFileKey, err)
 		return 1
 	}
-	if got.Version > dbFormatVersion {
+	if isFutureFormat(got.Version) {
 		fmt.Fprintf(o.w(), "[manifest] %s: v=%d, newer than this binary understands (v%d)\n",
 			configFileKey, got.Version, dbFormatVersion)
 		return 1

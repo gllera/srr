@@ -2,10 +2,13 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -843,7 +846,7 @@ func TestCheckWatchNames(t *testing.T) {
 		var got []string
 		(&InspectCmd{}).checkWatchNames(func(format string, args ...any) {
 			got = append(got, fmt.Sprintf(format, args...))
-		}, c.Names, c)
+		}, c.Names, c, c.Watch, true)
 		return got
 	}
 
@@ -980,5 +983,182 @@ func TestWatchRosterAdoptedOnIdleCycle(t *testing.T) {
 	}
 	if db.core.WatchCovered != db.core.TotalArticles {
 		t.Errorf("WatchCovered = %d, want %d", db.core.WatchCovered, db.core.TotalArticles)
+	}
+}
+
+// TestInspectValidateCLIPathReadsConfigSidecar exercises the ACTUAL CLI entry
+// point — InspectCmd.Run(), through openFetcher's real NewDB(ctx, false) →
+// loadCore → root.go's loadStore/parseStoreRoot reconstruction — rather than
+// calling checkWatchNames/checkManifest directly against an already-open
+// *DB's core (what TestCheckWatchNames above does). That distinction is the
+// whole bug: parseStoreRoot builds a brand-new DBCore straight from db.gz +
+// manifest/<m>.gz and never touches config.gz, so a *DB already holding a
+// correctly-loaded core.Watch is not proof this path does too. Before the fix,
+// `srr inspect --validate` reported "config.gz carries no pattern" for every
+// rule on every real store, because core.Watch was always empty on exactly
+// this path.
+func TestInspectValidateCLIPathReadsConfigSidecar(t *testing.T) {
+	defer withWatchPackSize(t, 8)()
+	db, _, _ := setupTestDB(t)
+	f := watchFeed(t, db, "F", "http://f")
+	watchSet(t, db, "hot", "title=/hot/i")
+	watchPut(t, db, f, "hot one", "cold", "hot two")
+
+	var buf bytes.Buffer
+	if err := (&InspectCmd{Chron: -1, Validate: true, out: &buf}).Run(); err != nil {
+		t.Fatalf("inspect --validate through the real CLI path failed: %v\n%s", err, buf.String())
+	}
+	if strings.Contains(buf.String(), "carries no pattern") {
+		t.Fatalf("checkWatchNames read an empty core.Watch on the CLI path: %s", buf.String())
+	}
+}
+
+// TestCheckManifestSkipsWatchOnFutureConfigSidecar pins the fix for the bug
+// where checkManifest merged config.gz's StoreConfig (and therefore core.Watch)
+// into core BEFORE checking whether this binary's format even understands it.
+// checkConfigSidecar's own version guard (config_sidecar.go's convention,
+// mirrored from DB.loadConfig) does not run until AFTER checkWatchNames had
+// already consumed the merged data — so an older binary inspecting a store
+// whose config.gz was written by a newer, incompatible-format binary reported
+// bogus per-rule watch drift ("config.gz carries no pattern for it") sourced
+// from a document it should never have read, instead of just reporting the
+// sidecar's own future-format issue.
+func TestCheckManifestSkipsWatchOnFutureConfigSidecar(t *testing.T) {
+	defer withWatchPackSize(t, 8)()
+
+	db, _, dir := setupTestDB(t)
+	f := watchFeed(t, db, "F", "https://f.example/x")
+	watchSet(t, db, "hit", "title=/hit/")
+	watchPut(t, db, f, "hit a", "miss", "hit b")
+
+	// Overwrite config.gz with a sidecar stamped one version past what this
+	// binary understands — the shape `DB.loadConfig` refuses outright — but
+	// with the "hit" pattern REMOVED, exactly what would make checkWatchNames
+	// fabricate "config.gz carries no pattern for it" if the merge ran anyway.
+	future := configSidecar{
+		Version: dbFormatVersion + 1,
+		StoreConfig: StoreConfig{Recipes: map[string]Recipe{
+			defaultRecipeName: {Pipe: defaultRootPipe()},
+		}},
+	}
+	body, err := gzipJSON(future)
+	if err != nil {
+		t.Fatalf("gzipJSON: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, configFileKey), body, 0o644); err != nil {
+		t.Fatalf("overwrite %s: %v", configFileKey, err)
+	}
+
+	fetch := func(key string) ([]byte, error) {
+		raw, err := os.ReadFile(filepath.Join(dir, key))
+		if err != nil {
+			return nil, err
+		}
+		return gunzip(bytes.NewReader(raw))
+	}
+
+	core, err := loadCore(fetch)
+	if err != nil {
+		t.Fatalf("loadCore: %v", err)
+	}
+	var buf bytes.Buffer
+	issues := (&InspectCmd{out: &buf}).checkManifest(fetch, core)
+	out := buf.String()
+
+	if issues == 0 {
+		t.Fatal("checkManifest reported 0 issues against a future-format config.gz")
+	}
+	if !strings.Contains(out, "newer than this binary understands") {
+		t.Errorf("output does not report the future-format sidecar: %s", out)
+	}
+	if strings.Contains(out, "carries no pattern") {
+		t.Errorf("checkWatchNames ran against an unmerged/incompatible sidecar and fabricated a watch error: %s", out)
+	}
+}
+
+// TestCheckManifestCorruptConfigSidecarReportsOnce: a config.gz that will not
+// parse is ONE issue — the sidecar's own — not one fabricated "no pattern"
+// error per watch rule.
+func TestCheckManifestCorruptConfigSidecarReportsOnce(t *testing.T) {
+	defer withWatchPackSize(t, 8)()
+	db, _, dir := setupTestDB(t)
+	f := watchFeed(t, db, "F", "https://f.example/x")
+	watchSet(t, db, "hit", "title=/hit/")
+	watchSet(t, db, "two", "title=/two/")
+	watchPut(t, db, f, "hit a", "miss", "two b")
+
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	if _, err := zw.Write([]byte("{not json")); err != nil {
+		t.Fatalf("gzip: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("gzip: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, configFileKey), gz.Bytes(), 0o644); err != nil {
+		t.Fatalf("overwrite %s: %v", configFileKey, err)
+	}
+	fetch := func(key string) ([]byte, error) {
+		raw, err := os.ReadFile(filepath.Join(dir, key))
+		if err != nil {
+			return nil, err
+		}
+		return gunzip(bytes.NewReader(raw))
+	}
+	core, err := loadCore(fetch)
+	if err != nil {
+		t.Fatalf("loadCore: %v", err)
+	}
+
+	var buf bytes.Buffer
+	issues := (&InspectCmd{out: &buf}).checkManifest(fetch, core)
+	out := buf.String()
+	if issues != 1 {
+		t.Fatalf("issues = %d, want 1 (the sidecar's own):\n%s", issues, out)
+	}
+	if !strings.Contains(out, "missing or corrupt") {
+		t.Errorf("output does not report the corrupt sidecar: %s", out)
+	}
+	if strings.Contains(out, "carries no pattern") {
+		t.Errorf("the roster check fabricated a per-rule error: %s", out)
+	}
+}
+
+// TestCheckManifestLeavesCoreConfigUntouched: the roster check reads config.gz's
+// patterns into a local, never into the caller's core — core is what the
+// manifest says, and a later check (or a caller reusing it) must not see a
+// sidecar merged in behind its back.
+func TestCheckManifestLeavesCoreConfigUntouched(t *testing.T) {
+	defer withWatchPackSize(t, 8)()
+	db, _, dir := setupTestDB(t)
+	f := watchFeed(t, db, "F", "https://f.example/x")
+	watchSet(t, db, "hit", "title=/hit/")
+	watchPut(t, db, f, "hit a", "miss", "hit b")
+	fetch := func(key string) ([]byte, error) {
+		raw, err := os.ReadFile(filepath.Join(dir, key))
+		if err != nil {
+			return nil, err
+		}
+		return gunzip(bytes.NewReader(raw))
+	}
+	core, err := loadCore(fetch)
+	if err != nil {
+		t.Fatalf("loadCore: %v", err)
+	}
+	before, err := json.Marshal(core.StoreConfig)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if issues := (&InspectCmd{out: &buf}).checkManifest(fetch, core); issues != 0 {
+		t.Fatalf("checkManifest reported %d issue(s) on a healthy store:\n%s", issues, buf.String())
+	}
+	after, err := json.Marshal(core.StoreConfig)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("checkManifest rewrote the caller's StoreConfig:\nbefore %s\nafter  %s", before, after)
 	}
 }
