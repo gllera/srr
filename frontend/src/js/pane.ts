@@ -222,7 +222,7 @@ let pendingW = 0
 // same stale 380 so the width could never accumulate. storedPaneW is the
 // fallback for the one moment the property is genuinely absent — before
 // restorePane's first write, or under a stylesheet that has never seen it.
-function appliedPaneW(): number {
+export function appliedPaneW(): number {
    const raw = parseFloat(document.documentElement.style.getPropertyValue("--split-pane-open-w"))
    return Number.isFinite(raw) && raw > 0 ? raw : storedPaneW()
 }

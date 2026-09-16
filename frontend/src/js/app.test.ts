@@ -1357,6 +1357,63 @@ describe("split view (body.srr-split)", () => {
          expect(nav.last).not.toHaveBeenCalled()
       })
 
+      // Browser back/forward onto ANOTHER lane's list entry is the same pick made
+      // by history instead of the picker: the pane follows it the same way.
+      it("a list hash reached by history lands the pane like a pick, keeping the list surface", async () => {
+         await withArticleOpen()
+         nav.listAnchor.mockResolvedValue(40)
+         nav.tokensSuffix.mockReturnValue("!sport")
+         nav.goTo.mockClear()
+         hashTo("#!sport")
+         await flush()
+         expect(nav.goTo).toHaveBeenCalledWith(40, { record: false, replace: true })
+         expect(document.body.classList.contains("srr-view-list")).toBe(true)
+         const replaced = (history.replaceState as unknown as { mock: { calls: unknown[][] } }).mock.calls
+         expect(replaced[replaced.length - 1][2]).toBe("#!sport")
+      })
+
+      // Back onto the SAME lane's list entry is Escape made by history: route()
+      // re-applies that lane (under unread-only its bounds now sit past the
+      // article just read), but the pane keeps its article, exactly as Escape does.
+      it("a list hash for the lane already applied never re-lands the pane", async () => {
+         await withArticleOpen() // on #!news
+         nav.listAnchor.mockResolvedValue(21) // the re-applied lane no longer holds 20
+         nav.goTo.mockClear()
+         nav.last.mockClear()
+         hashTo("#!news")
+         await flush()
+         expect(nav.goTo).not.toHaveBeenCalled()
+         expect(nav.last).not.toHaveBeenCalled()
+      })
+
+      // A history step onto ANOTHER STORE's list: the pane's article belongs to the
+      // store left behind, so even an anchor with the same chron number is a
+      // landing — exactly as selectFilter's peer pick treats it.
+      it("a list hash of another store lands the pane even on the same chron number", async () => {
+         await withArticleOpen() // chron 20 of store "0"
+         nav.listAnchor.mockResolvedValue(20) // s7's anchor happens to be chron 20 too
+         data.setActive.mockImplementationOnce((m: string) => {
+            M?.activeMid.set(m)
+            seedCursor(-1) // what nav.ts's store-switch handler does
+            return true
+         })
+         nav.goTo.mockClear()
+         hashTo("#!@s7:")
+         await flush()
+         expect(nav.goTo).toHaveBeenCalledWith(20, { record: false, replace: true })
+      })
+
+      it("a list hash reached by history whose lane still holds the article leaves the pane alone", async () => {
+         await withArticleOpen()
+         nav.listAnchor.mockResolvedValue(20)
+         nav.goTo.mockClear()
+         nav.last.mockClear()
+         hashTo("#!sport")
+         await flush()
+         expect(nav.goTo).not.toHaveBeenCalled()
+         expect(nav.last).not.toHaveBeenCalled()
+      })
+
       it("falls back to the newest when the new lane has no anchor — still unrecorded", async () => {
          await withArticleOpen()
          nav.listAnchor.mockResolvedValue(-1)
@@ -3217,6 +3274,7 @@ describe("filter picker — the toolbar's filter button (both surfaces)", () => 
 
    it("onToggleShowRead over a reader PLACEHOLDER (currentChron < 0) re-runs the switch, not a no-op reprobe", async () => {
       await boot()
+      nav.fromHash.mockResolvedValue({ ...showFeed(), placeholder: true }) // both of hashTo's routes
       hashTo("#2")
       await flush()
       seedCursor(-1) // reader shows a "Not started"/"caught up" placeholder
@@ -3235,6 +3293,7 @@ describe("filter picker — the toolbar's filter button (both surfaces)", () => 
 
    it("onToggleShowRead over a MULTI-token reader placeholder does not teleport to [ALL]", async () => {
       await boot()
+      nav.fromHash.mockResolvedValue({ ...showFeed(), placeholder: true }) // both of hashTo's routes
       hashTo("#2")
       await flush()
       seedCursor(-1) // placeholder
@@ -3248,6 +3307,48 @@ describe("filter picker — the toolbar's filter button (both surfaces)", () => 
       // switchFilter("") would re-filter to [ALL] and teleport the reader off
       // feeds 5+9 — the multi-token placeholder must be left untouched instead.
       expect(nav.switchFilter).not.toHaveBeenCalled()
+   })
+
+   // Under split the list pane claims the cursor beside a placeholder (nothing
+   // live holds it), so "is the cursor set" no longer says whether the READER
+   // shows an article.
+   it("onToggleShowRead over a split reader PLACEHOLDER re-runs the switch after the list claimed the cursor", async () => {
+      await boot()
+      await setSplit(true)
+      try {
+         nav.fromHash.mockResolvedValue({ ...showFeed(), placeholder: true }) // both of hashTo's routes
+         hashTo("#2")
+         await flush()
+         seedCursor(9) // the list pane's rebuild seeded its anchor row
+         nav.getCurrentFilterKey.mockReturnValue("7")
+         seedUnreadOnly(true)
+         nav.switchFilter.mockClear()
+         pickerHooks()!.onToggleShowRead()
+         await flush()
+         expect(nav.switchFilter).toHaveBeenCalledWith("7")
+      } finally {
+         nav.getCurrentFilterKey.mockReturnValue("")
+         document.body.classList.remove("srr-split") // initSplit reads it back on the next boot
+      }
+   })
+
+   it("onToggleShowRead leaves a split reader's real article to the chrome effect", async () => {
+      await boot()
+      await setSplit(true)
+      try {
+         nav.fromHash.mockImplementation(async () => {
+            seedCursor(2)
+            return showFeed()
+         })
+         hashTo("#2")
+         await flush()
+         nav.switchFilter.mockClear()
+         pickerHooks()!.onToggleShowRead()
+         await flush()
+         expect(nav.switchFilter).not.toHaveBeenCalled()
+      } finally {
+         document.body.classList.remove("srr-split")
+      }
    })
 })
 
@@ -4743,6 +4844,51 @@ describe("guard() — the landing key", () => {
          expect(nav.probeCurrent).not.toHaveBeenCalled() // the render painted exactly these inputs
       } finally {
          document.body.classList.remove("srr-split") // initSplit reads it back on the next boot
+      }
+   })
+})
+
+// A hidden pane stays laid out at its real width (visibility, not display:none),
+// so hiding or showing it moves nothing the list measured: its rows, their
+// pinned heights and its scroll are all still right.
+describe("the pane's hide/show re-lays out only what moved", () => {
+   const pressL = () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "l", bubbles: true }))
+   afterEach(() => document.documentElement.style.removeProperty("--split-pane-open-w"))
+
+   it("L hides and shows the pane without rebuilding the list", async () => {
+      stubBreakpoint(true)
+      try {
+         await boot()
+         list.show.mockClear()
+         list.invalidate.mockClear()
+         pressL()
+         await flush()
+         expect(document.body.classList.contains("srr-pane-hidden")).toBe(true)
+         pressL()
+         await flush()
+         expect(document.body.classList.contains("srr-pane-hidden")).toBe(false)
+         expect(list.invalidate).not.toHaveBeenCalled()
+         expect(list.show).not.toHaveBeenCalled()
+      } finally {
+         crossSplit(false)
+         vi.unstubAllGlobals()
+      }
+   })
+
+   it("still re-lays the list out once the pane's width differs from what it was built at", async () => {
+      stubBreakpoint(true)
+      try {
+         await boot()
+         list.show.mockClear()
+         list.invalidate.mockClear()
+         document.documentElement.style.setProperty("--split-pane-open-w", "500px") // rows re-wrap at 500
+         pressL()
+         await flush()
+         expect(list.invalidate).toHaveBeenCalledTimes(1)
+         expect(list.show).toHaveBeenCalledTimes(1)
+      } finally {
+         crossSplit(false)
+         vi.unstubAllGlobals()
       }
    })
 })

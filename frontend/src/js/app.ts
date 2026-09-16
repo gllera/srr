@@ -23,7 +23,7 @@ import * as model from "./model"
 import * as nav from "./nav"
 import * as pager from "./pager"
 import { initLayout, layout } from "./layout"
-import { initPane, togglePane } from "./pane"
+import { appliedPaneW, initPane, togglePane } from "./pane"
 import * as picker from "./picker"
 import * as pinUI from "./pin-ui"
 import * as player from "./player"
@@ -33,7 +33,7 @@ import { ensureSchema } from "./schema"
 import { elementScroller, windowScroller } from "./scroller"
 import * as searchUI from "./search-ui"
 import { initSplit, isSplit, onSplitChange } from "./split"
-import { effect, onChange } from "./signals"
+import { arrayEqual, effect, onChange } from "./signals"
 import { lsSet } from "./storage"
 import * as sync from "./sync"
 
@@ -324,8 +324,10 @@ async function laneChange(fn: () => Promise<IShowFeed>): Promise<void> {
 
 // Re-resolve a reader PLACEHOLDER after its lane's bounds or mode shifted (a
 // frontier gesture, a Show-read flip). A real article needs nothing here — the
-// readerChrome effect re-derives its arrows and pill. A placeholder (pos < 0)
-// has no article to probe, so the lane switch runs again, but ONLY for a
+// readerChrome effect re-derives its arrows and pill. A placeholder has no
+// article to probe — and the question is what the READER shows, not whether the
+// cursor is set: under split the list pane claims the cursor beside a
+// placeholder — so the lane switch runs again, but ONLY for a
 // single-token/[ALL] filter: getCurrentFilterKey() collapses a multi-token
 // (URL-only, e.g. #!5+9) filter to "", which switchFilter("") would misread as
 // [ALL] and teleport the reader off its lane. A command, never an effect (S17).
@@ -336,7 +338,7 @@ function rerunPlaceholder() {
    // stale — a next-count that no longer matched the lane, arrows armed against
    // bounds that had moved.
    if (!layout().readerSteppable) return
-   if (nav.currentChron() >= 0) return
+   if (reader.hasArticle()) return
    if (nav.isFilterActive() && nav.filterTokens().length > 1) return
    void guard(() => nav.switchFilter(nav.getCurrentFilterKey()))
 }
@@ -466,7 +468,18 @@ async function renderListSurface() {
 // in what they have already established (the `L` key is gated on isSplit before
 // it gets here, initPane's onSettle is not), and that difference is exactly what
 // a hand-copied version quietly loses.
+//
+// It re-lays out only when the list's geometry actually moved: the breakpoint or
+// the pane's width. A pure hide/show keeps both — a hidden pane stays laid out
+// at its real width, which is the whole point of hiding it with visibility
+// rather than display:none — so rebuilding there threw away the very scroll
+// position that design exists to keep.
+let laidOutFor = ""
+const paneGeometry = (): string => `${isSplit()}:${appliedPaneW()}`
 function relayoutPane(): void {
+   const geometry = paneGeometry()
+   if (geometry === laidOutFor) return
+   laidOutFor = geometry
    list.invalidate()
    if (layout().focus === "reader") {
       // followCursor rebuilds the PANE beside the article; off split there is no
@@ -548,6 +561,11 @@ async function route(hash: string) {
    // nav.fromHash's reader path. setActive fails softly for an unmounted/errored
    // mount, resolving against the current lane rather than blanking (MS4).
    const { mid, tokens } = nav.parseHashMount(nav.parseHashTokens(hash))
+   // Read before the store and lane writes, exactly as selectFilter reads them.
+   const paneLive = layout().readerLive
+   const beforeChron = nav.currentChron()
+   const beforeMid = data.activeStore().mid
+   const beforeLane = model.laneTokens()
    // Held across the store + lane writes until renderListSurface takes its own
    // hold (synchronously, before its first await) — S16.
    let listed: Promise<void>
@@ -563,6 +581,17 @@ async function route(hash: string) {
       endRendering(hold)
    }
    await listed
+   // A history step onto ANOTHER lane's list entry is that lane's pick made by
+   // the browser: under split the live pane follows it the same way. Back onto
+   // the lane already applied is Escape made by the browser, and keeps the pane's
+   // article like Escape does — even though re-applying the lane under
+   // unread-only has raised its bounds past the article just read.
+   // Onto another STORE, the pane's article belongs to the store left behind, so
+   // any anchor is a landing — selectFilter's peer pick reads the cursor after
+   // the switch cleared it, to the same effect.
+   const storeMoved = mid !== beforeMid
+   const laneMoved = storeMoved || !arrayEqual(beforeLane, model.laneTokens())
+   if (laneMoved) await landPaneOnListLane(paneLive, storeMoved ? -1 : beforeChron)
 }
 
 // Return to the list from the reader (back button / two-finger cycle / filter
@@ -605,50 +634,55 @@ async function selectTokens(tokens: string[], paneLive = layout().readerLive) {
       endRendering(hold)
    }
    await listed
-   // Split view (paneLive — read when the command started): the reader pane never left, so the article on screen may not
-   // belong to the lane just picked — and the still-live toolbar arrows would
-   // then step from a position nothing on screen names. Ask the SAME question
-   // the list just asked (nav.listAnchor: the live article while it still
-   // matches, else the lane's oldest unread, else -1 = newest) and land the pane
-   // on that answer, so both panes name one article. An unchanged answer means
-   // the article is still a member: no re-render, no scroll back to its top.
-   //
-   // record: FALSE. A mere lane switch must not consume an unread article —
-   // nav.switchFilter passes record = false at every one of its landings for
-   // exactly that reason, and the READER-surface path through the picker IS
-   // switchFilter, so recording here would make one pick mean two different
-   // things depending on which surface had focus. On the phone none of this
-   // runs: the reader is hidden and re-derives on its next open. A pane that is
-   // RESTING is left resting — the restingPane effect repaints its panel for the new lane; a
-   // pick is not a reason to start reading something.
-   //
-   // SEARCH is exempt, and not as a special case: a query is a LIST presentation
-   // mode (nav.listAnchor answers -1 = newest-first for it, which is a statement
-   // about row order, not a landing), and it is typed WHILE reading. Following it
-   // would yank the pane onto the newest hit at every keystroke — and onto the
-   // no-match placeholder the moment the bar opens empty.
-   if (paneLive && !nav.isSearchFilter()) {
-      const anchor = await nav.listAnchor()
-      // replace, not push: goToList already pushed this filter change, and a
-      // second entry would make the first browser-back a visual no-op.
-      // beforeChron < 0 with a live pane means a store switch cleared the cursor
-      // (selectFilter's peer pick): the pane's article belongs to the store just
-      // left, so even a newest (-1) answer is a landing.
-      if (anchor !== beforeChron || beforeChron < 0) {
-         await guard(() => (anchor < 0 ? nav.last(RESUME) : nav.goTo(anchor, RESUME)))
-         // The follow-up is the PANE catching up with a pick made on the list —
-         // it must not be mistaken for going to the reader. Two things do
-         // mistake it: guard()'s render path calls showReader(), and the landing
-         // rewrites the `#!tokens` entry goToList just pushed into a reader
-         // `#pos!tokens`. Left alone, picking a lane from the list moved focus
-         // into the article and made a reload open it, against both this
-         // surface's contract ("you land back on the headlines under the new
-         // lane") and the resting pane's. Put both back — showList() is
-         // idempotent and keeps the pane's article on screen.
-         showList()
-         commitListHash(false)
-      }
-   }
+   await landPaneOnListLane(paneLive, beforeChron)
+}
+
+// The follow-up of a lane change made on the LIST — a pick (selectTokens) or a
+// history step onto another lane's list entry (route()).
+//
+// Split view (paneLive — read when the command started): the reader pane never
+// left, so the article on screen may not belong to the lane just applied — and
+// the still-live toolbar arrows would then step from a position nothing on
+// screen names. Ask the SAME question the list just asked (nav.listAnchor: the
+// live article while it still matches, else the lane's oldest unread, else -1 =
+// newest) and land the pane on that answer, so both panes name one article. An
+// unchanged answer means the article is still a member: no re-render, no scroll
+// back to its top.
+//
+// record: FALSE. A mere lane switch must not consume an unread article —
+// nav.switchFilter passes record = false at every one of its landings for
+// exactly that reason, and the READER-surface path through the picker IS
+// switchFilter, so recording here would make one pick mean two different things
+// depending on which surface had focus. On the phone none of this runs: the
+// reader is hidden and re-derives on its next open. A pane that is RESTING is
+// left resting — the restingPane effect repaints its panel for the new lane; a
+// pick is not a reason to start reading something.
+//
+// SEARCH is exempt, and not as a special case: a query is a LIST presentation
+// mode (nav.listAnchor answers -1 = newest-first for it, which is a statement
+// about row order, not a landing), and it is typed WHILE reading. Following it
+// would yank the pane onto the newest hit at every keystroke — and onto the
+// no-match placeholder the moment the bar opens empty.
+async function landPaneOnListLane(paneLive: boolean, beforeChron: number): Promise<void> {
+   if (!paneLive || nav.isSearchFilter()) return
+   const anchor = await nav.listAnchor()
+   // beforeChron < 0 with a live pane means a store switch cleared the cursor
+   // (selectFilter's peer pick): the pane's article belongs to the store just
+   // left, so even a newest (-1) answer is a landing.
+   if (anchor === beforeChron && beforeChron >= 0) return
+   // replace, not push: the list command already wrote this filter's entry, and
+   // a second would make the first browser-back a visual no-op.
+   await guard(() => (anchor < 0 ? nav.last(RESUME) : nav.goTo(anchor, RESUME)))
+   // The follow-up is the PANE catching up with a lane change made on the list —
+   // it must not be mistaken for going to the reader. Two things do mistake it:
+   // guard()'s render path calls showReader(), and the landing rewrites the
+   // `#!tokens` entry into a reader `#pos!tokens`. Left alone, picking a lane
+   // from the list moved focus into the article and made a reload open it,
+   // against both this surface's contract ("you land back on the headlines under
+   // the new lane") and the resting pane's. Put both back — showList() is
+   // idempotent and keeps the pane's article on screen.
+   showList()
+   commitListHash(false)
 }
 
 async function selectFilter(token: string) {
@@ -866,6 +900,8 @@ async function init() {
    // button, which pane.ts wires and keeps labelled. Every committed change ends
    // in the shared re-layout tail above.
    initPane({ onSettle: relayoutPane })
+   // The first route builds the list at the geometry initPane just restored.
+   laidOutFor = paneGeometry()
    // A breakpoint crossing. The classes, both hosts, the scroller, the resting
    // pane and the cursor re-seat (above) have all re-derived by the time this
    // runs — split.ts writes the model before notifying. What is left is command
