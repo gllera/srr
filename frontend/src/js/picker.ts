@@ -112,14 +112,12 @@ export function setup(el: HTMLElement, h: PickerHooks): void {
    hooks = h
    filterBox = el.querySelector(".srr-picker-filter") as HTMLElement
    ;(el.querySelector(".srr-picker-close") as HTMLElement).addEventListener("click", () => hooks.onClose())
-   // The "Show read" toggle: flip the mode via app.ts (which reconciles the
-   // surface underneath), then re-render our own rows for the new mode. The
-   // overlay stays open — you keep browsing feeds after flipping.
+   // The "Show read" toggle: flip the mode via app.ts. The rows re-render for
+   // the new mode through the pickerRows effect (model.unreadOnly moved); a second
+   // render here would restart fillUnread and drop every badge that had landed.
+   // The overlay stays open — you keep browsing feeds after flipping.
    showReadBtn = el.querySelector(".srr-picker-showread") as HTMLElement
-   showReadBtn.addEventListener("click", () => {
-      hooks.onToggleShowRead()
-      render()
-   })
+   showReadBtn.addEventListener("click", () => hooks.onToggleShowRead())
    statsBtn = el.querySelector(".srr-picker-info") as HTMLElement
    statsBtn.addEventListener("click", () => setRowMode(rowMode === "info" ? "pick" : "info"))
    favBtn = el.querySelector(".srr-picker-fav") as HTMLElement

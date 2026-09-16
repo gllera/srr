@@ -10,8 +10,9 @@
 // what keeps the module graph acyclic; the shared DOM reference map lives in the
 // leaf els.ts for the same reason.
 import * as data from "./data"
-import { setProfileImportHook, showShortcutsDialog, wrapTabFocus } from "./dropdown"
+import { showShortcutsDialog, wrapTabFocus } from "./dropdown"
 import { el } from "./els"
+import { registerEffects, type Effects } from "./effects"
 import { collapseBrokenMedia, countBadge, handleFragmentClick } from "./fmt"
 import { setupGestures, type Gestures } from "./gestures"
 import { HASH_KEY, UNREAD_ONLY_KEY } from "./keys"
@@ -19,7 +20,6 @@ import * as lightbox from "./lightbox"
 import * as list from "./list"
 import * as menus from "./menus"
 import * as model from "./model"
-import { loadMounts } from "./mounts"
 import * as nav from "./nav"
 import * as pager from "./pager"
 import { initLayout, layout } from "./layout"
@@ -46,6 +46,9 @@ import * as sync from "./sync"
 // the toolbar-hide baseline stays in sync (declared up here so list.setup, wired
 // before setupGestures runs, can close over it).
 let gestures: Gestures | null = null
+// The derived-paint effects table (effects.ts), captured so guard() can tell it
+// which chrome its own render just painted (markChromePainted, D3).
+let effects: Effects | null = null
 // The single navigation mutex. Every reader action runs through guard()/guardBg()
 // so a store swap can't interleave with a render. It self-heals: a mutex held far
 // past any bounded operation (every store fetch is abort-timed at 30s in data.ts)
@@ -79,12 +82,54 @@ function held(): boolean {
 // when a live owner holds it and the caller must skip.
 function acquire(): number | null {
    if (held()) return null
+   // Reclaiming a STALE mutex (busy, but past BUSY_STUCK_MS): the wedged owner's
+   // rendering holds will never be released, so drop them here. Its late finally
+   // then deletes a token that is already gone, which is a no-op.
+   //
+   // This must also reset model.rendering itself, not just the holds Set: a
+   // reclaim can be performed by ANY caller of acquire(), and guardBg() (unlike
+   // guard()/renderListSurface()) never calls beginRendering()/endRendering() —
+   // it has no render of its own to gate. Leaving the model.rendering flip to
+   // the caller's begin/endRendering pair means a reclaim performed FROM
+   // guardBg would clear renderingHolds to empty while model.rendering stayed
+   // latched true forever (nothing left to flip it back), silently wedging
+   // every effect gated on rendering() — the list surface, the reader chrome,
+   // the resting-pane paint — until some LATER guarded navigation happened to
+   // fix it as a side effect of its own begin/endRendering pair. Clearing both
+   // together, here, keeps the invariant enforced in ONE place regardless of
+   // which caller triggers the reclaim.
+   if (busy) {
+      renderingHolds.clear()
+      model.rendering.set(false)
+   }
    busy = true
    busyAt = Date.now()
    return ++busyToken
 }
 function release(token: number): void {
    if (token === busyToken) busy = false
+}
+// model.rendering is held while a command that ends in a surface paint is in
+// flight (D3, S16): guard()'s landing, and the list commands that write the lane
+// (or the store) BEFORE their own list render — without the hold, the
+// listSurface effect would rebuild the list inside applyFilter and the command
+// would rebuild it again a moment later. One TOKEN per hold rather than a depth
+// count: those commands nest (selectTokens' pane follow-up is a guard()), so an
+// inner release must not drop the outer hold — and a command wedged past
+// BUSY_STUCK_MS never reaches its finally, so acquire()'s stale reclaim clears
+// every hold it orphaned. A depth count could only leak there, stranding
+// `rendering` true and silencing every effect that waits it out (the self-heal
+// the Layout plan's render generation gave guard(), L20, kept for every holder).
+const renderingHolds = new Set<symbol>()
+function beginRendering(): symbol {
+   const hold = Symbol("rendering")
+   renderingHolds.add(hold)
+   model.rendering.set(true)
+   return hold
+}
+function endRendering(hold: symbol): void {
+   renderingHolds.delete(hold)
+   if (renderingHolds.size === 0) model.rendering.set(false)
 }
 // Freshness token for the list's async cycle: each W/S press bumps it, and only
 // the LATEST press applies its resolved token, so rapid presses can't land out
@@ -227,17 +272,10 @@ function hideSnackbar() {
    snackbarAction = null
 }
 
-// A guarded landing in flight (model.rendering): the resting-pane effect holds
-// its paint off until it lands. Cleared by its OWN generation, not busyToken —
-// renderListSurface can reclaim a stale mutex without ever touching this flag,
-// which a busyToken check would then strand true (plan L20).
-let renderGen = 0
-
 async function guard(fn: () => Promise<IShowFeed>) {
    const token = acquire()
    if (token === null) return
-   const rendering = ++renderGen
-   model.rendering.set(true)
+   const hold = beginRendering()
    // Two veil classes, one progress bar: `srr-loading` is the shared top-edge
    // bar, `srr-loading-reader` additionally dims the ARTICLE — which only this
    // path may do. renderListSurface takes the first alone, because under split
@@ -249,15 +287,14 @@ async function guard(fn: () => Promise<IShowFeed>) {
       // now owns the surface — don't paint our stale result / error over it.
       if (token === busyToken) {
          reader.render(o)
-         // Split view: the list is on screen beside the reader — bring its
-         // cursor row along (highlight + nudge into the pane's live band).
-         if (isSplit()) list.followCursor()
+         // The chrome render just painted is current for these inputs (D3).
+         effects?.markChromePainted()
       }
    } catch (e) {
       if (token === busyToken) showError(e, () => guard(fn))
    } finally {
       if (token === busyToken) document.body.classList.remove("srr-loading", "srr-loading-reader")
-      if (rendering === renderGen) model.rendering.set(false)
+      endRendering(hold)
       release(token)
    }
 }
@@ -274,23 +311,6 @@ async function guardBg(fn: () => Promise<void>): Promise<boolean> {
    } finally {
       release(token)
    }
-}
-
-// Split view: a filter change deliberately leaves the pane's article on screen
-// (selectTokens explains why for a query) while its arrows and pill go on
-// describing the filter that was REPLACED. Open search from the list and the
-// toolbar kept advertising "25 ›" for a lane that no longer existed, Next armed;
-// pressing it — button or → — ran nav.right() against a query matching nothing
-// and put the raw internal "no right match" up in the error dialog. Re-derive
-// against the new bounds instead: probeCurrent answers for the article the pane
-// is SHOWING, so an empty query disarms Next and a real one points it at the
-// next hit. Every filter-change path needs this, the per-keystroke one included
-// — a single re-derive at search ENTRY would just freeze the empty-query answer
-// (Next dead) over every query typed after it.
-// A no-op off split and whenever the pane holds no article, so callers need no
-// layout test of their own.
-function reprobePaneChrome() {
-   if (layout().readerLive) reader.reprobeReaderChrome()
 }
 
 // The lane-change follow-up for the READER surface, the twin of selectTokens'.
@@ -329,73 +349,31 @@ async function laneChange(fn: () => Promise<IShowFeed>): Promise<void> {
    await landPaneOnLane(hadArticle)
 }
 
-// Re-derive the reader after its filter bounds/mode shifted (a frontier gesture
-// or a Show-read flip). On a real article, silently re-probe the chrome. On a
-// placeholder (pos < 0) reprobeReaderChrome no-ops, so re-run the switch to
-// re-resolve the surface — but ONLY for a single-token/[ALL] filter:
-// switchFilter is single-token and getCurrentFilterKey() collapses a multi-token
+// Re-resolve a reader PLACEHOLDER after its lane's bounds or mode shifted (a
+// frontier gesture, a Show-read flip). A real article needs nothing here — the
+// readerChrome effect re-derives its arrows and pill. A placeholder (pos < 0)
+// has no article to probe, so the lane switch runs again, but ONLY for a
+// single-token/[ALL] filter: getCurrentFilterKey() collapses a multi-token
 // (URL-only, e.g. #!5+9) filter to "", which switchFilter("") would misread as
-// [ALL] and teleport the reader off its lane, so leave that rare placeholder be.
-function reReadReader() {
+// [ALL] and teleport the reader off its lane. A command, never an effect (S17).
+function rerunPlaceholder() {
    // "The reader needs re-deriving" is a LAYOUT question under split: the pane
    // is on screen with its arrows and pending pill live even while the LIST has
    // focus, so a frontier gesture or a Show-read flip made from there left both
    // stale — a next-count that no longer matched the lane, arrows armed against
    // bounds that had moved.
    if (!layout().readerSteppable) return
-   if (nav.currentChron() >= 0) {
-      reader.reprobeReaderChrome()
-      return
-   }
+   if (nav.currentChron() >= 0) return
    if (nav.isFilterActive() && nav.filterTokens().length > 1) return
    void guard(() => nav.switchFilter(nav.getCurrentFilterKey()))
 }
 
-// The reader's save (★) toggle reflects whether the current article is in the
-// saved set. Disabled only on the "(no matching articles)" placeholder, where
-// there's nothing to save — keyed off o.placeholder, NOT feed presence, so a
-// saved article whose feed was deleted ([DELETED] tombstone, feed ===
-// undefined) stays toggleable.
-function refreshSaveButton(hasArticle: boolean) {
-   const chron = nav.currentChron()
-   const canSave = hasArticle && chron >= 0
-   const saved = canSave && nav.isSaved(chron)
-   el.save.disabled = !canSave
-   paintSaveButton(saved)
-}
-
-// Re-derive the star from the live saved set WITHOUT changing enablement: the
-// button's own disabled flag is the "is there an article" answer it was last
-// given, so feeding it back is how a repaint asks for the star alone. A row's ★
-// under split and a profile merge both want exactly this.
-function repaintSaveButton(): void {
-   refreshSaveButton(!el.save.disabled)
-}
-
-// The save-button visual contract (active class + aria), single-sourced so the
-// reader's refresh and toggle paths can't drift out of lockstep.
-function paintSaveButton(saved: boolean) {
-   el.save.classList.toggle("srr-saved", saved)
-   el.save.setAttribute("aria-pressed", String(saved))
-   el.save.setAttribute("aria-label", saved ? "Unsave article" : "Save article")
-}
-
 // Toggle the current article's saved state from the reader. A local state flip
 // (localStorage + the button), not a navigation — it stays off the guard mutex.
-//
-// "The list re-derives stars from the live set when you return to it" was the
-// whole of this function's list story, and split view deletes the return: the
-// row for this very article is on screen beside the reader, painting its star
-// from the same set. refresh() IS that re-derive — stars, aria, and in the
-// ★ Saved lane dropping the row an un-save just took out of the lane, which
-// otherwise sat there fully starred in a lane it no longer belonged to, one
-// click from re-opening an article the lane does not contain.
 function toggleSave() {
    const chron = nav.currentChron()
    if (chron < 0) return
-   const saved = nav.toggleSaved(chron)
-   paintSaveButton(saved)
-   if (isSplit()) list.refresh()
+   nav.toggleSaved(chron)
 }
 
 // RDR12 — the unread total, surfaced where an installed app is actually looked
@@ -405,17 +383,8 @@ function toggleSave() {
 // reading it outside the app's own chrome, so an installed SRR gave no sign that
 // anything had arrived until you opened it. Scope is the ACTIVE store's [ALL] —
 // the same thing the picker's [ALL] row counts, so the two can never disagree.
-// -1, not 0, so the FIRST sync always writes through. An app badge outlives the
-// session that set it — it is on the installed icon until something clears it —
-// so a launch that finds everything already read is exactly when clearAppBadge
-// has to run, and seeding 0 would make that the one case skipped as "no change".
 let unreadTotal = -1
 let titleBase = "SRR"
-let badgeRunning = false
-// Set when a sync is asked for while one is in flight. The count it would have
-// read is already stale by then, so the answer is to re-run once at the end, not
-// to queue one run per request.
-let badgeAgain = false
 
 // The single writer of document.title, so the count and the surface's own name
 // can never get out of step. The count LEADS: a tab title is truncated from the
@@ -425,48 +394,33 @@ function setTitle(base: string): void {
    document.title = unreadTotal > 0 ? `(${countBadge(unreadTotal)}) ${base}` : base
 }
 
-async function syncUnreadBadge(): Promise<void> {
-   // Navigation fires these back to back, so collapse a burst into "one running,
-   // one more after" — dropping the later call outright would leave the badge on
-   // whatever count the in-flight run happened to read, stale until the next
-   // landing. The loop (rather than a recursive tail call) is what keeps the
-   // re-run inside the guard: writeUnreadBadge returns early when nothing moved,
-   // and an early return past the guard would skip the pending re-run entirely.
-   if (badgeRunning) {
-      badgeAgain = true
-      return
+// The titleAndBadge effect's writer. The -1 seed above makes the FIRST total
+// always write through: an app badge outlives the session that set it, so a
+// launch that finds everything read is exactly when clearAppBadge must run.
+function applyUnreadTotal(total: number): void {
+   if (total === unreadTotal) return
+   unreadTotal = total
+   setTitle(titleBase)
+   // Feature-detected on both sides: no Badging API (Firefox, iOS Safari) just
+   // leaves the title readout, and a rejection is not worth telling anyone about.
+   const badging = navigator as Navigator & {
+      setAppBadge?: (n?: number) => Promise<void>
+      clearAppBadge?: () => Promise<void>
    }
-   badgeRunning = true
-   try {
-      do {
-         badgeAgain = false
-         await writeUnreadBadge()
-      } while (badgeAgain)
-   } finally {
-      badgeRunning = false
-      badgeAgain = false
-   }
+   void (async () => {
+      try {
+         if (total > 0) await badging.setAppBadge?.(total)
+         else await badging.clearAppBadge?.()
+      } catch {
+         // An unsupported badge call must never surface as an error.
+      }
+   })()
 }
 
-async function writeUnreadBadge(): Promise<void> {
-   try {
-      const feeds = Object.values(data.db?.feeds ?? {})
-      const total = feeds.length ? nav.tagUnreadFromCounts(feeds, await nav.unreadCounts(feeds)) : 0
-      if (total === unreadTotal) return
-      unreadTotal = total
-      setTitle(titleBase)
-      // Feature-detected on both sides: no Badging API (Firefox, iOS Safari) just
-      // leaves the title readout, and a rejection (permission, unsupported
-      // context) is not worth telling anyone about.
-      const badging = navigator as Navigator & {
-         setAppBadge?: (n?: number) => Promise<void>
-         clearAppBadge?: () => Promise<void>
-      }
-      if (total > 0) await badging.setAppBadge?.(total)
-      else await badging.clearAppBadge?.()
-   } catch {
-      // A count blip or an unsupported badge call must never surface as an error.
-   }
+// The active store's [ALL] unread — the same tally the picker's [ALL] row shows.
+async function unreadTotalOfActiveStore(): Promise<number> {
+   const feeds = Object.values(data.db?.feeds ?? {})
+   return feeds.length ? nav.tagUnreadFromCounts(feeds, await nav.unreadCounts(feeds)) : 0
 }
 
 function listTitle(): string {
@@ -489,6 +443,7 @@ function listTitle(): string {
 async function renderListSurface() {
    const token = acquire()
    if (token === null) return
+   const hold = beginRendering()
    // The list centers + highlights its anchor (the article you were reading /
    // the lane's resume position) on every arrival. Returning FROM THE READER
    // (back button, browser-back) commits that scroll immediately — the seed's
@@ -497,8 +452,6 @@ async function renderListSurface() {
    // instead. Captured before showList() moves focus to the list.
    const anchorNow = layout().focus === "reader"
    showList()
-   reader.refreshFeedLabel()
-   setTitle(listTitle())
    document.body.classList.add("srr-loading")
    // Release busy + the loading veil at FIRST PAINT (skeletons / first matches),
    // not when the whole list finishes streaming — so rows are tappable while the
@@ -509,6 +462,7 @@ async function renderListSurface() {
    const onInteractive = () => {
       if (interactive) return
       interactive = true
+      endRendering(hold)
       if (token === busyToken) document.body.classList.remove("srr-loading")
       release(token)
    }
@@ -572,9 +526,10 @@ async function route(hash: string) {
    const posStr = nav.hashPos(hash)
    if (posStr !== "" && nav.isPosInt(posStr)) {
       await guard(() => nav.fromHash(hash))
-      // Split view: deliberately no list call here — guard()'s render path runs
-      // list.followCursor(), whose not-yet-built fallback is show(true), so a
-      // deep link/restore already builds the list pane beside the article.
+      // Split view: deliberately no list call here — model.cursor moved inside
+      // guard(), and the listRows effect (effects.ts) calls followListCursor at
+      // endRendering, whose not-yet-built fallback is show(true), so a deep
+      // link/restore already builds the list pane beside the article.
       return
    }
    // The list hash carries the mount too (§6.3) — extract it and switch the
@@ -582,12 +537,21 @@ async function route(hash: string) {
    // nav.fromHash's reader path. setActive fails softly for an unmounted/errored
    // mount, resolving against the current lane rather than blanking (MS4).
    const { mid, tokens } = nav.parseHashMount(nav.parseHashTokens(hash))
-   if (mid !== data.activeStore().mid) data.setActive(mid)
-   nav.applyFilter(tokens)
-   // Canonicalize the URL (boot may restore an empty location.hash from
-   // localStorage) without growing history.
-   commitListHash(false)
-   await renderListSurface()
+   // Held across the store + lane writes until renderListSurface takes its own
+   // hold (synchronously, before its first await) — S16.
+   let listed: Promise<void>
+   const hold = beginRendering()
+   try {
+      if (mid !== data.activeStore().mid) data.setActive(mid)
+      nav.applyFilter(tokens)
+      // Canonicalize the URL (boot may restore an empty location.hash from
+      // localStorage) without growing history.
+      commitListHash(false)
+      listed = renderListSurface()
+   } finally {
+      endRendering(hold)
+   }
+   await listed
 }
 
 // Return to the list from the reader (back button / two-finger cycle / filter
@@ -621,8 +585,15 @@ async function selectTokens(tokens: string[]) {
    // bounce the list back into search. Typing itself never routes through here.
    searchUI.clearSearchDebounce()
    const beforeChron = nav.currentChron()
-   nav.applyFilter(tokens)
-   await goToList(true)
+   let listed: Promise<void>
+   const hold = beginRendering() // S16: until renderListSurface holds on its own
+   try {
+      nav.applyFilter(tokens)
+      listed = goToList(true)
+   } finally {
+      endRendering(hold)
+   }
+   await listed
    // Split view: the reader pane never left, so the article on screen may not
    // belong to the lane just picked — and the still-live toolbar arrows would
    // then step from a position nothing on screen names. Ask the SAME question
@@ -645,8 +616,6 @@ async function selectTokens(tokens: string[]) {
    // about row order, not a landing), and it is typed WHILE reading. Following it
    // would yank the pane onto the newest hit at every keystroke — and onto the
    // no-match placeholder the moment the bar opens empty.
-   // …but exempt from the LANDING is not exempt from the CHROME (reprobePaneChrome).
-   if (nav.isSearchFilter()) reprobePaneChrome()
    if (layout().readerLive && !nav.isSearchFilter()) {
       const anchor = await nav.listAnchor()
       // replace, not push: goToList already pushed this filter change, and a
@@ -673,8 +642,15 @@ async function selectFilter(token: string) {
    searchUI.clearSearchDebounce()
    // A mount-qualified token (a peer lane picked from the picker) switches the
    // active lane and resolves to its bare half — nav owns that grammar (§6.3).
-   token = nav.resolveMountToken(token)
-   await selectTokens(token === "" ? [] : [token])
+   let selected: Promise<void>
+   const hold = beginRendering() // S16: the store switch is a write the list must not react to alone
+   try {
+      token = nav.resolveMountToken(token)
+      selected = selectTokens(token === "" ? [] : [token])
+   } finally {
+      endRendering(hold)
+   }
+   await selected
 }
 
 // Switch the active mount from the picker's mount switcher WITHOUT closing the
@@ -684,37 +660,28 @@ async function selectFilter(token: string) {
 async function switchMount(mid: string) {
    if (held()) return
    if (mid === data.activeStore().mid) return
-   if (!data.setActive(mid)) return
-   nav.applyFilter([])
-   commitListHash(true)
-   await renderListSurface()
-   if (picker.isOpen()) picker.render()
+   let listed: Promise<void> | null = null
+   const hold = beginRendering() // S16
+   try {
+      if (data.setActive(mid)) {
+         nav.applyFilter([])
+         commitListHash(true)
+         listed = renderListSurface()
+      }
+   } finally {
+      endRendering(hold)
+   }
+   // The picker's rows for the new store are the pickerRows effect's.
+   if (listed) await listed
 }
 
-// The unread (catch-up) toggle — the picker header's "Show read" button
-// (onToggleShowRead). Unread-only is the default view; flipping it OFF ALSO
-// shows already-read articles. Unseen-only spans every filter ([ALL]/feed/tag).
-// The picker can be open over EITHER surface (the list readout or the reader's
-// filter button), so reconcile whichever is active: setUnreadOnly re-applies the
-// filter (raised/restored bounds) internally, then the mode flip changes
-// membership in both directions, so the list must fully rebuild — rerender when
-// it's the visible surface, or invalidate a hidden list (rebuilding a
-// display:none list now would pin zero row heights) and re-derive the reader's
-// chrome against the shifted bounds. The picker re-renders its own rows itself.
+// The unread (catch-up) toggle — the picker header's "Show read" button. The
+// flip is a write (model.unreadOnly, nav's); the list, the reader's chrome, the
+// badge and the open picker follow it. A reader PLACEHOLDER is the one thing an
+// effect cannot re-derive — it takes a lane switch.
 function toggleUnseenOnly() {
    nav.setUnreadOnly(!nav.isUnreadOnly())
-   // Visibility (listVisible), not `view`: on an on-screen pane a bare
-   // invalidate() would leave a stale row set — read rows that should now show,
-   // or vice versa — beside the reader, with the observer torn down and no
-   // rebuild coming; deferring is only for a display:none list (zero row heights).
-   if (layout().listMounted) void list.rerender()
-   else list.invalidate()
-   // The reader re-derives for the new mode: a real article re-probes its
-   // chrome; a placeholder (pos < 0) re-runs the switch (reprobeReaderChrome
-   // would no-op and leave it stale). Shared with menus' afterFrontierMove.
-   // Called bare: reReadReader's own first line IS the layout-aware gate, and a
-   // caller-side copy of it is exactly the kind that drifts when the gate moves.
-   reReadReader()
+   rerunPlaceholder()
 }
 
 // Two-finger vertical swipe = step the filter. In the reader, cycle to the next
@@ -858,22 +825,6 @@ async function init() {
    })
    // Who owns the shared cursor when the list rebuilds (list.mayClaimCursor).
    list.setCursorOwner(() => layout().readerLive)
-   // A row's ★ writes the set the reader's save button paints from. Only the
-   // article that button describes can be affected — a star on any OTHER row
-   // must leave it alone.
-   list.setSavedSink((chron) => {
-      if (isSplit() && chron === nav.currentChron()) repaintSaveButton()
-   })
-   // A row swipe's read toggle is a frontier move like every other one, so it
-   // owes the same reconciliation menus.afterFrontierMove gives the rest — the
-   // one it never got. reReadReader re-derives the pane (its own layout gate, so
-   // it is a no-op wherever the reader is not on screen); the badge resync is
-   // unconditional, because a tab title reading "(25)" over 24 unread rows is
-   // wrong in both layouts — narrow just hid it until the next reader arrival.
-   list.setFrontierSink(() => {
-      reReadReader()
-      void syncUnreadBadge()
-   })
    // The pane's width + visibility (pane.ts), including the rail's toggle
    // button, which pane.ts wires and keeps labelled. Every committed change ends
    // in the shared re-layout tail above.
@@ -899,7 +850,6 @@ async function init() {
          const mounted = reader.mountedArticle()
          if (mounted && nav.currentChron() !== mounted.chron) nav.select(mounted.chron, mounted.feedId)
       }
-      if (layout().readerLive) reader.reprobeReaderChrome()
       relayoutPane()
    })
    // Tell the SW its mounted roots BEFORE data.init() (the PWA0 fix, §5.1): the
@@ -932,95 +882,52 @@ async function init() {
    for (const t of ["pointerdown", "keydown", "wheel", "touchstart"])
       document.addEventListener(t, () => (hasInteracted = true), { capture: true, passive: true, once: true })
 
-   // Shared refresh after any profile merge — a backup import or a sync pull
-   // that changed local state: prune stale seen keys, refresh the save button,
-   // rebuild the list under the current filter, and re-derive an open picker
-   // overlay (unread badges). The reader view skips the list rebuild — the
-   // return path (show() → refresh()) re-derives per-row state anyway, and
-   // rebuilding a display:none list would pin zero row heights.
+   // The boot pull's re-anchor — the device-switch moment, the navigator half of
+   // the sync feature: a merge that lands BEFORE the first interaction, while the
+   // list holds focus on a frontier lane, re-derives the unseen bounds from the new
+   // seen map and re-anchors the list at the new oldest unread. Everything else a
+   // merge changes — rows, the badge, the picker, the save star — is derived.
+   // ★ Saved and search are exempt peek modes, and a boot into the READER stays
+   // gentle: that position is a restored mid-article read or a shared deep link.
    //
-   // When the merge also moved the `mnt` mount table (a peer mounted on another
-   // device, pulled in by sync — profile.ts mergeMountState), re-adopt it into
-   // data.ts FIRST via afterMountChange, exactly as the Stores dialog does
-   // (applyMountTable boots the new root, postMounts SW-routes it, the picker
-   // repaints once it booted). Without this a sync-pulled mount never boots,
-   // never appears in the picker and isn't SW-routed until a full page reload.
-   // Gated on mountsChanged so an ordinary seen/saved-only pull doesn't re-run
-   // applyMountTable every cycle (both it and postMounts are idempotent, but the
-   // gate keeps the common pull cheap).
-   const refreshAfterMerge = (mountsChanged = false) => {
-      if (mountsChanged) menus.afterMountChange(loadMounts())
-      nav.pruneSeen()
-      repaintSaveButton()
-      // "The list is on screen with no live reader beside it" (plan L14): a split
-      // boot into a deep link shows the list too, and stays gentle.
-      if (layout().listShown && !layout().readerLive && !hasInteracted && !nav.lanePeek()) {
-         // The BOOT pull changed the profile before anything was touched — the
-         // device-switch moment, and the navigator half of the sync feature
-         // (the profile syncs on page load; there is deliberately no button):
-         // re-derive the unseen bounds from the new seen map and rebuild the
-         // list anchored at the new range (listAnchor → the new oldest unread)
-         // instead of the gentle rebuild. Saved/search are exempt peek modes
-         // (their sets are seen-independent), and a boot into the READER stays
-         // gentle: that position is a restored mid-article read or a shared
-         // deep link — swapping the on-screen article out from under the reader
-         // would be wrong in both cases.
-         nav.applyFilter([...nav.filterTokens()])
-         void list.render()
-      } else if (layout().listMounted) {
-         // On an on-screen pane the gentle rebuild is not optional: the
-         // display:none reasoning above (zero row heights, the return path
-         // re-derives anyway) does not hold — there is no return path, and
-         // skipping it leaves another device's reads showing as unread beside
-         // the article you are on. list.rerender keeps the cursor with the
-         // reader (list.mayClaimCursor), so the rebuild costs the pane nothing.
+   // AFTER the first interaction the re-anchor itself must not fire again — it
+   // would yank the list's scroll/cursor out from under a session in progress —
+   // but the OLD `refreshAfterMerge` guarantee this replaced still owes one thing:
+   // under unread-only, a peer's merge (a sync pull, a backup import) can mark an
+   // article this list is showing as read, and unread-only membership is keyed on
+   // model.frontierEpoch (list.ts's membershipKey), never on model.seen — so
+   // seen.ts's own listRows effect only re-derives the `.srr-row-unread` class in
+   // place and leaves the row seated. Left alone, the stale row survives every
+   // further navigation until the mode is flipped, a frontier gesture fires, or
+   // the page reloads. So a POST-interaction merge still triggers a full rebuild
+   // (nav.reapplyLane() re-snapshots the raised bounds off the fresh seen map,
+   // exactly like the pre-interaction path; list.rerender() forces the window
+   // regardless of builtKey) whenever unread-only is on and the list is showing —
+   // including a split pane sitting beside a live reader, the case the guarantee
+   // was written for. Show-read membership doesn't depend on the frontier at all
+   // (list.ts's comment on membershipKey), so a show-read list is left to the
+   // ordinary derived class toggle; peek lanes (★ Saved/search) stay exempt, same
+   // as pre-interaction. This still fires only once per merge (model.profileRev),
+   // never per ordinary seen write, which is what keeps it "reconcile once".
+   let bootMerge = untracked(() => model.profileRev())
+   effect(() => {
+      const merge = model.profileRev()
+      if (merge === bootMerge) return
+      bootMerge = merge
+      untracked(() => {
+         const l = layout()
+         if (!l.listShown || nav.lanePeek()) return
+         if (!hasInteracted) {
+            if (l.readerLive) return
+            nav.reapplyLane()
+            void list.render()
+            return
+         }
+         if (!nav.isUnreadOnly()) return
+         nav.reapplyLane()
          void list.rerender()
-      }
-      if (picker.isOpen()) picker.render()
-      void syncUnreadBadge() // another device's reading changes this device's count
-   }
-
-   // Shared reconciliation after a store refresh adopted a newer db.gz — the
-   // fully-silent contract: no reload, no scroll, no content re-render. The
-   // toolbar label re-derives, the reader's prev/next chrome re-probes (a cached
-   // "no newer article" is exactly what new content invalidates), the list
-   // reopens its top, and an open picker re-derives its rows and badges.
-   //
-   // Silent is not the same as unsignalled (RDR3): the surface you are on gets
-   // ONE non-disruptive cue that content landed — the list's overlay "N new"
-   // pill (list.onStoreGrown → the prepend that feeds it) and, in the reader,
-   // a one-shot pulse on the pending pill when its count actually grew.
-   //
-   // Under split the two branches are not alternatives: BOTH surfaces are on
-   // screen, so both cues are owed. Gating the list half on `view` was the
-   // feature's worst silence — while you read (the normal split state) a whole
-   // fetch cycle could land and the always-visible pane would never show a row
-   // or the pill, until some unrelated rebuild happened by.
-   const refreshAfterStore = () => {
-      reader.refreshFeedLabel()
-      if (layout().readerMounted) reader.reprobeReaderChrome(true)
-      if (layout().listMounted) void list.onStoreGrown()
-      if (picker.isOpen()) picker.render()
-      // New articles landed: the launcher badge is the one readout that is
-      // supposed to notice without anyone opening the app (RDR12).
-      void syncUnreadBadge()
-   }
-
-   // After a successful profile import (backup dialog), additionally reconcile
-   // prefs: importProfile wrote srr-unread-only straight to localStorage, but nav
-   // holds unreadOnly in a module var only mutated via setUnreadOnly (this also
-   // re-applies the filter so the raised unseen bounds take hold). Sync pulls
-   // never touch prefs (prefs:false), so they skip this.
-   setProfileImportHook((mountsChanged) => {
-      nav.setUnreadOnly(localStorage.getItem(UNREAD_ONLY_KEY) === "1")
-      refreshAfterMerge(mountsChanged)
+      })
    })
-
-   // ★-Saved keeps its article's media too (FMT2a). Both save paths — the
-   // reader's star and the list row's — go through nav.toggleSaved, so one hook
-   // covers them; failures are silent because a save must never fail on account
-   // of an optional cache write.
-   nav.setSavedHook((chron, saved) => void pinUI.syncSavedAssets(chron, saved).catch(() => {}))
 
    // Hand the extracted controllers what they need from the orchestrator (the
    // house DI pattern — see list.setup / picker.setup / setupGestures). None of
@@ -1031,12 +938,10 @@ async function init() {
       showReader,
       persistHash,
       setTitle,
-      refreshSaveButton,
       // Read lazily: gestures is wired further down, after list.setup.
       resetScroll: () => gestures?.resetScroll(),
       clearSearchDebounce: searchUI.clearSearchDebounce,
       offerFrontierUndo: menus.offerFrontierUndo,
-      syncUnreadBadge,
    })
    // RDR16 — the mini-player. reader.ts drives the relocation seam directly
    // (it owns the render path); what the player needs from the orchestrator is
@@ -1069,12 +974,10 @@ async function init() {
       readPosition: reader.readPosition,
    })
    menus.setup({
-      listVisible: () => layout().listMounted,
       showError,
       showSnackbar,
       hideSnackbar,
-      syncUnreadBadge,
-      reReadReader,
+      rerunPlaceholder,
    })
 
    // The filter picker overlay: a pick closes it and routes per surface — from
@@ -1178,13 +1081,8 @@ async function init() {
    // search bar's own input (debounced live query, Enter applies immediately,
    // Escape / ✕ leave search) and owns the debounce timer.
    searchUI.setup({
-      listVisible: () => layout().listMounted,
       selectTokens,
       commitListHash,
-      setTitle,
-      listTitle,
-      showError,
-      reprobeReader: reprobePaneChrome,
    })
    el.save.addEventListener("click", () => !el.save.disabled && toggleSave())
    el.popupClose.addEventListener("click", closePopup)
@@ -1325,6 +1223,32 @@ async function init() {
    // arrival that eventually lands should fade in like any other entry.
    pager.setup({ commit: pagerCommit, abandon: () => reader.setEntryTransition(null) })
 
+   // The device-state atoms as stored, before anything derives from them.
+   nav.publishSeen()
+   nav.publishSaved()
+   pinUI.initSavedAssets()
+   // Derived rendering (effects.ts): registered once, after every surface is
+   // wired and before the first route() paints.
+   effects = registerEffects({
+      unreadTotal: unreadTotalOfActiveStore,
+      setListTitle: () => setTitle(listTitle()),
+      applyUnreadTotal,
+      refreshSettingsStatus: menus.refreshSettingsStatus,
+      probeChrome: nav.probeCurrent,
+      applyChrome: reader.applyChrome,
+      paintSaveButton: reader.paintSaveButton,
+      isSaved: nav.isSaved,
+      paintFeedLabel: reader.paintFeedLabel,
+      reconcileList: list.reconcile,
+      afterListBuild: searchUI.syncSearchBar,
+      onListError: (e) => showError(e, () => void renderListSurface()),
+      refreshListRows: list.refresh,
+      followListCursor: list.followCursor,
+      listGrown: () => void list.onStoreGrown(),
+      pickerOpen: picker.isOpen,
+      renderPicker: picker.render,
+   })
+
    let hash = location.hash.substring(1)
    // Reject foreign hashes (e.g., OAuth implicit-flow tokens injected by an
    // auth provider in front of the app — Cloudflare Access JWT-in-fragment,
@@ -1355,17 +1279,11 @@ async function init() {
    // surface has rendered (local state is authoritative and paints instantly;
    // an adopt rerenders when it lands), then keep cycling on tab re-focus and
    // reconnect, flushing pending pushes on hide. No-op until a sync endpoint is
-   // configured (settings menu → Sync). The status callback refills the footer
-   // of a settings menu that happens to be open when a cycle lands; a closed
-   // menu's footer is disconnected and skipped (it rebuilds on the next open).
-   sync.init(refreshAfterMerge, menus.refreshSettingsStatus)
+   // configured (settings menu → Sync).
+   sync.init()
    // Live content sync: boot is already fresh (data.init just ran), so only the
    // ongoing triggers are wired — re-focus (throttled), reconnect, heartbeat.
-   // The third callback repaints the picker when a background PEER poll changed
-   // shape (its unread rollups), without touching the active lane.
-   refresh.init(guardBg, refreshAfterStore, () => {
-      if (picker.isOpen()) picker.render()
-   })
+   refresh.init(guardBg)
 
    // Tell the SW its mounted roots (the PWA0 fix, §5.1). A controller may not be
    // active yet on a first visit, so also post whenever a worker takes control.
@@ -1392,9 +1310,6 @@ async function init() {
       if (first) return
       showSnackbar("Reader updated", { label: "Reload", run: () => location.reload() })
    })
-   // First badge + title readout, after the first surface is up so it never
-   // delays paint (RDR12).
-   void syncUnreadBadge()
 
    // Signal to the dev design harness (design.ts) that the real app has booted
    // and the first surface is rendered. Inert in production — nothing else

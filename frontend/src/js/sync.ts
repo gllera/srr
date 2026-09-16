@@ -393,13 +393,17 @@ export function flush(): void {
 
 // Wire the lifecycle: boot pull (when enabled), re-pull on tab re-focus
 // (throttled) and on regaining connectivity, flush on hide/pagehide. `merged`
-// is app.ts's refresh routine — rerender the list / badges after a pull changed
-// local state, and (its `mountsChanged` argument) re-adopt the mount table when
-// the pull merged a new `mnt`; `status` refills an open settings-menu footer
-// after every cycle (so enabling sync from the dialog confirms itself without a
-// re-open).
-export function init(merged: (mountsChanged: boolean) => void, status?: () => void): void {
-   onMerged = merged
+// is now purely a test seam (S19): a merge that changes local state announces
+// itself through profile.ts's model write instead (model.profileRev /
+// model.profileMountsRev, S14), and every owner — seen.ts, saved.ts, nav.ts,
+// menus.ts — republishes off that, so no production caller passes a callback
+// here any more; `app.ts` calls `sync.init()` with none. `status` is likewise a
+// test seam now: a cycle's outcome announces itself through `model.syncStatus`,
+// and it's the `pickerStatus` effect (not this callback) that refills an open
+// settings-menu footer off that write, so enabling sync from the dialog
+// confirms itself without a re-open.
+export function init(merged?: (mountsChanged: boolean) => void, status?: () => void): void {
+   onMerged = merged ?? null
    onStatus = status ?? null
    document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") flush()

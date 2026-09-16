@@ -110,7 +110,7 @@ function due(): boolean {
 // guard (false = busy, skip); `updated` = app's after-refresh UI routine.
 export function init(
    exclusive: (fn: () => Promise<void>) => Promise<boolean>,
-   updated: () => void,
+   updated: () => void = () => {},
    peersUpdated: () => void = () => {},
 ): void {
    runExclusive = exclusive

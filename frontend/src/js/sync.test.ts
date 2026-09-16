@@ -140,8 +140,10 @@ describe("pull-merge (legacy v1 remote)", () => {
 
    it("passes mountsChanged=true to onMerged when the pull adds a peer mount (FIX 2)", async () => {
       // A sync-pulled `mnt` must reach app.ts so the new root boots at runtime;
-      // sync threads mergeMountState's changed bit through onMerged, and
-      // refreshAfterMerge re-adopts the table when it's true.
+      // sync threads mergeMountState's changed bit through onMerged, which is
+      // now optional (S19) — a caller that still wants it can re-adopt the
+      // table when it's true, exactly as menus.ts's model.profileMountsRev
+      // subscription does.
       const merged = vi.fn()
       sync.init(merged)
       sync.setSyncUrl(URL)

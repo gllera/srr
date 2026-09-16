@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest"
 // profile.ts is a pure module (no DOM, no module-load side effects) so we can
 // import it statically — no vi.resetModules() needed.
 import { exportProfile, importProfile, profileTs, touchProfile, localSeen } from "./profile"
+import * as model from "./model"
 
 const SEEN_KEY = "srr-seen"
 const SAVED_KEY = "srr-saved"
@@ -706,6 +707,7 @@ describe("multi-store mnt/ms (§4.4)", () => {
       expect(r.ok).toBe(true)
       expect(r.changed).toBe(true)
       expect(r.mountsChanged).toBe(true) // app.ts re-adopts the table on this
+      expect(model.profileMountsRev()).toBeGreaterThan(0) // …through the model now (S14)
       const mounts = JSON.parse(localStorage.getItem("srr-mounts")!)
       expect(mounts.some((m: { id: string }) => m.id === "sP")).toBe(true)
       expect(JSON.parse(localStorage.getItem("srr-seen@sP")!)).toEqual({ "feed:3": 8 })
@@ -714,9 +716,10 @@ describe("multi-store mnt/ms (§4.4)", () => {
 
    it("reports mountsChanged when ONLY the mnt table moved (drives the runtime re-adopt)", () => {
       // A pull that adds a peer to the mount table with no home seen/saved change
-      // must still report mountsChanged, so app.ts's refreshAfterMerge re-adopts
-      // it into data.ts (boots the new root, SW-routes it, repaints the picker)
-      // instead of leaving it dormant until a full page reload — FIX 2.
+      // must still report mountsChanged, so menus.ts's model.profileMountsRev
+      // subscription re-adopts it into data.ts (boots the new root, SW-routes it,
+      // repaints the picker) instead of leaving it dormant until a full page
+      // reload — FIX 2.
       const incoming = JSON.stringify({
          v: 2,
          ts: 0,
@@ -727,7 +730,7 @@ describe("multi-store mnt/ms (§4.4)", () => {
       const r = importProfile(incoming, { prefs: false, mode: "sync" })
       expect(r.ok).toBe(true)
       expect(r.mountsChanged).toBe(true)
-      expect(r.changed).toBe(true) // folded in, so refreshAfterMerge still fires
+      expect(r.changed).toBe(true) // folded in, so the model announcement still fires
    })
 
    it("an identical mnt round-trip reports changed:false (no spurious re-anchor)", () => {
@@ -764,5 +767,25 @@ describe("multi-store mnt/ms (§4.4)", () => {
       })
       importProfile(incoming, { prefs: false, mode: "sync" })
       expect(profileTs()).toBe(500) // untouched — the peer change is on @sP's ts
+   })
+})
+
+// state-store S14: a merge announces itself to the model; the owners republish
+// and the effects follow, for a sync pull and a backup restore alike.
+describe("importProfile announces a merge to the model", () => {
+   beforeEach(() => localStorage.clear())
+
+   it("bumps profileRev when the merge changed local state, and not when it changed nothing", () => {
+      const before = model.profileRev()
+      expect(importProfile(JSON.stringify({ v: 1, seen: { "feed:1": 3 } }), { prefs: false }).changed).toBe(true)
+      expect(model.profileRev()).toBe(before + 1)
+      importProfile(JSON.stringify({ v: 1, seen: { "feed:1": 3 } }), { prefs: false })
+      expect(model.profileRev()).toBe(before + 1)
+   })
+
+   it("bumps profileRev for a prefs restore even when no state merged", () => {
+      const before = model.profileRev()
+      importProfile(JSON.stringify({ v: 1, unreadOnly: false }), { prefs: true })
+      expect(model.profileRev()).toBe(before + 1)
    })
 })

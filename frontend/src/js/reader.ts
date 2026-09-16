@@ -3,8 +3,8 @@
 //
 // One article at a time (render), the shared directed empty state
 // (renderEmptyReader), the toolbar's now-viewing readout + back-button
-// breadcrumb (refreshFeedLabel), the next pill's pending readout and its
-// arrivals pulse (syncNextCount / pulseNextPill / reprobeReaderChrome), the
+// breadcrumb (paintFeedLabel), the next pill's pending readout and its
+// arrivals pulse (syncNextCount / pulseNextPill / applyChrome), the
 // margin bell at a dead edge (bumpReaderEdge), the landing scroll, and the
 // media position harvest/restore that makes prev/next non-destructive.
 //
@@ -18,7 +18,6 @@ import * as data from "./data"
 import { el } from "./els"
 import { countBadge, stampSrc } from "./fmt"
 import { emptyStateEl } from "./empty-state"
-import { layout } from "./layout"
 import * as model from "./model"
 import { restartAnimation } from "./motion"
 import { mountLabel } from "./mounts"
@@ -45,8 +44,6 @@ export interface ReaderDeps {
    persistHash: (hash: string) => void
    // The single writer of document.title (it folds the unread count in).
    setTitle: (base: string) => void
-   // The ★ toggle's state for the article just painted.
-   refreshSaveButton: (hasArticle: boolean) => void
    // Resync the toolbar auto-hide baseline after a programmatic scroll
    // (gestures.resetScroll — wired only once gestures are up, hence the closure).
    resetScroll: () => void
@@ -54,8 +51,6 @@ export interface ReaderDeps {
    clearSearchDebounce: () => void
    // RDR1/RDR2 — offer to take back a landing that swallowed a backlog.
    offerFrontierUndo: () => Promise<void>
-   // RDR12 — reading is what moves the unread total.
-   syncUnreadBadge: () => Promise<void>
 }
 
 let d: ReaderDeps
@@ -132,6 +127,30 @@ function syncNextCount(o: IShowFeed | null) {
 // prefers-reduced-motion.
 function pulseNextPill() {
    restartAnimation(el.next, "srr-next-pulse", 900) // > the 0.5s animation
+}
+
+// Paint prev/next and the pending pill from one probe result. `pulseOnGrowth`
+// is true only when the store gained articles since the last paint (the
+// readerChrome effect's call, S21): a count that merely ticked down, came back
+// from an unknown probe (-1), or moved because the user flipped Show-read or
+// rewound a frontier is not an arrival and stays silent.
+export function applyChrome(o: IShowFeed, pulseOnGrowth: boolean): void {
+   el.prev.disabled = !o.has_left
+   el.next.disabled = !o.has_right
+   const before = lastNextCount
+   syncNextCount(o)
+   if (pulseOnGrowth && before >= 0 && o.right_count > before) pulseNextPill()
+}
+
+// The save (★) toggle's whole visual contract — enablement, the active class and
+// the accessible name — in one place. canSave is false on a placeholder, where
+// there is nothing to save (keyed off the paint, NOT feed presence, so a saved
+// article whose feed was deleted stays toggleable).
+export function paintSaveButton(canSave: boolean, saved: boolean): void {
+   el.save.disabled = !canSave
+   el.save.classList.toggle("srr-saved", saved)
+   el.save.setAttribute("aria-pressed", String(saved))
+   el.save.setAttribute("aria-label", saved ? "Unsave article" : "Save article")
 }
 
 // Land a freshly rendered article at the top AND resync the toolbar auto-hide
@@ -340,12 +359,7 @@ export function render(o: IShowFeed) {
    //    final element set (a relocated narration element included), or, with
    //    nothing mounted, to clear the binding for this surface.
    wireTTS({ title: el.title, content: el.content })
-   el.prev.disabled = !o.has_left
-   el.next.disabled = !o.has_right
-   syncNextCount(o)
-
-   refreshFeedLabel()
-   d.refreshSaveButton(!o.placeholder)
+   applyChrome(o, false)
 
    d.setTitle("SRR - " + (o.article.t ?? ""))
    scrollReaderTop()
@@ -365,8 +379,6 @@ export function render(o: IShowFeed) {
    // If this landing consumed a backlog, say so and offer one way back (RDR1).
    // Un-awaited: it measures the move against the idx and must not hold up paint.
    void d.offerFrontierUndo()
-   // Reading is what moves the unread total; the badge follows it (RDR12).
-   void d.syncUnreadBadge()
 }
 
 // The reader's no-match state. Instead of a bare "(no matching articles)" title
@@ -395,7 +407,6 @@ function renderEmptyReader(o: IShowFeed, resting = false) {
    el.prev.disabled = true
    el.next.disabled = !o.has_right
    syncNextCount(o.has_right ? o : null)
-   d.refreshSaveButton(false)
 
    // Static panel: no fade-in (clear any inline opacity/transform a prior article
    // render left behind), and swap the body for the shared empty-state element.
@@ -421,7 +432,6 @@ function renderEmptyReader(o: IShowFeed, resting = false) {
    // mini-player-adopted episode can't paint or ghost-seek this surface.
    wireTTS({ title: el.title, content: el.content })
 
-   refreshFeedLabel()
    if (resting) return
    d.setTitle("SRR")
    scrollReaderTop()
@@ -492,10 +502,10 @@ function activeMountName(): string {
 }
 
 // The toolbar readout's memo key (mount + lane), so an unchanged label is not
-// repainted; see refreshFeedLabel.
+// repainted; see paintFeedLabel.
 let lastFeedLabel: string | null = null
 
-export function refreshFeedLabel() {
+export function paintFeedLabel() {
    // The article's source now lives in the header kicker, so the toolbar label
    // is the active-filter indicator: "All", a tag name, or a single feed.
    // An UNSCOPED query is orthogonal to the feed axis (the pinned search bar owns
@@ -542,39 +552,6 @@ export function refreshFeedLabel() {
    const backName = crumb === "" ? "Back to list" : `Back to list — filtered: ${crumb}`
    el.back.setAttribute("aria-label", backName)
    el.back.title = backName
-}
-
-// Silently re-derive the reader's prev/next + pending pill for the article
-// already on screen after its filter bounds shift under it (a frontier gesture,
-// a Show-read flip) — no content re-render, no scroll. loadArticle(pos) is
-// cache-warm, so probeCurrent costs at most an idx/meta probe; the chron guard
-// drops a stale probe if navigation moved on in the meantime.
-//
-// `pulseOnGrowth` is set by the ONE caller whose re-derive can raise the count
-// without the user doing anything — the post-store-refresh reconciliation. A
-// count that merely ticked down (reading), came back from an unknown probe
-// (-1), or moved because the user just flipped Show-read / rewound a frontier
-// is not an arrival and stays silent.
-//
-// "Is there a reader to re-derive?" is a LAYOUT question, answered by the
-// record's readerSteppable: the reader holds focus, or a live article sits in
-// the split pane. Not readerMounted — under split that is true beside a RESTING
-// panel too, and the list's seeded cursor would then probe an article the pane
-// is not showing and write its arrows and pill over the resting panel's own.
-export function reprobeReaderChrome(pulseOnGrowth = false) {
-   const probed = nav.currentChron()
-   void nav
-      .probeCurrent()
-      .then((o) => {
-         if (o && layout().readerSteppable && nav.currentChron() === probed) {
-            el.prev.disabled = !o.has_left
-            el.next.disabled = !o.has_right
-            const before = lastNextCount
-            syncNextCount(o)
-            if (pulseOnGrowth && before >= 0 && o.right_count > before) pulseNextPill()
-         }
-      })
-      .catch(() => {})
 }
 
 // Margin bell — a step toward an edge with no neighbor (prev/next disabled) kicks

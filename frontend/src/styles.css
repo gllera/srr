@@ -1322,8 +1322,8 @@ body:not(.srr-view-list):not(.srr-split) .srr-toolbar {
    this button returns to. It speaks the filter picker rows' reading voice —
    sans at --text-sm, natural case, both inherited from the toolbar button
    reset — NOT the readout's mono/uppercase wire voice, so the token looks the
-   same here as on the picker row that set it. app.ts fills it
-   (refreshFeedLabel); empty (hidden) on the unfiltered wire — silence means
+   same here as on the picker row that set it. The `feedLabel` effect fills it
+   (reader.paintFeedLabel); empty (hidden) on the unfiltered wire — silence means
    [ALL]. Single-feed filters tint it with the feed's source color (data-src,
    same ramp as everywhere). A long name still ellipsizes, but the button is
    allowed to grow past its own minmax(0,1fr) track into the empty shoulder

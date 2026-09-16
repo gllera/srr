@@ -24,6 +24,7 @@ const nav = vi.hoisted(() => ({
    frontierUndoSize: vi.fn(async () => 0),
    markFrontierUndoOffered: vi.fn(),
    undoFrontierMove: vi.fn(() => true),
+   bumpFrontierEpoch: vi.fn(),
    isUnreadOnly: vi.fn(() => false),
    applyFilter: vi.fn(),
    filterTokens: vi.fn(() => [] as string[]),
@@ -32,14 +33,6 @@ const nav = vi.hoisted(() => ({
    currentChron: vi.fn(() => -1),
 }))
 vi.mock("./nav", () => nav)
-
-// afterFrontierMove's surface reconciliation — asserted only as "it ran".
-const list = vi.hoisted(() => ({
-   rerender: vi.fn(async () => {}),
-   invalidate: vi.fn(),
-   refresh: vi.fn(),
-}))
-vi.mock("./list", () => list)
 
 import * as menus from "./menus"
 
@@ -59,12 +52,10 @@ beforeEach(() => {
    nav.undoFrontierMove.mockReturnValue(true)
    nav.isUnreadOnly.mockReturnValue(false)
    menus.setup({
-      listVisible: () => true,
       showError: vi.fn(),
       showSnackbar,
       hideSnackbar,
-      syncUnreadBadge: vi.fn(async () => {}),
-      reReadReader,
+      rerunPlaceholder: reReadReader,
    })
 })
 
@@ -84,16 +75,18 @@ describe("offerFrontierUndo", () => {
       undoButton().run()
       expect(nav.undoFrontierMove).toHaveBeenCalledWith(pending)
       expect(hideSnackbar).toHaveBeenCalled()
-      expect(list.refresh).toHaveBeenCalled() // afterFrontierMove ran
+      expect(nav.bumpFrontierEpoch).toHaveBeenCalled() // the bulk move is announced (D1)
+      expect(reReadReader).toHaveBeenCalled() // and a placeholder re-resolves (S17)
    })
 
    // The reader is multi-store, the snackbar lives 8s, and NOTHING takes it
    // down on a store switch — app.ts's switchMount, a mount pick in the filter
    // picker and route()'s back/forward setActive all leave it up and clickable.
    // Every term of the answer is scoped to one store: the snapshot's `feed:<id>`
-   // keys, the count it announced, and afterFrontierMove's reconciliation of
-   // whatever lane is showing NOW. So the mount is what the button checks first
-   // — the same argument, and the same shape, as list.ts's row-swipe record.
+   // keys, the count it announced, and the write (bumpFrontierEpoch +
+   // rerunPlaceholder) every surface showing NOW reconciles against. So the
+   // mount is what the button checks first — the same argument, and the same
+   // shape, as list.ts's row-swipe record.
    it("Undo does nothing after the active store changed under the snackbar", async () => {
       await offer()
       mid = "s7" // the user switched stores while the offer was up
@@ -103,7 +96,7 @@ describe("offerFrontierUndo", () => {
       // dead offer on screen would invite pressing it again.
       expect(hideSnackbar).toHaveBeenCalled()
       // …and no surface was reconciled for a move that did not happen.
-      expect(list.refresh).not.toHaveBeenCalled()
+      expect(nav.bumpFrontierEpoch).not.toHaveBeenCalled()
       expect(reReadReader).not.toHaveBeenCalled()
    })
 })

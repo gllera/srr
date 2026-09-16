@@ -78,17 +78,28 @@ export function publishSeen(): void {
    model.seen.set(readSeen())
 }
 
-// model.seen names the ACTIVE store's map, so a store switch republishes it.
-// The first run only subscribes: at import time the data layer may not have
-// booted, and app.ts publishes once after data.init().
+// model.seen names the ACTIVE store's map as stored, so a store switch and a
+// profile merge (S14) republish it. The first run only subscribes: at import
+// time the data layer may not have booted, and app.ts publishes once after
+// data.init().
 let seenPrimed = false
+let seenMerge = 0
 effect(() => {
    model.activeMid()
+   const merge = model.profileRev()
    if (!seenPrimed) {
       seenPrimed = true
+      seenMerge = merge
       return
    }
-   untracked(publishSeen)
+   untracked(() => {
+      // A merge may have brought keys for feeds this store no longer has.
+      if (merge !== seenMerge) {
+         seenMerge = merge
+         pruneSeen()
+      }
+      publishSeen()
+   })
 })
 
 // The parsed seen map (feed key → last-viewed chronIdx) under its list-surface

@@ -11,9 +11,11 @@
 import * as data from "./data"
 import { el } from "./els"
 import { extractAssetKeys } from "./fmt"
+import * as model from "./model"
 import * as nav from "./nav"
 import { forgetStoreState } from "./mounts"
 import { isPinned, listPins, pinFilter, unpinFilter } from "./pin"
+import { effect, untracked } from "./signals"
 
 // Offline-pin progress: show a transient "Downloading N / M…" note in the
 // status bar while the SW caches the filter's packs, then restore.
@@ -187,6 +189,37 @@ export async function syncSavedAssets(chron: number, saved: boolean): Promise<vo
    pinFilter(key, names, store.mid)
    controller.postMessage({ type: "pin", names, base: store.base.href })
    requestPersistentStorage()
+}
+
+// FMT2a as an effect over model.saved (state-store P5): a chron that joined the
+// set gets its assets pinned, one that left gets them released. Every save and
+// un-save — the reader's star, a row's star, a row swipe — is a write saved.ts
+// publishes, so this one subscription replaces the hook they all used to call. A
+// STORE SWITCH or a PROFILE MERGE replaces the whole set at once; both
+// re-baseline without syncing, because neither is a save made on this device —
+// exactly the scope the old hook had.
+export function initSavedAssets(): () => void {
+   let mid = untracked(() => model.activeMid())
+   let merges = untracked(() => model.profileRev())
+   let prev = new Set(untracked(() => model.saved()))
+   return effect(() => {
+      const next = new Set(model.saved())
+      const m = model.activeMid()
+      const r = model.profileRev()
+      if (m !== mid || r !== merges) {
+         mid = m
+         merges = r
+         prev = next
+         return
+      }
+      const before = prev
+      prev = next
+      untracked(() => {
+         // Failures are silent: a save must never fail on account of an optional cache write.
+         for (const chron of next) if (!before.has(chron)) void syncSavedAssets(chron, true).catch(() => {})
+         for (const chron of before) if (!next.has(chron)) void syncSavedAssets(chron, false).catch(() => {})
+      })
+   })
 }
 
 // Tell the service worker which store roots are mounted (docs/MULTI-STORE-SPEC.md

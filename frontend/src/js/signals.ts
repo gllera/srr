@@ -271,8 +271,9 @@ export function untracked<T>(fn: () => T): T {
 
 // An async derivation over the primitive (semantic 9): an effect that reads
 // deps(), and for a key it has not already started, runs loader(key) under a
-// fresh token. Only the newest run may publish — the token guard
-// reader.reprobeReaderChrome used to do by hand.
+// fresh token. Only the newest run may publish — the token guard the reader's
+// old hand-rolled chrome re-probe did by hand, now the `readerChrome` effect
+// in `effects.ts`.
 export function resource<K, T>(
    deps: () => K,
    loader: (key: K) => Promise<T>,

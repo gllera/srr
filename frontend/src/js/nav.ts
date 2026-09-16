@@ -25,7 +25,7 @@ import {
    unreadCounts,
    type FrontierScope,
 } from "./seen"
-import { batch } from "./signals"
+import { batch, effect, untracked } from "./signals"
 
 // nav is the FACADE over the four modules split out of it (finding ENG3):
 // ./seen (frontier persistence, the explicit gestures, the unread tallies),
@@ -36,7 +36,7 @@ import { batch } from "./signals"
 // imports nav back, so the module graph stays acyclic. The shared mutable state
 // that stays here — pos, filter, unreadOnly — reaches them as explicit
 // arguments (a FrontierScope, a toggle context, a token list), never by import.
-export { getSavedSet, publishSaved, setSavedHook } from "./saved"
+export { getSavedSet, publishSaved } from "./saved"
 export {
    clearFrontierUndo,
    frontierUndoSize,
@@ -65,11 +65,18 @@ export {
    unreadCounts,
 }
 
-let pos = -1
-// Feed id of the article currently on screen (-1 = none). anchorChron pairs it
-// with pos for the list anchor. Unread counting never consults it — reading is
-// accounted on ENTER (recordSeen).
-let currentFeed = -1
+// The cursor lives in the model (model.cursor, written only by this module):
+// the chron on screen and its feed (-1 = none). anchorChron pairs the two for
+// the list anchor; unread counting never consults the feed — reading is
+// accounted on ENTER (recordSeen). Read UNTRACKED: nav runs inside effect
+// surfaces (probeCurrent, the tallies), and a nav read must never subscribe the
+// effect that called it.
+function cursorChron(): number {
+   return untracked(() => model.cursor()).chron
+}
+function cursorFeed(): number {
+   return untracked(() => model.cursor()).feedId
+}
 const next: { left?: Promise<number>; right?: Promise<number> } = {}
 
 // Unseen-only navigation: when on, the active filter skips articles already
@@ -112,9 +119,6 @@ export function setUnreadOnly(on: boolean) {
    // chosen", which app.ts treats as the unread-only default on first run — so a
    // user who turns it off must store "0", not clear the key, or it'd revert.
    lsSet(UNREAD_ONLY_KEY, on ? "1" : "0")
-   // Re-apply the current filter so its members immediately pick up (or shed) the
-   // raised unseen-only bounds — the caller just flips the mode and rebuilds.
-   applyFilter([...lane.tokens])
    model.unreadOnly.set(on)
 }
 
@@ -125,7 +129,7 @@ export function setUnreadOnly(on: boolean) {
 export function toggleSaved(chron: number): boolean {
    return toggleSavedSet(chron, {
       savedMode: lane.kind === "saved",
-      pos,
+      pos: cursorChron(),
       onQueueChange: () => {
          next.left = next.right = undefined
       },
@@ -135,7 +139,7 @@ export function toggleSaved(chron: number): boolean {
 // The chronIdx of the article currently in the reader (-1 = none), so app.ts can
 // reflect its saved state on the star toggle without threading pos into IShowFeed.
 export function currentChron(): number {
-   return pos
+   return cursorChron()
 }
 
 // Where the list surface should anchor when (re)built: the article currently in
@@ -149,7 +153,12 @@ function anchorChron(): number {
    // The unseen-only entry anchor counts as a member (it renders as a list row
    // via the feedLeft/feedRight walks), so returning to the list from it lands
    // on it instead of losing the position to the oldest-unread fallback.
-   if (pos >= 0 && currentFeed >= 0 && (lane.matches(currentFeed, pos) || pos === lane.entryAnchor())) return pos
+   if (
+      cursorChron() >= 0 &&
+      cursorFeed() >= 0 &&
+      (lane.matches(cursorFeed(), cursorChron()) || cursorChron() === lane.entryAnchor())
+   )
+      return cursorChron()
    return -1
 }
 
@@ -323,8 +332,8 @@ export async function onStoreRefreshed(): Promise<void> {
 // showing. data.loadArticle(pos) is cache-warm (the article itself didn't
 // change), so this costs idx/meta probes at most, no re-fetch of the article.
 export async function probeCurrent(): Promise<IShowFeed | null> {
-   if (pos < 0) return null
-   const article = await data.loadArticle(pos)
+   if (cursorChron() < 0) return null
+   const article = await data.loadArticle(cursorChron())
    return showFeed(article)
 }
 
@@ -367,7 +376,7 @@ function unseenActive(): boolean {
 // at boot only because it painted before the list's anchor seed landed, and 30
 // after any repaint — a backlog count that quietly dropped an article for no
 // reason the user could see.
-async function pendingRight(seenMap?: Record<string, number>, floor = pos): Promise<number> {
+async function pendingRight(seenMap?: Record<string, number>, floor = cursorChron()): Promise<number> {
    return await lane.ahead(floor, seenMap)
 }
 
@@ -396,8 +405,8 @@ async function showFeed(article: IArticle, seenMap?: Record<string, number>): Pr
    // into one round-trip window instead of chaining them; same-pack fetches still
    // join via cachedPromise. pendingRight reuses recordSeen's seen map (seenMap).
    const [left, right, right_count] = await Promise.all([
-      neighborOlder(pos).catch(() => -1),
-      neighborNewer(pos).catch(() => -1),
+      neighborOlder(cursorChron()).catch(() => -1),
+      neighborNewer(cursorChron()).catch(() => -1),
       pendingRight(seenMap).catch(() => -1),
    ])
    return {
@@ -440,8 +449,6 @@ async function resolve(target: number, o: Landing = {}): Promise<IShowFeed> {
    // reach the model together, so no effect sees the new article with the old
    // frontier (state-store spec, "What the commands become").
    batch(() => {
-      pos = target
-      currentFeed = article.f
       model.cursor.set({ chron: target, feedId: article.f })
       // A landing the raised unseen-only bounds do NOT cover is an entry anchor
       // (isValidSeen accepted it by true add_idx: switchFilter's resume position,
@@ -465,7 +472,7 @@ async function resolve(target: number, o: Landing = {}): Promise<IShowFeed> {
       if (prefetchTarget() === target) releasePrefetch()
       else abortPrefetch()
       updateHash(replace)
-      seen = record ? recordSeen(article.f, pos, frontierScope()) : undefined
+      seen = record ? recordSeen(article.f, target, frontierScope()) : undefined
    })
    return showFeed(article, seen)
 }
@@ -480,17 +487,27 @@ function frontierScope(): FrontierScope {
 }
 
 // Mark the whole current feed/tag/[ALL] selection read (./seen owns the write).
+// Batched: raiseFilterRead writes model.seen (and flushes) and bumpFrontierEpoch
+// writes model.frontierEpoch — one flush instead of two, so readerChrome starts
+// exactly one probe per gesture instead of racing two (the newer always wins,
+// via the resource's token guard, but the second was pure waste).
 export function markAllRead(): boolean {
-   const moved = raiseFilterRead(frontierScope())
-   if (moved) bumpFrontierEpoch()
+   let moved = false
+   batch(() => {
+      moved = raiseFilterRead(frontierScope())
+      if (moved) bumpFrontierEpoch()
+   })
    return moved
 }
 
 // The explicit unread rewind — the ONLY path that lowers a seen frontier
-// (./seen owns the write).
+// (./seen owns the write). Batched for the same reason as markAllRead above.
 export function markUnreadFrom(chron: number): boolean {
-   const moved = lowerFilterFrom(chron, frontierScope())
-   if (moved) bumpFrontierEpoch()
+   let moved = false
+   batch(() => {
+      moved = lowerFilterFrom(chron, frontierScope())
+      if (moved) bumpFrontierEpoch()
+   })
    return moved
 }
 
@@ -507,8 +524,6 @@ export function bumpFrontierEpoch(): void {
 // "start from the list"); false = caught-up (nothing unread) or a plain no-match.
 function resolveNoMatch(o: Landing & { notStarted?: boolean } = {}): IShowFeed {
    const { replace = false, notStarted = false } = o
-   pos = -1
-   currentFeed = -1
    model.cursor.set({ chron: -1, feedId: -1 })
    // Same cleanup as resolve(): the cached neighbor probes, the saved ghost, and
    // any in-flight media prefetch belong to the PREVIOUS filter's article and are
@@ -616,7 +631,7 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
 // The slot-identity checks keep a lookup superseded by a newer navigation
 // from prefetching or clearing on its behalf.
 async function step(dir: "left" | "right"): Promise<IShowFeed> {
-   const lookup = () => (dir === "left" ? neighborOlder(pos) : neighborNewer(pos))
+   const lookup = () => (dir === "left" ? neighborOlder(cursorChron()) : neighborNewer(cursorChron()))
    const target = await (next[dir] ?? lookup())
    if (target === -1) throw new Error(`no ${dir} match`)
    const result = await resolve(target)
@@ -759,8 +774,6 @@ export async function goToArticle(chron: number): Promise<IShowFeed> {
 // the list cursor isn't reading the article — pos just tracks the highlight so
 // opening it (tap) or re-anchoring the list later stays consistent.
 export function select(chron: number, feedId: number): void {
-   pos = chron
-   currentFeed = feedId
    model.cursor.set({ chron, feedId })
    next.left = next.right = undefined
    abortPrefetch()
@@ -787,6 +800,16 @@ export function applyFilter(tokens: string[]): void {
    // reload or back to `#!<token>` re-renders its empty state (makeLane's
    // keepKnownEmpty); an unknown token falls back to [ALL].
    setLane(tokens, { keepKnownEmpty: true })
+}
+
+// Re-derive the ACTIVE lane from its own tokens: fresh unread-only bounds, a reset
+// entry anchor. What every "re-apply the current filter" caller used to spell as
+// applyFilter([...filterTokens()]). Through applyFilter, so a known-but-empty lane
+// stays scoped to itself (keepKnownEmpty) and publishLane runs; an unchanged token
+// list publishes nothing (arrayEqual), and a search lane's module-scoped snapshot
+// survives (Lanes N16).
+export function reapplyLane(): void {
+   applyFilter([...lane.tokens])
 }
 
 // A stable key for the active filter tokens — identifies the token SET
@@ -894,7 +917,7 @@ export async function cycleFilter(dir: number): Promise<IShowFeed> {
 }
 
 function updateHash(replace = false) {
-   writeHash(pos, lane.tokens, replace)
+   writeHash(cursorChron(), lane.tokens, replace)
 }
 
 // Publish the CURRENT cursor + filter into the fragment WITHOUT navigating —
@@ -906,3 +929,38 @@ function updateHash(replace = false) {
 export function publishHash(): void {
    updateHash(false)
 }
+
+// A backup restore may carry the unread-only preference, which profile.ts wrote
+// to localStorage itself (S14). Adopt it — only when it differs, since flipping
+// the mode re-applies the lane. A sync pull never touches prefs, so this is a
+// no-op for it.
+let unreadOnlyMerge = untracked(() => model.profileRev())
+effect(() => {
+   const merge = model.profileRev()
+   if (merge === unreadOnlyMerge) return
+   unreadOnlyMerge = merge
+   untracked(() => {
+      const stored = lsGet(UNREAD_ONLY_KEY)
+      if (stored !== null && (stored === "1") !== unreadOnly) setUnreadOnly(stored === "1")
+   })
+})
+
+// Membership is derived (state-store spec rule 2, as amended by D1). The
+// unread-only bounds re-derive when the MODE flips, and — under unread-only —
+// when a filter-scoped bulk frontier move bumps model.frontierEpoch. Never on
+// model.seen: every recorded landing writes seen, and re-deriving there would
+// raise the bounds past the article just read and strand ←. A store refresh
+// reconciles through onStoreRefreshed instead (bounds only rise). Created at
+// module load, before any surface's effect, so a flush always re-derives the
+// lane BEFORE the list or the chrome reads it.
+let laneMode = untracked(() => model.unreadOnly())
+let laneEpoch = untracked(() => model.frontierEpoch())
+effect(() => {
+   const mode = model.unreadOnly()
+   const epoch = model.frontierEpoch()
+   const flipped = mode !== laneMode
+   const moved = epoch !== laneEpoch
+   laneMode = mode
+   laneEpoch = epoch
+   if (flipped || (moved && mode)) untracked(() => reapplyLane())
+})

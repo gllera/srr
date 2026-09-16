@@ -71,6 +71,8 @@ import {
    saveMounts,
    type MountRecord,
 } from "./mounts"
+import * as model from "./model"
+import { batch } from "./signals"
 import { lsGet, lsSet, readIdSet } from "./storage"
 import { isValidHttpish, normalizeHttpish } from "./urlish"
 
@@ -384,7 +386,7 @@ export interface ImportResult {
    // The `mnt` mount table actually moved (a peer mounted/unmounted/renamed on
    // another device). Reported SEPARATELY from `changed` so the caller can
    // re-adopt the table into data.ts (boot the new root, SW-route it, repaint
-   // the picker) only when it really changed — see app.ts's refreshAfterMerge.
+   // the picker) only when it really changed — see model.profileMountsRev (S14).
    mountsChanged?: boolean
 }
 
@@ -721,5 +723,14 @@ export function importProfile(json: string, opts: { prefs: boolean; mode?: "merg
       } catch {}
    }
 
+   // Announce the merge (S14): seen.ts, saved.ts and nav republish what this
+   // function wrote to localStorage, menus.ts re-adopts a moved mount table, and
+   // every derived surface follows. A prefs restore announces too — it may have
+   // flipped unread-only.
+   if (changed || mountsChanged || opts.prefs)
+      batch(() => {
+         if (changed || opts.prefs) model.profileRev.update((n) => n + 1)
+         if (mountsChanged) model.profileMountsRev.update((n) => n + 1)
+      })
    return { ok: true, changed, mountsChanged }
 }

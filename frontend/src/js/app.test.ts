@@ -42,7 +42,7 @@ const nav = vi.hoisted(() => {
       SEARCH_PREFIX: "q:",
       pruneSeen: vi.fn(),
       fromHash: vi.fn(async () => sf()),
-      applyFilter: vi.fn(),
+      applyFilter: vi.fn((tokens: string[]) => M?.laneTokens.set([...tokens])),
       tokensSuffix: vi.fn(() => ""),
       // The real implementations: pure grammar helpers with no nav state, so
       // faithful inline copies (not stubs) keep the routing tests accurate.
@@ -97,25 +97,43 @@ const nav = vi.hoisted(() => {
       searchScope: vi.fn(() => ""),
       searchShort: vi.fn(() => false),
       searchTruncated: vi.fn(() => false),
-      isUnreadOnly: vi.fn(() => false),
-      setUnreadOnly: vi.fn(),
-      markAllRead: vi.fn(() => true),
-      markUnreadFrom: vi.fn(() => true),
+      isUnreadOnly: vi.fn(() => M?.unreadOnly() ?? false),
+      setUnreadOnly: vi.fn((on: boolean) => seedUnreadOnly(on)),
+      markAllRead: vi.fn(() => {
+         bumpFrontierAndSeen()
+         return true
+      }),
+      markUnreadFrom: vi.fn(() => {
+         bumpFrontierAndSeen()
+         return true
+      }),
       pendingFrontierUndo: vi.fn(() => null as { prev: Record<string, number | undefined>; to: number } | null),
       frontierUndoSize: vi.fn(async () => 0),
-      undoFrontierMove: vi.fn(() => true),
+      undoFrontierMove: vi.fn(() => {
+         seedSeen({})
+         return true
+      }),
       markFrontierUndoOffered: vi.fn(),
       clearFrontierUndo: vi.fn(),
-      setSavedHook: vi.fn(),
       unreadCounts: vi.fn(async () => new Map<number, number>()),
       tagUnreadFromCounts: vi.fn(() => 0),
       probeCurrent: vi.fn(async () => null),
-      currentChron: vi.fn(() => -1),
+      currentChron: vi.fn(() => M?.cursor().chron ?? -1),
       isSaved: vi.fn(() => false),
-      toggleSaved: vi.fn(() => true),
+      toggleSaved: vi.fn((chron: number) => {
+         M?.saved.set([...(M?.saved() ?? []), chron])
+         return true
+      }),
       // The focus-only re-entry's hash write (openArticle): no landing, so
       // nothing else in the mock moves — only that the URL was published.
       publishHash: vi.fn(),
+      // nav's model-facing additions (state-store P2 + Lanes): the frontier
+      // epoch bump and the boot publish of the device-state atoms.
+      bumpFrontierEpoch: vi.fn(() => M?.frontierEpoch.update((n) => n + 1)),
+      publishSeen: vi.fn(),
+      publishSaved: vi.fn(),
+      select: vi.fn((chron: number, feedId: number) => seedCursor(chron, feedId)),
+      reapplyLane: vi.fn(),
       goTo: vi.fn(async () => sf()),
       goToArticle: vi.fn(async () => sf()),
       left: vi.fn(async () => sf()),
@@ -170,7 +188,10 @@ const data = vi.hoisted(() => ({
    // The active store context app reads for the pin message base/mid and the
    // article base it hands the fmt sanitizer (home mid "0", loopback base).
    activeStore: () => ({ mid: "0", base: new URL("http://localhost/") }),
-   setActive: vi.fn(() => true),
+   setActive: vi.fn((mid: string) => {
+      M?.activeMid.set(mid)
+      return true
+   }),
    mountedStores: vi.fn(() => [{ mid: "0", base: new URL("http://localhost/"), cred: "same-origin", role: "home" }]),
    mountRecords: vi.fn(() => [{ id: "0", url: "http://localhost/", label: "", ord: 0, role: "home", cred: false }]),
    mountStatus: vi.fn(() => ({ state: "ok", kind: "", error: "" })),
@@ -182,8 +203,7 @@ const list = vi.hoisted(() => ({
    setup: vi.fn(),
    setScroller: vi.fn(),
    setCursorOwner: vi.fn(),
-   setSavedSink: vi.fn(),
-   setFrontierSink: vi.fn(),
+   reconcile: vi.fn((): Promise<void> | null => null),
    followCursor: vi.fn(),
    show: vi.fn(async () => {}),
    render: vi.fn(async () => {}),
@@ -210,7 +230,6 @@ vi.mock("./empty-state", () => emptyState)
 
 const dropdown = vi.hoisted(() => {
    const mock = {
-      setProfileImportHook: vi.fn(),
       showImgProxyDialog: vi.fn(),
       showBackupDialog: vi.fn(),
       showSyncDialog: vi.fn(),
@@ -381,6 +400,48 @@ const hashTo = (h: string) => {
    window.location.hash = h
    window.dispatchEvent(new Event("hashchange"))
 }
+
+// The model instance app.ts is using. vi.resetModules() gives every boot a fresh
+// one (docs/superpowers/plans/2026-09-15-frontend-architecture-trio-index.md §2),
+// so boot() captures it, and the nav mock reads and writes THROUGH it — a case
+// that seeds the cursor or unread-only is seen by app.ts's effects exactly as a
+// real nav write would be. Seeds made before boot() are replayed into the fresh
+// instance, so a describe-level beforeEach may seed before booting.
+let M: typeof import("./model") | undefined
+// The same per-boot registry's signals module, so the nav mock's multi-atom
+// writes (markAllRead/markUnreadFrom/undoFrontierMove) can batch into ONE
+// flush — mirroring real nav.ts's "one landing is one flush" discipline —
+// rather than each write independently retriggering the readerChrome effect.
+let S: typeof import("./signals") | undefined
+const seeded = { cursor: { chron: -1, feedId: -1 }, unreadOnly: false }
+const seedCursor = (chron: number, feedId = 1) => {
+   seeded.cursor = { chron, feedId }
+   M?.cursor.set(seeded.cursor)
+}
+const seedUnreadOnly = (on: boolean) => {
+   seeded.unreadOnly = on
+   M?.unreadOnly.set(on)
+}
+// What seen.ts publishes after a frontier write (a row swipe, a merge).
+const seedSeen = (map: Record<string, number>) => M?.seen.set({ ...map })
+// Mirrors the batched frontier write real nav.ts makes: a single batch() writing
+// both model.seen (raiseFilterRead/lowerFilterFrom) and model.frontierEpoch,
+// one flush — so a frontier gesture starts the readerChrome effect's probe
+// exactly once, matching production.
+const bumpFrontierAndSeen = () => {
+   const b = M?.frontierEpoch
+   const s = M?.seen
+   if (!b || !s || !S) return
+   S.batch(() => {
+      b.update((n) => n + 1)
+      s.set({})
+   })
+}
+// What refresh.publishSnapshot does after nav reconciled to a new db.gz.
+const publishStore = (grown: boolean) => {
+   M?.snapshot.update((n) => n + 1)
+   if (grown) M?.storeGrown.update((n) => n + 1)
+}
 // Cross the breakpoint the way the app sees it: layout.ts's effect owns
 // body.srr-split, so a hand-edited class is overwritten on the next layout
 // change. Write the model instead — through the SAME registry app.ts was
@@ -392,7 +453,7 @@ const setSplit = async (on: boolean) => (await import("./model")).split.set(on)
 // moves the mocked cursor moves the model's in the same breath, through the
 // registry app.ts was imported into (boot() resets modules).
 const setCursor = async (chron: number) => {
-   nav.currentChron.mockReturnValue(chron)
+   seedCursor(chron)
    ;(await import("./model")).cursor.set({ chron, feedId: 1 })
 }
 
@@ -408,6 +469,12 @@ async function boot(initialHash = "") {
    document.body.innerHTML = SKELETON
    window.location.hash = initialHash
    vi.resetModules()
+   // Import the model FIRST, in the fresh registry: app.ts's own import of
+   // ./model then resolves to this same instance.
+   M = await import("./model")
+   S = await import("./signals")
+   M.cursor.set(seeded.cursor)
+   M.unreadOnly.set(seeded.unreadOnly)
    await import("./app")
    await flush() // let init()'s awaited data.init + initial route settle
 }
@@ -423,6 +490,9 @@ beforeEach(() => {
    nav.filter.search = false
    nav.filter.active = false
    nav.filter.tokens = []
+   seeded.cursor = { chron: -1, feedId: -1 }
+   seeded.unreadOnly = false
+   M = undefined
    data.init.mockResolvedValue(undefined)
    nav.fromHash.mockResolvedValue(showFeed())
    // vi.clearAllMocks clears calls but NOT mockReturnValue — pin the picker's
@@ -545,7 +615,7 @@ describe("split view (body.srr-split)", () => {
       // rather than at the end of a case matters: a failing assertion skips the
       // rest of its body, so an in-body reset would leak the mock into every
       // case after it and turn one real failure into a cascade.
-      nav.currentChron.mockReturnValue(-1)
+      seedCursor(-1)
       nav.isSearchFilter.mockReturnValue(false)
       nav.tagUnreadFromCounts.mockReturnValue(0)
       data.db.feeds = {} as unknown as IDB["feeds"]
@@ -613,7 +683,7 @@ describe("split view (body.srr-split)", () => {
 
       // Mark-all-read's shape: nothing is unread ahead any more.
       nav.probeCurrent.mockResolvedValue(showFeed({ has_left: false, has_right: false, right_count: 0 }))
-      nav.isUnreadOnly.mockReturnValue(true)
+      seedUnreadOnly(true)
       pickerHooks()!.onToggleShowRead()
       await flush()
       expect(nextBtn().disabled).toBe(true)
@@ -746,23 +816,24 @@ describe("split view (body.srr-split)", () => {
       expect(list.refresh).toHaveBeenCalled()
    })
 
-   it("a row's ★ re-derives the reader's save button — but only for the article it shows", async () => {
+   it("a ★ written anywhere re-derives the reader's save button — for the article it shows", async () => {
       await boot()
       nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
-      await setCursor(2)
+      seedCursor(2)
       hashTo("#2")
       await flush()
       const save = document.querySelector(".srr-save") as HTMLButtonElement
-      const sink = list.setSavedSink.mock.calls[0][0] as (chron: number) => void
-
-      nav.isSaved.mockReturnValue(true)
-      sink(9) // some other row's star — the button describes chron 2, not this
-      expect(save.classList.contains("srr-saved")).toBe(false)
-
-      sink(2)
-      expect(save.classList.contains("srr-saved")).toBe(true)
-      expect(save.getAttribute("aria-pressed")).toBe("true")
-      nav.isSaved.mockReturnValue(false)
+      try {
+         nav.isSaved.mockImplementation((c: number) => c === 9)
+         M!.saved.set([9]) // some other row's star — the button describes chron 2
+         expect(save.classList.contains("srr-saved")).toBe(false)
+         nav.isSaved.mockImplementation((c: number) => c === 2)
+         M!.saved.set([9, 2])
+         expect(save.classList.contains("srr-saved")).toBe(true)
+         expect(save.getAttribute("aria-pressed")).toBe("true")
+      } finally {
+         nav.isSaved.mockImplementation(() => false)
+      }
    })
 
    // The READ half of the same seam, and the one the ★ fix missed. A row swipe's
@@ -781,12 +852,11 @@ describe("split view (body.srr-split)", () => {
       hashTo("#2")
       await flush()
       expect(document.querySelector(".srr-next-count")!.textContent).toBe("25")
-      const sink = list.setFrontierSink.mock.calls[0][0] as () => void
 
       // The swipe consumed one of them.
       nav.probeCurrent.mockResolvedValue(showFeed({ has_left: true, has_right: true, right_count: 24 }))
       nav.tagUnreadFromCounts.mockReturnValue(24)
-      sink()
+      seedSeen({ "feed:1": 3 }) // the swipe's frontier write, as seen.ts publishes it
       await flush()
       expect(document.querySelector(".srr-next-count")!.textContent).toBe("24")
       expect(document.title).toContain("(24)")
@@ -885,6 +955,10 @@ describe("split view (body.srr-split)", () => {
    it("re-derives the pane's chrome when the list switches to a search filter", async () => {
       await boot()
       nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true, right_count: 25 }))
+      // A live pane's chrome effect may re-probe on the incidental setCursor/lane
+      // moves below (a real navigation wouldn't leave the count stale either) —
+      // arm the mock so any such probe agrees with the landing it just painted.
+      nav.probeCurrent.mockResolvedValue(showFeed({ has_left: true, has_right: true, right_count: 25 }))
       hashTo("#2")
       await flush()
       await setCursor(2)
@@ -909,6 +983,9 @@ describe("split view (body.srr-split)", () => {
    it("re-derives the pane's chrome on every query change, not just at search entry", async () => {
       await boot()
       nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true, right_count: 25 }))
+      // A live pane's chrome effect may re-probe on the incidental lane move
+      // below — arm the mock so any such probe agrees with the landing.
+      nav.probeCurrent.mockResolvedValue(showFeed({ has_left: true, has_right: true, right_count: 25 }))
       await setCursor(2)
       hashTo("#2")
       await flush()
@@ -932,12 +1009,20 @@ describe("split view (body.srr-split)", () => {
    it("brings the list cursor along after a guarded navigation — split only", async () => {
       await boot()
       list.followCursor.mockClear()
+      nav.fromHash.mockImplementationOnce(async () => {
+         seedCursor(2)
+         return showFeed()
+      })
       hashTo("#2")
       await flush()
       expect(list.followCursor).toHaveBeenCalled()
       // Narrow: the same navigation must NOT touch the hidden list.
       await setSplit(false)
       list.followCursor.mockClear()
+      nav.fromHash.mockImplementationOnce(async () => {
+         seedCursor(3)
+         return showFeed()
+      })
       hashTo("#3")
       await flush()
       expect(list.followCursor).not.toHaveBeenCalled()
@@ -949,7 +1034,6 @@ describe("split view (body.srr-split)", () => {
    // that mattered: while you read (the normal split state) a whole fetch cycle
    // landed with the always-visible pane showing neither a new row nor a pill.
    it("reconciles BOTH panes after a store refresh, whichever surface has focus", async () => {
-      const afterStore = () => refresh.init.mock.calls[0][1] as () => void
       await boot("#2") // reader surface
       nav.fromHash.mockResolvedValue(showFeed({ has_right: true, right_count: 2 }))
       hashTo("#5")
@@ -957,7 +1041,7 @@ describe("split view (body.srr-split)", () => {
       await setCursor(5)
       list.onStoreGrown.mockClear()
       nav.probeCurrent.mockClear()
-      afterStore()()
+      publishStore(true) // refresh.ts's publish after nav reconciled
       await flush()
       expect(list.onStoreGrown).toHaveBeenCalledTimes(1) // the pane grows…
       expect(nav.probeCurrent).toHaveBeenCalled() // …and the reader re-probes
@@ -972,7 +1056,7 @@ describe("split view (body.srr-split)", () => {
       expect(reader().classList.contains("srr-reader-empty")).toBe(true)
       await setCursor(4) // the list's anchor seed
       nav.probeCurrent.mockResolvedValue(showFeed({ has_left: true, has_right: true, right_count: 9 }))
-      ;(refresh.init.mock.calls[0][1] as () => void)()
+      publishStore(true)
       await flush()
       expect(prevBtn().disabled).toBe(true)
       expect(document.querySelector(".srr-next-count")!.textContent).not.toBe("9")
@@ -985,11 +1069,10 @@ describe("split view (body.srr-split)", () => {
       hashTo("#5")
       await flush()
       await setCursor(5)
-      list.rerender.mockClear()
-      const afterMerge = dropdown.setProfileImportHook.mock.calls[0][0] as (m?: boolean) => void
-      afterMerge(false)
+      list.refresh.mockClear()
+      seedSeen({ "feed:1": 9 }) // another device's reads, as seen.ts republishes them
       await flush()
-      expect(list.rerender).toHaveBeenCalled()
+      expect(list.refresh).toHaveBeenCalled()
    })
 
    // The boot-pull re-anchor re-applies the filter and rebuilds the list from its
@@ -1012,14 +1095,14 @@ describe("split view (body.srr-split)", () => {
       expect(document.body.classList.contains("srr-view-list")).toBe(true)
       expect(reader().classList.contains("srr-reader-empty")).toBe(false) // readerLive
       list.render.mockClear()
-      list.rerender.mockClear()
+      list.refresh.mockClear()
       nav.applyFilter.mockClear()
-      const afterMerge = dropdown.setProfileImportHook.mock.calls[0][0] as (m?: boolean) => void
-      afterMerge(false)
+      M!.profileRev.update((n) => n + 1) // profile.ts's announcement…
+      seedSeen({ "feed:1": 9 }) // …and seen.ts's republish, as another device's reads
       await flush()
       expect(nav.applyFilter).not.toHaveBeenCalled()
       expect(list.render).not.toHaveBeenCalled()
-      expect(list.rerender).toHaveBeenCalled()
+      expect(list.refresh).toHaveBeenCalled()
    })
 
    // The row cursor IS the reader's article under split (list.followCursor), and
@@ -1266,10 +1349,10 @@ describe("split view (body.srr-split)", () => {
       hashTo("#!news") // list surface, article still in the pane
       await flush()
       nav.probeCurrent.mockClear()
-      list.rerender.mockClear()
+      list.reconcile.mockClear()
       pickerHooks()!.onToggleShowRead()
       await flush()
-      expect(list.rerender).toHaveBeenCalled() // the pane rebuilds…
+      expect(list.reconcile).toHaveBeenCalledWith(true) // the pane rebuilds…
       expect(nav.probeCurrent).toHaveBeenCalled() // …and the reader re-probes
    })
 
@@ -1652,7 +1735,7 @@ describe("reader compaction tombstone (§9.3 — expired article, no stored cont
 describe("reader media state survives prev/next", () => {
    const content = () => document.querySelector(".srr-content") as HTMLElement
    const showAt = async (chron: number, body: string) => {
-      nav.currentChron.mockReturnValue(chron)
+      seedCursor(chron)
       nav.fromHash.mockResolvedValue(showFeed({ article: { f: 1, a: 0, p: 0, c: body } as IArticle }))
       hashTo("#" + chron)
       await flush()
@@ -2054,16 +2137,15 @@ describe("pagerCommit — app.ts's seam to the pager", () => {
    }
    // Some cases below drive nav.currentChron() as stateful (mockImplementation);
    // restore the plain default so a later, unrelated test never inherits it.
-   afterEach(() => nav.currentChron.mockReturnValue(-1))
+   afterEach(() => seedCursor(-1))
 
    it("commits through the same guarded nav call the keyboard uses, and reports true once the cursor moved", async () => {
       await boot()
       hashTo("#2")
       await flush()
-      let chron = 2
-      nav.currentChron.mockImplementation(() => chron)
+      seedCursor(2)
       nav.right.mockImplementationOnce(async () => {
-         chron = 3 // resolve() commits pos only on success — this IS that commit
+         seedCursor(3) // resolve() commits pos only on success — this IS that commit
          return showFeed()
       })
       const ok = await getCommit()("next")
@@ -2097,10 +2179,9 @@ describe("pagerCommit — app.ts's seam to the pager", () => {
       await flush()
       await settleFade() // this landing's own fade clear must not land on an assertion below
       const content = document.querySelector(".srr-content") as HTMLElement
-      let chron = 2
-      nav.currentChron.mockImplementation(() => chron)
+      seedCursor(2)
       nav.right.mockImplementationOnce(async () => {
-         chron = 3
+         seedCursor(3)
          return showFeed()
       })
       await getCommit()("next")
@@ -2349,8 +2430,10 @@ describe("back-button filter breadcrumb (which lane is the reader in)", () => {
    const back = () => document.querySelector(".srr-back") as HTMLButtonElement
 
    it("names a tag filter as a hashtag and folds it into the button's accessible name", async () => {
-      await boot()
+      // Seeded before boot: the feedLabel effect repaints on a lane/store/mount
+      // move, and the mocked fromHash below never touches model.laneTokens.
       nav.getCurrentFilterKey.mockReturnValue("info")
+      await boot()
       hashTo("#3!info")
       await flush()
       expect(backLabel().textContent).toBe("#info")
@@ -2359,8 +2442,8 @@ describe("back-button filter breadcrumb (which lane is the reader in)", () => {
    })
 
    it("names a single-feed filter by title, tinted with its source color", async () => {
-      await boot()
       nav.getCurrentFilterKey.mockReturnValue("7")
+      await boot()
       hashTo("#3!7")
       await flush()
       expect(backLabel().textContent).toBe("Feed") // data.feedTitle mock
@@ -2368,8 +2451,8 @@ describe("back-button filter breadcrumb (which lane is the reader in)", () => {
    })
 
    it("names the saved smart-folder without a hashtag", async () => {
-      await boot()
       nav.getCurrentFilterKey.mockReturnValue("~saved")
+      await boot()
       hashTo("#3!~saved")
       await flush()
       expect(backLabel().textContent).toBe("★ Saved")
@@ -2377,9 +2460,9 @@ describe("back-button filter breadcrumb (which lane is the reader in)", () => {
    })
 
    it("stays empty (hidden) on the unfiltered wire — silence means [ALL]", async () => {
-      await boot()
       // clearAllMocks resets calls, not mockReturnValue — pin the key explicitly.
       nav.getCurrentFilterKey.mockReturnValue("")
+      await boot()
       hashTo("#3")
       await flush()
       expect(backLabel().textContent).toBe("")
@@ -2435,6 +2518,48 @@ describe("guard() — busy mutex", () => {
          vi.useRealTimers()
       }
       expect(nav.fromHash).toHaveBeenLastCalledWith("3")
+   })
+
+   it("a stale-mutex reclaim from guardBg resets model.rendering, not just the holds set", async () => {
+      // guard() takes a rendering hold via beginRendering()/endRendering(), but
+      // guardBg() (the background-refresh mutex twin wired as refresh.init's
+      // `exclusive` arg) never does — it has no render of its own to gate. If
+      // acquire()'s stale reclaim only cleared renderingHolds and left
+      // model.rendering untouched, a reclaim performed BY guardBg would leave
+      // model.rendering latched true forever (nothing left to flip it back),
+      // silently wedging every effect gated on rendering() until some later
+      // guard()-routed navigation fixed it as a side effect of its own
+      // begin/endRendering pair. This pins the fix: the reclaim resets
+      // model.rendering itself, in acquire(), regardless of which caller
+      // triggers it.
+      await boot()
+      const model = await import("./model")
+      // guardBg is the function app.ts wired as refresh.init's first (and
+      // only) argument.
+      const guardBg = refresh.init.mock.calls[0][0] as (fn: () => Promise<void>) => Promise<boolean>
+
+      // Wedge the mutex via a guard()-routed navigation whose promise never
+      // settles — this is the one path that takes a rendering hold.
+      nav.fromHash.mockImplementationOnce(() => new Promise<never>(() => {}))
+      hashTo("#2")
+      await flush()
+      expect(model.rendering()).toBe(true)
+
+      // Far past BUSY_STUCK_MS, a DIFFERENT caller — guardBg, not guard() —
+      // reclaims the stale mutex.
+      try {
+         vi.useFakeTimers()
+         vi.setSystemTime(Date.now() + 10 * 60_000)
+         const p = guardBg(async () => {})
+         await vi.advanceTimersByTimeAsync(0)
+         await p
+      } finally {
+         vi.useRealTimers()
+      }
+
+      // The reclaim must not leave model.rendering stuck true with zero
+      // outstanding holds.
+      expect(model.rendering()).toBe(false)
    })
 })
 
@@ -2517,7 +2642,7 @@ describe("error popup — focus trap + close", () => {
 describe("list → reader — open-article button", () => {
    it("enters the reader at the current article (the tap counterpart of Escape)", async () => {
       await boot() // list surface
-      nav.currentChron.mockReturnValue(5)
+      seedCursor(5)
       nav.goTo.mockClear()
       document
          .querySelector<HTMLButtonElement>(".srr-open-reader")!
@@ -2530,7 +2655,7 @@ describe("list → reader — open-article button", () => {
 
    it("falls back to the newest article when nothing is current (currentChron < 0)", async () => {
       await boot()
-      nav.currentChron.mockReturnValue(-1)
+      seedCursor(-1)
       nav.listAnchor.mockResolvedValue(-1)
       nav.last.mockClear()
       document
@@ -2622,15 +2747,13 @@ describe("filter picker — the toolbar's filter button (both surfaces)", () => 
    // surface the overlay is open over (the picker re-renders its own rows itself).
    it("onToggleShowRead over the list flips unread-only and rebuilds the list", async () => {
       await boot() // list surface
-      nav.isUnreadOnly.mockReturnValue(false) // read shown → toggle turns unread-only on
+      seedUnreadOnly(false) // read shown → toggle turns unread-only on
       nav.setUnreadOnly.mockClear()
-      list.rerender.mockClear()
-      list.invalidate.mockClear()
+      list.reconcile.mockClear()
       pickerHooks()!.onToggleShowRead()
       await flush()
       expect(nav.setUnreadOnly).toHaveBeenCalledWith(true)
-      expect(list.rerender).toHaveBeenCalledTimes(1) // visible list rebuilds now
-      expect(list.invalidate).not.toHaveBeenCalled()
+      expect(list.reconcile).toHaveBeenCalledWith(true) // visible list rebuilds now
       expect(nav.probeCurrent).not.toHaveBeenCalled() // no reader on screen
    })
 
@@ -2638,17 +2761,15 @@ describe("filter picker — the toolbar's filter button (both surfaces)", () => 
       await boot()
       hashTo("#2")
       await flush()
-      nav.currentChron.mockReturnValue(2) // a real article on screen (not a placeholder)
-      nav.isUnreadOnly.mockReturnValue(true) // unread-only → toggle turns it off
+      seedCursor(2) // a real article on screen (not a placeholder)
+      seedUnreadOnly(true) // unread-only → toggle turns it off
       nav.setUnreadOnly.mockClear()
-      list.rerender.mockClear()
-      list.invalidate.mockClear()
+      list.reconcile.mockClear()
       nav.probeCurrent.mockClear()
       pickerHooks()!.onToggleShowRead()
       await flush()
       expect(nav.setUnreadOnly).toHaveBeenCalledWith(false)
-      expect(list.invalidate).toHaveBeenCalledTimes(1) // hidden list: deferred rebuild
-      expect(list.rerender).not.toHaveBeenCalled() // never rebuild a display:none list
+      expect(list.reconcile).toHaveBeenCalledWith(false) // hidden list: deferred rebuild
       expect(nav.probeCurrent).toHaveBeenCalledTimes(1) // reader chrome re-derives
    })
 
@@ -2656,9 +2777,9 @@ describe("filter picker — the toolbar's filter button (both surfaces)", () => 
       await boot()
       hashTo("#2")
       await flush()
-      nav.currentChron.mockReturnValue(-1) // reader shows a "Not started"/"caught up" placeholder
+      seedCursor(-1) // reader shows a "Not started"/"caught up" placeholder
       nav.getCurrentFilterKey.mockReturnValue("7")
-      nav.isUnreadOnly.mockReturnValue(true)
+      seedUnreadOnly(true)
       nav.setUnreadOnly.mockClear()
       nav.switchFilter.mockClear()
       nav.probeCurrent.mockClear()
@@ -2674,11 +2795,11 @@ describe("filter picker — the toolbar's filter button (both surfaces)", () => 
       await boot()
       hashTo("#2")
       await flush()
-      nav.currentChron.mockReturnValue(-1) // placeholder
+      seedCursor(-1) // placeholder
       nav.filter.active = true
       nav.filter.tokens = ["5", "9"] // multi-token (URL-only) filter, e.g. #!5+9
       nav.getCurrentFilterKey.mockReturnValue("") // getCurrentFilterKey collapses multi-token to ""
-      nav.isUnreadOnly.mockReturnValue(true)
+      seedUnreadOnly(true)
       nav.switchFilter.mockClear()
       pickerHooks()!.onToggleShowRead()
       await flush()
@@ -2790,7 +2911,7 @@ describe("the frontier menu — right-click / long-press on the reader's next pi
       await flush()
       nav.isSearchFilter.mockReturnValue(false) // vi.fn return values leak across tests
       nav.filter.feeds = new Map([[1, 0]])
-      nav.currentChron.mockReturnValue(7)
+      seedCursor(7)
       const e = rightClick(".srr-next")
       expect(e.defaultPrevented).toBe(true) // ours, not the browser's menu
       expect(dropdown.showContextMenu).toHaveBeenCalledWith(document.querySelector(".srr-next"), expect.anything())
@@ -2803,7 +2924,7 @@ describe("the frontier menu — right-click / long-press on the reader's next pi
       await flush()
       nav.isSearchFilter.mockReturnValue(false)
       nav.filter.feeds = new Map([[1, 0]])
-      nav.currentChron.mockReturnValue(7)
+      seedCursor(7)
       nav.lanePeek.mockReturnValueOnce(true) // a peek lane that is neither mode
       const e = rightClick(".srr-next")
       expect(e.defaultPrevented).toBe(false) // no items: the browser's own menu
@@ -2811,21 +2932,24 @@ describe("the frontier menu — right-click / long-press on the reader's next pi
 
    it("'Mark all read' raises and (unread-only, reader view) re-applies + invalidates the hidden list", async () => {
       await boot()
+      seedCursor(7) // a real article on screen, seeded before the landing
       hashTo("#2")
       await flush()
       nav.isSearchFilter.mockReturnValue(false)
       nav.filter.feeds = new Map([[1, 0]])
-      nav.isUnreadOnly.mockReturnValue(true)
+      seedUnreadOnly(true)
       nav.applyFilter.mockClear()
+      nav.probeCurrent.mockClear()
       rightClick(".srr-next")
       menuItems()!
          .find((i) => i.label === "Mark all read")!
          .action()
       expect(nav.markAllRead).toHaveBeenCalledTimes(1)
-      // Unread-only: the membership changed wholesale — re-apply the current
-      // tokens and drop the hidden list's built window for the next show().
-      expect(nav.applyFilter).toHaveBeenCalledWith([])
-      expect(list.invalidate).toHaveBeenCalledTimes(1)
+      // Unread-only: the membership changed wholesale. The re-apply itself is
+      // now internal to nav (Task 20's membership effect, pinned in
+      // nav.test.ts's D1 suite) — what's left to check here is that the
+      // frontier-epoch bump still reaches the hidden list's invalidation.
+      expect(list.reconcile).toHaveBeenCalledWith(false)
       expect(nav.probeCurrent).toHaveBeenCalledTimes(1) // reader chrome re-derives
    })
 
@@ -2833,7 +2957,7 @@ describe("the frontier menu — right-click / long-press on the reader's next pi
       await boot() // list surface
       nav.isSearchFilter.mockReturnValue(false)
       nav.filter.feeds = new Map([[1, 0]])
-      nav.currentChron.mockReturnValue(7) // items WOULD apply — the anchor is what's absent
+      seedCursor(7) // items WOULD apply — the anchor is what's absent
       const e = rightClick(".srr-feed")
       expect(e.defaultPrevented).toBe(false)
       expect(dropdown.showContextMenu).not.toHaveBeenCalled()
@@ -2841,12 +2965,14 @@ describe("the frontier menu — right-click / long-press on the reader's next pi
 
    it("with read items shown nothing re-applies; only the reader chrome re-probes", async () => {
       await boot()
+      seedCursor(7) // a real article on screen, seeded before the landing
       hashTo("#2")
       await flush()
       nav.isSearchFilter.mockReturnValue(false)
       nav.filter.feeds = new Map([[1, 0]])
-      nav.isUnreadOnly.mockReturnValue(false)
+      seedUnreadOnly(false)
       nav.applyFilter.mockClear()
+      nav.probeCurrent.mockClear()
       rightClick(".srr-next")
       menuItems()!
          .find((i) => i.label === "Mark all read")!
@@ -2860,11 +2986,12 @@ describe("the frontier menu — right-click / long-press on the reader's next pi
 
    it("'Mark unread from here' rewinds from the current article and re-probes the reader chrome", async () => {
       await boot()
+      seedCursor(7) // seeded before the landing
       hashTo("#2")
       await flush()
       nav.isSearchFilter.mockReturnValue(false)
       nav.filter.feeds = new Map([[1, 0]])
-      nav.currentChron.mockReturnValue(7)
+      nav.probeCurrent.mockClear()
       rightClick(".srr-next")
       menuItems()!
          .find((i) => i.label === "Mark unread from here")!
@@ -2876,7 +3003,7 @@ describe("the frontier menu — right-click / long-press on the reader's next pi
    it("stays silent in peek modes / with nothing to act on — the native menu is left alone", async () => {
       await boot()
       nav.isSearchFilter.mockReturnValue(false)
-      nav.currentChron.mockReturnValue(-1)
+      seedCursor(-1)
       // Empty membership + no current article: nothing applies.
       expect(rightClick(".srr-next").defaultPrevented).toBe(false)
       nav.filter.feeds = new Map([[1, 0]])
@@ -2896,7 +3023,7 @@ describe("the frontier menu — right-click / long-press on the reader's next pi
       await boot() // list surface — the readout is a tap-to-open-settings button only
       nav.isSearchFilter.mockReturnValue(false)
       nav.filter.feeds = new Map([[1, 0]])
-      nav.currentChron.mockReturnValue(7)
+      seedCursor(7)
       const readout = document.querySelector(".srr-feed") as HTMLButtonElement
       vi.useFakeTimers()
       try {
@@ -2919,61 +3046,56 @@ describe("the frontier menu — right-click / long-press on the reader's next pi
       hashTo("#2")
       await flush()
       nav.isSearchFilter.mockReturnValue(false)
-      nav.currentChron.mockReturnValue(2)
+      seedCursor(2)
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "u", bubbles: true }))
       expect(nav.markUnreadFrom).toHaveBeenCalledWith(2)
    })
 })
 
 describe("cross-device sync wiring", () => {
-   it("boots sync with the shared after-merge refresh (list view → rerender)", async () => {
+   it("boots sync with no callbacks; a merged profile re-derives the rows and an open picker", async () => {
       await boot() // list surface
-      expect(sync.init).toHaveBeenCalledTimes(1)
-      const afterMerge = sync.init.mock.calls[0][0] as () => void
-      // An interaction first: the pre-interaction boot merge re-anchors instead
-      // (covered in the profile re-anchor suite) — this test pins the GENTLE path.
+      expect(sync.init).toHaveBeenCalledWith()
+      // An interaction first: the pre-interaction merge re-anchors instead
+      // (covered in the profile re-anchor suite) — this pins the GENTLE path.
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }))
-      nav.pruneSeen.mockClear()
-      list.rerender.mockClear()
+      list.refresh.mockClear()
       picker.render.mockClear()
       picker.isOpen.mockReturnValue(true)
-      afterMerge()
-      expect(nav.pruneSeen).toHaveBeenCalledTimes(1)
-      expect(list.rerender).toHaveBeenCalledTimes(1)
-      expect(picker.render).toHaveBeenCalledTimes(1) // open picker re-derives badges
+      M!.profileRev.update((n) => n + 1) // profile.ts's announcement…
+      seedSeen({ "feed:1": 4 }) // …and seen.ts's republish
+      expect(list.refresh).toHaveBeenCalled()
+      expect(picker.render).toHaveBeenCalledTimes(1)
       picker.isOpen.mockReturnValue(false)
    })
 
-   it("the status callback refills an OPEN settings menu's footer, and skips a closed one", async () => {
+   it("a sync status change refills an OPEN settings menu's footer, and skips a closed one", async () => {
       await boot()
-      const onStatus = sync.init.mock.calls[0][1] as () => void
       // Open the menu; the real showContextMenu attaches the footer to the DOM —
-      // the mock must too, since the callback gates on footer.isConnected.
+      // the mock must too, since the refill gates on footer.isConnected.
       dropdown.showContextMenu.mockImplementation((_a: HTMLElement, _i: unknown, opts?: { footer?: HTMLElement }) => {
          if (opts?.footer) document.body.appendChild(opts.footer)
       })
       document.querySelector<HTMLButtonElement>(".srr-feed")!.dispatchEvent(new MouseEvent("click", { bubbles: true }))
       const footer = (dropdown.showContextMenu.mock.calls.at(-1)?.[2] as { footer: HTMLElement }).footer
       picker.renderStatus.mockClear()
-      onStatus()
+      M!.syncStatus.set({ on: true, okAt: 5, error: "" }) // sync.ts's publish after a cycle
       expect(picker.renderStatus).toHaveBeenCalledWith(footer) // live refill in place
       footer.remove() // the menu closed
       picker.renderStatus.mockClear()
-      onStatus()
+      M!.syncStatus.set({ on: true, okAt: 6, error: "" })
       expect(picker.renderStatus).not.toHaveBeenCalled() // disconnected footer → skipped
    })
 
-   it("skips the list rebuild while the reader is on screen (show() re-derives on return)", async () => {
+   it("leaves a list hidden behind the reader alone (show() re-derives on return)", async () => {
       await boot("#2") // reader surface
-      const afterMerge = sync.init.mock.calls[0][0] as () => void
-      list.rerender.mockClear()
-      afterMerge()
-      expect(list.rerender).not.toHaveBeenCalled()
+      list.refresh.mockClear()
+      seedSeen({ "feed:1": 4 })
+      expect(list.refresh).not.toHaveBeenCalled()
    })
 })
 
 describe("live content sync wiring", () => {
-   const afterStore = () => refresh.init.mock.calls[0][1] as () => void
    const nextBtn = () => document.querySelector(".srr-next") as HTMLButtonElement
    const pulsing = () => nextBtn().classList.contains("srr-next-pulse")
    const menuItems = () =>
@@ -2987,18 +3109,19 @@ describe("live content sync wiring", () => {
    async function refreshWith(before: number, after: number) {
       await boot("#2") // reader surface
       nav.fromHash.mockResolvedValue(showFeed({ has_right: true, right_count: before }))
+      seedCursor(5)
       hashTo("#5")
       await flush()
       nav.probeCurrent.mockResolvedValue(showFeed({ has_right: true, right_count: after }))
-      afterStore()()
+      publishStore(true) // refresh.ts's publish after nav reconciled
       await flush()
    }
 
-   it("wires refresh.init with the background guard and after-store refresh", async () => {
+   it("wires refresh.init with the background guard alone (the rest follows the model)", async () => {
       await boot()
       expect(refresh.init).toHaveBeenCalledTimes(1)
+      expect(refresh.init.mock.calls[0]).toHaveLength(1)
       expect(typeof refresh.init.mock.calls[0][0]).toBe("function") // guardBg
-      expect(typeof refresh.init.mock.calls[0][1]).toBe("function") // refreshAfterStore
    })
 
    // RDR3, reader half: the store growing is the ONE thing that raises the
@@ -3019,13 +3142,14 @@ describe("live content sync wiring", () => {
 
    it("does not pulse for a frontier gesture that raises the same count", async () => {
       // Mark-unread-from-here grows the pending count too, but it is the user's
-      // own action on screen — reprobeReaderChrome only pulses for the store path.
+      // own action on screen — the `readerChrome` effect's applyChrome(pulseOnGrowth)
+      // only pulses for the store-refresh path.
       await boot("#2")
       nav.fromHash.mockResolvedValue(showFeed({ has_right: true, right_count: 2 }))
       hashTo("#5")
       await flush()
       nav.isSearchFilter.mockReturnValue(false)
-      nav.currentChron.mockReturnValue(7)
+      seedCursor(7)
       nav.probeCurrent.mockResolvedValue(showFeed({ has_right: true, right_count: 40 }))
       rightClick(".srr-next")
       menuItems()!
@@ -3039,7 +3163,7 @@ describe("live content sync wiring", () => {
    it("does not pulse on the list surface (the 'N new' pill is the signal there)", async () => {
       await boot() // list surface
       nav.probeCurrent.mockClear()
-      afterStore()()
+      publishStore(true)
       await flush()
       expect(nav.probeCurrent).not.toHaveBeenCalled()
       expect(list.onStoreGrown).toHaveBeenCalledTimes(1)
@@ -3056,43 +3180,70 @@ describe("live content sync wiring", () => {
 describe("profile re-anchor — the boot pull changed read positions", () => {
    it("re-anchors the list before any interaction (device-switch moment)", async () => {
       await boot() // list view, nothing touched yet
-      const afterMerge = sync.init.mock.calls[0][0] as () => void
-      nav.applyFilter.mockClear()
+      nav.reapplyLane.mockClear()
       list.render.mockClear()
       list.rerender.mockClear()
-      afterMerge()
+      M!.profileRev.update((n) => n + 1)
       await flush()
-      expect(nav.applyFilter).toHaveBeenCalledWith([]) // re-snapshot bounds for the current tokens
+      expect(nav.reapplyLane).toHaveBeenCalledTimes(1) // re-snapshot bounds for the current tokens (Task 20)
       expect(list.render).toHaveBeenCalledTimes(1) // the full re-anchor…
       expect(list.rerender).not.toHaveBeenCalled() // …not the gentle rebuild
    })
 
-   it("a merge after the first interaction stays gentle (no re-anchor)", async () => {
+   it("a merge after the first interaction never RE-ANCHORS (show-read: stays fully gentle)", async () => {
       await boot()
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }))
-      const afterMerge = sync.init.mock.calls[0][0] as () => void
+      seedUnreadOnly(false) // show-read: membership doesn't key off the frontier at all
       nav.applyFilter.mockClear()
+      nav.reapplyLane.mockClear()
       list.render.mockClear()
       list.rerender.mockClear()
-      afterMerge()
+      M!.profileRev.update((n) => n + 1)
       await flush()
+      expect(nav.reapplyLane).not.toHaveBeenCalled()
       expect(list.render).not.toHaveBeenCalled()
-      expect(list.rerender).toHaveBeenCalledTimes(1)
+      expect(list.rerender).not.toHaveBeenCalled()
    })
 
-   it("exempts the saved/search peek modes (gentle rebuild instead)", async () => {
+   // The bug this restores: refreshAfterMerge used to unconditionally rebuild the
+   // list on every merge so another device's reads never kept showing beside the
+   // article you're on. The signals refactor lost that for the ongoing-session
+   // case — seen.ts's listRows effect only re-derives the `.srr-row-unread` class
+   // in place, and list.ts's membershipKey() never keys off model.seen under
+   // unread-only, only model.frontierEpoch — so a post-interaction merge left a
+   // just-read row seated in an unread-only list until the mode flipped, a
+   // frontier gesture fired, or the page reloaded.
+   it("a merge after the first interaction still REBUILDS an open unread-only list (not just a re-anchor)", async () => {
       await boot()
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }))
+      seedUnreadOnly(true)
+      nav.reapplyLane.mockClear()
+      list.render.mockClear()
+      list.rerender.mockClear()
+      M!.profileRev.update((n) => n + 1) // profile.ts's announcement…
+      seedSeen({ "feed:1": 9 }) // …another device's reads, as seen.ts republishes them
+      await flush()
+      expect(nav.reapplyLane).toHaveBeenCalledTimes(1) // re-snapshot the raised bounds
+      expect(list.rerender).toHaveBeenCalledTimes(1) // …a full rebuild, forced regardless of builtKey…
+      expect(list.render).not.toHaveBeenCalled() // …never the pre-interaction RE-ANCHOR path
+   })
+
+   it("exempts the saved/search peek modes (gentle rebuild instead), even under unread-only", async () => {
+      await boot()
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }))
+      seedUnreadOnly(true)
       nav.filter.saved = true
       try {
-         const afterMerge = sync.init.mock.calls[0][0] as () => void
          nav.applyFilter.mockClear()
+         nav.reapplyLane.mockClear()
          list.render.mockClear()
          list.rerender.mockClear()
-         afterMerge()
+         M!.profileRev.update((n) => n + 1)
          await flush()
          expect(nav.applyFilter).not.toHaveBeenCalled()
+         expect(nav.reapplyLane).not.toHaveBeenCalled()
          expect(list.render).not.toHaveBeenCalled()
-         expect(list.rerender).toHaveBeenCalledTimes(1)
+         expect(list.rerender).not.toHaveBeenCalled()
       } finally {
          nav.filter.saved = false
       }
@@ -3100,11 +3251,22 @@ describe("profile re-anchor — the boot pull changed read positions", () => {
 
    it("a boot merge in the READER stays gentle (restored positions and deep links hold)", async () => {
       await boot("#2") // reader view, no interaction
-      const afterMerge = sync.init.mock.calls[0][0] as () => void
       list.render.mockClear()
-      afterMerge()
+      M!.profileRev.update((n) => n + 1)
       await flush()
       expect(list.render).not.toHaveBeenCalled()
+   })
+
+   it("a post-interaction merge under unread-only leaves a hidden list alone (no pointless rebuild)", async () => {
+      await boot("#2") // reader surface — the list is not on screen
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }))
+      seedUnreadOnly(true)
+      nav.reapplyLane.mockClear()
+      list.rerender.mockClear()
+      M!.profileRev.update((n) => n + 1)
+      await flush()
+      expect(nav.reapplyLane).not.toHaveBeenCalled()
+      expect(list.rerender).not.toHaveBeenCalled()
    })
 })
 
@@ -3138,7 +3300,7 @@ describe("Escape — surface toggle ladder", () => {
 
    it("list → reader: opens the selected row (currentChron)", async () => {
       await boot()
-      nav.currentChron.mockReturnValue(5)
+      seedCursor(5)
       nav.goTo.mockClear()
       esc()
       await flush()
@@ -3147,7 +3309,7 @@ describe("Escape — surface toggle ladder", () => {
 
    it("list → reader: no selection → opens the filter's oldest unseen (listAnchor)", async () => {
       await boot()
-      nav.currentChron.mockReturnValue(-1)
+      seedCursor(-1)
       nav.listAnchor.mockResolvedValue(8)
       nav.goTo.mockClear()
       esc()
@@ -3157,7 +3319,7 @@ describe("Escape — surface toggle ladder", () => {
 
    it("list → reader: nothing unseen → opens the newest (last)", async () => {
       await boot()
-      nav.currentChron.mockReturnValue(-1)
+      seedCursor(-1)
       nav.listAnchor.mockResolvedValue(-1)
       nav.goTo.mockClear()
       nav.last.mockClear()
@@ -3296,7 +3458,7 @@ describe("list cycle keys — W/S and ↑/↓ step the filter on the list too", 
 async function invokePinAction(isUnreadOnly: boolean): Promise<void> {
    // In unread-only mode the filter must be active (a feed/tag scope, not [ALL])
    // so the snapshot note fires.
-   nav.isUnreadOnly.mockReturnValue(isUnreadOnly)
+   seedUnreadOnly(isUnreadOnly)
    nav.filter = { feeds: new Map([[0, 0]]), saved: false, search: false, active: isUnreadOnly, tokens: [] }
 
    // Stub a SW controller so the pin row appears and pinCurrentFilter doesn't no-op.
@@ -3311,8 +3473,9 @@ async function invokePinAction(isUnreadOnly: boolean): Promise<void> {
          // app.ts's `navigator.serviceWorker?.addEventListener("controllerchange")`
          // guards a missing OBJECT, not a missing METHOD, so init() threw there,
          // init().catch(showError) swallowed it, and everything after — the
-         // listener, syncUnreadBadge(), the srr:ready dispatch — was silently
-         // skipped while these cases still passed on handlers bound earlier.
+         // listener, the effects registration, the srr:ready dispatch — was
+         // silently skipped while these cases still passed on handlers bound
+         // earlier.
          addEventListener: () => {},
       },
       configurable: true,
@@ -3660,7 +3823,7 @@ describe("offline pin — unpin subtraction & SW purge", () => {
 // The existing invokePinAction sends {done,total} with NO `cached`; here the SW
 // reports `cached` so the record-vs-warn completion branch is pinned.
 async function firePin(cached: number): Promise<void> {
-   nav.isUnreadOnly.mockReturnValue(false)
+   seedUnreadOnly(false)
    nav.filter = { feeds: new Map([[0, 0]]), saved: false, search: false, active: false, tokens: [] }
    const fakeSW = { postMessage: vi.fn() }
    Object.defineProperty(navigator, "serviceWorker", {
@@ -3881,10 +4044,6 @@ describe("saved-article asset pinning", () => {
          Object.defineProperty(navigator, "serviceWorker", { value: undefined, configurable: true })
       }
    }
-   // The hook app.ts installs on nav.toggleSaved — both save paths (the reader
-   // star and the list row) come through it.
-   const savedHook = () => nav.setSavedHook.mock.calls.at(-1)?.[0] as (chron: number, saved: boolean) => void
-
    // The live saved set the pin path re-reads after its await. A real set (not a
    // constant) is what lets a test un-save mid-flight the way a double-tapped
    // star does.
@@ -3902,7 +4061,7 @@ describe("saved-article asset pinning", () => {
          vi.mocked(extractAssetKeys).mockReturnValue(KEYS)
          await boot()
          savedSet.add(77)
-         savedHook()(77, true)
+         M!.saved.set([...M!.saved(), 77])
          await flush()
          expect(sw.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "pin", names: KEYS }))
          expect(listPins().get("~saved:77")?.names).toEqual(KEYS)
@@ -3923,9 +4082,9 @@ describe("saved-article asset pinning", () => {
          await boot()
 
          savedSet.add(77)
-         savedHook()(77, true) // the save: parked on the data pack
+         M!.saved.set([...M!.saved(), 77]) // the save: parked on the data pack
          savedSet.delete(77)
-         savedHook()(77, false) // the un-save: synchronous, lands first
+         M!.saved.set(M!.saved().filter((c) => c !== 77)) // the un-save: synchronous, lands first
          await flush()
          land({ f: 1, a: 0, p: 0, c: "<p>x</p>" }) // now the pack arrives
          await flush()
@@ -3941,7 +4100,12 @@ describe("saved-article asset pinning", () => {
          pinFilter("~saved:77", KEYS)
          pinFilter("~saved:88", [KEYS[0]])
          await boot()
-         savedHook()(77, false)
+         // Establish 77 as already-saved (the pin registry above stands in for
+         // what an earlier real save already pinned) before un-saving it, so the
+         // model.saved diff has a join to reverse.
+         M!.saved.set([77])
+         await flush()
+         M!.saved.set(M!.saved().filter((c) => c !== 77))
          await flush()
          expect(sw.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "unpin", names: [KEYS[1]] }))
          expect(listPins().has("~saved:77")).toBe(false)
@@ -3954,7 +4118,7 @@ describe("saved-article asset pinning", () => {
          vi.mocked(extractAssetKeys).mockReturnValue([])
          await boot()
          savedSet.add(77)
-         savedHook()(77, true)
+         M!.saved.set([...M!.saved(), 77])
          await flush()
          expect(sw.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "pin" }))
          expect(listPins().size).toBe(0)
@@ -3971,7 +4135,7 @@ describe("saved-article asset pinning", () => {
          vi.mocked(extractAssetKeys).mockReturnValue(KEYS)
          await boot()
          savedSet.add(77)
-         savedHook()(77, true)
+         M!.saved.set([...M!.saved(), 77])
          await flush()
          // Nothing to pin into, so nothing is claimed in the registry either —
          // a phantom entry would show "Remove offline copy" over bytes that

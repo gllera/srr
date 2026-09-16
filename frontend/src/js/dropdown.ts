@@ -635,17 +635,9 @@ export function showContextMenu(anchor: HTMLElement, items: MenuItem[], opts?: {
    menu.focus()
 }
 
-// Hook set by app.ts so the backup dialog can trigger a list rerender +
-// toolbar refresh after a successful import — without dropdown.ts importing app.ts.
-// Tests can pass their own callback directly to showBackupDialog(cb).
-let profileImportHook: ((mountsChanged: boolean) => void) | undefined
-
-export function setProfileImportHook(fn: (mountsChanged: boolean) => void): void {
-   profileImportHook = fn
-}
-
 // showBackupDialog opens the backup/restore modal. An optional `onImported`
-// callback overrides the module-level hook (used by tests). Its `mountsChanged`
+// callback hears about a successful import (tests use it); the app follows the
+// import through the model, which profile.ts updates. Its `mountsChanged`
 // argument lets the caller re-adopt the mount table at runtime when a RESTORE
 // merged a differing `mnt` — the same re-adoption the sync-pull path does.
 export function showBackupDialog(onImported?: (mountsChanged: boolean) => void): void {
@@ -750,7 +742,7 @@ function backupBody(close: () => void, onImported?: (mountsChanged: boolean) => 
       // A restore runs mergeMountState (both modes), which may have moved the
       // `mnt` table; forward that so app.ts re-adopts it at runtime instead of
       // leaving the runtime mounts/SW routes/picker stale until a reload.
-      ;(onImported ?? profileImportHook)?.(result.mountsChanged === true)
+      onImported?.(result.mountsChanged === true)
    })
 
    frag.append(importLabel, prefsRow, errEl, importBtn)

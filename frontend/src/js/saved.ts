@@ -49,11 +49,13 @@ export function publishSaved(): void {
    model.saved.set(savedOrder())
 }
 
-// The saved atom names the ACTIVE store's set; a store switch republishes it.
-// First run subscribes only (see seen.ts for why).
+// The saved atom names the ACTIVE store's set as stored; a store switch and a
+// profile merge (S14) republish it. First run subscribes only (see seen.ts for
+// why).
 let savedPrimed = false
 effect(() => {
    model.activeMid()
+   model.profileRev()
    if (!savedPrimed) {
       savedPrimed = true
       return
@@ -159,20 +161,5 @@ export function toggleSaved(
    stampSaved(chron)
    sync.pushSoon()
    ctx.onQueueChange()
-   savedHook?.(chron, nowSaved)
    return nowSaved
-}
-
-// The saved-set transition hook (FMT2a). ★ Saved keeps an article's TEXT forever
-// — packs are immutable — but its self-hosted images and media are deleted when
-// the feed's retention window passes, so a read-later queue quietly rots into
-// text with broken pictures. The backend cannot help: the saved set is
-// device-local, so only this device knows which assets to keep, and only the
-// service worker can keep them. Both save paths (the reader's star and the
-// list row's) come through toggleSaved, so this is the one seam; app.ts owns
-// what actually happens, since talking to the SW is not nav's job.
-let savedHook: ((chron: number, saved: boolean) => void) | null = null
-
-export function setSavedHook(fn: (chron: number, saved: boolean) => void): void {
-   savedHook = fn
 }

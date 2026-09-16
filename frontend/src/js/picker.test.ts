@@ -446,7 +446,11 @@ describe("show-read toggle (picker header)", () => {
       picker.open()
       expect(data.groupFeedsByTag).toHaveBeenLastCalledWith(true) // read shown → empty feeds listed
       // app.ts's hook flips the nav mode; simulate that flip so render() sees it.
-      hooks.onToggleShowRead.mockImplementation(() => nav.isUnreadOnly.mockReturnValue(true))
+      // …and the pickerRows effect re-renders the rows, which this suite stands in for.
+      hooks.onToggleShowRead.mockImplementation(() => {
+         nav.isUnreadOnly.mockReturnValue(true)
+         picker.render()
+      })
       data.groupFeedsByTag.mockClear()
       $(".srr-picker-showread").click()
       expect(hooks.onToggleShowRead).toHaveBeenCalledTimes(1)

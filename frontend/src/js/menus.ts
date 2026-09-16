@@ -7,9 +7,10 @@
 // from here), deliberately off the visible chrome. Both are built fresh per open
 // by dropdown.showContextMenu, so nothing here re-renders in place.
 //
-// It also owns the frontier gestures' UI half — the reconciliation every raise or
-// rewind shares (afterFrontierMove) and the RDR1/RDR2 undo snackbar offer — plus
-// the Stores dialog's mount-table mutations. Imports pin-ui and search-ui (the
+// It also owns the frontier gestures' UI half — the two write functions
+// (markAllRead / markUnreadFromHere; the reconciliation itself is effects.ts's,
+// over model.seen / model.frontierEpoch) and the RDR1/RDR2 undo snackbar offer —
+// plus the Stores dialog's mount-table mutations. Imports pin-ui and search-ui (the
 // two menus' rows point at them) but never reader.ts or app.ts: the reader
 // re-derive and everything app-level arrive through MenuDeps.
 import * as data from "./data"
@@ -24,35 +25,43 @@ import {
    type MenuItem,
 } from "./dropdown"
 import { el } from "./els"
-import * as list from "./list"
-import { addMount, mountLabel, removeMount, type MountRecord } from "./mounts"
+import { addMount, loadMounts, mountLabel, removeMount, type MountRecord } from "./mounts"
+import * as model from "./model"
 import * as nav from "./nav"
 import * as picker from "./picker"
 import { forgetMountState, pinMenuEntry, postMounts } from "./pin-ui"
 import { enterSearch } from "./search-ui"
+import { batch, effect, untracked } from "./signals"
 
 export interface MenuDeps {
-   // Is the LIST pane on screen (app.ts's layout facade)? The frontier
-   // reconciliation rebuilds the list only while it is — a display:none rebuild
-   // would pin zero row heights.
-   listVisible: () => boolean
    // The retryable error popup (the pin row's only app-level need).
    showError: (e: unknown, retry?: () => void) => void
    // The transient, focus-free notice — the undo offer's surface.
    showSnackbar: (text: string, action?: { label: string; run: () => void }) => void
    hideSnackbar: () => void
-   // The launcher badge + tab-title readout (RDR12): reading is what moves it.
-   syncUnreadBadge: () => Promise<void>
-   // Re-derive the reader after its filter bounds/mode shifted — a silent chrome
-   // re-probe on a real article, a re-run switch on a placeholder. app.ts owns it
-   // (it needs the guard mutex and the router's view state).
-   reReadReader: () => void
+   // Re-run the lane switch under a reader PLACEHOLDER whose bounds just moved
+   // (a real article's chrome is the readerChrome effect's). A navigation, so
+   // app.ts owns it (S17).
+   rerunPlaceholder: () => void
 }
 
 let d: MenuDeps
 
+// A merge that moved the mount table (a peer mounted on another device and
+// pulled in by sync, or a restored backup) is adopted exactly as the Stores
+// dialog adopts one (S14). One subscription however often setup() runs.
+let stopMountMerge: (() => void) | null = null
+
 export function setup(deps: MenuDeps): void {
    d = deps
+   stopMountMerge?.()
+   let adopted = untracked(() => model.profileMountsRev())
+   stopMountMerge = effect(() => {
+      const rev = model.profileMountsRev()
+      if (rev === adopted) return
+      adopted = rev
+      untracked(() => afterMountChange(loadMounts()))
+   })
 }
 
 // RDR1/RDR2 — after a landing (or a Mark all read) has raised the frontier,
@@ -97,66 +106,46 @@ export async function offerFrontierUndo(): Promise<void> {
       run: () => {
          d.hideSnackbar()
          // The mount comes FIRST — every term after it is only meaningful
-         // within one store, and afterFrontierMove() reconciles whichever lane
-         // is showing NOW, not the one the raise happened in. `pending`, not
-         // "whatever is pending now": the button undoes the move whose size it
-         // is showing, even if reading has moved a frontier again in the
+         // within one store, and the write below is what every surface showing
+         // NOW reconciles against, not the one the raise happened in. `pending`,
+         // not "whatever is pending now": the button undoes the move whose size
+         // it is showing, even if reading has moved a frontier again in the
          // seconds it has been up.
-         if (mid === data.activeStore().mid && nav.undoFrontierMove(pending)) afterFrontierMove()
+         if (mid === data.activeStore().mid) {
+            // Batched: undoFrontierMove writes model.seen (and flushes) and
+            // bumpFrontierEpoch writes model.frontierEpoch — one flush instead
+            // of two, same reasoning as nav.markAllRead/markUnreadFrom.
+            let moved = false
+            batch(() => {
+               moved = nav.undoFrontierMove(pending)
+               if (moved) nav.bumpFrontierEpoch() // a bulk frontier move, like the raise it undoes (D1)
+            })
+            if (moved) d.rerunPlaceholder()
+         }
       },
    })
 }
 
-// One reconciliation for both seen-frontier gestures (they differ only in the
-// direction the frontier moved). Under unread-only the filter membership
-// changed (each member's bound re-derives from the moved frontier): re-apply
-// the filter, then rebuild the list if it's the visible surface — or just
-// invalidate its built window when it's hidden behind the reader (rebuilding a
-// display:none list would pin zero row heights; the next show() rebuilds).
-// With read items shown the membership is untouched: re-grey the visible rows
-// in place (a hidden list re-greys on its return path — show()'s refresh()).
-// An open reader re-probes its chrome silently (prev/next + the pending pill
-// re-derive from the re-raised bounds; no content re-render, no scroll),
-// mirroring refreshAfterStore's reader branch.
-// Both branches key on layout visibility (d.listVisible), never `view`: an
-// on-screen pane skipped here keeps showing the pre-move row set (stale
-// membership under unread-only, stale dots otherwise) with its observer torn
-// down and no rebuild scheduled.
-function afterFrontierMove() {
-   const listVisible = d.listVisible()
-   if (nav.isUnreadOnly()) {
-      nav.applyFilter([...nav.filterTokens()])
-      if (listVisible) void list.rerender()
-      else list.invalidate()
-   } else if (listVisible) {
-      list.refresh()
-   }
-   void d.syncUnreadBadge()
-   // A frontier move from the ARMED "not started" placeholder (pos is -1, always a
-   // single-token filter — the only way nav.switchFilter produces it) re-runs the
-   // switch so the surface re-derives — mark-all-read turns it into the caught-up
-   // placeholder, Next disarmed. A real article just re-probes its chrome.
-   d.reReadReader()
-}
-
-// Mark the whole current feed/tag/[ALL] selection read — the frontier menu's
-// first action. A pure frontier raise in nav (sync-safe by construction).
+// The two seen-frontier gestures. The frontier write IS the reconciliation: the
+// list, the reader's chrome, the badge and an open picker are effects over
+// model.seen / model.frontierEpoch. What is left here is the one thing an effect
+// may not do — re-run the lane switch under a reader placeholder — and the undo
+// offer, which answers this write rather than projecting any state.
 function markAllRead() {
    if (!nav.markAllRead()) return
-   afterFrontierMove()
-   // Rides the same undo as a large landing (RDR2): one gesture, one way back,
-   // and no confirm dialog standing in front of the common case.
+   // A frontier move from the ARMED "not started" placeholder (pos -1) re-runs
+   // the switch, turning it into the caught-up placeholder.
+   d.rerunPlaceholder()
+   // Rides the same undo as a large landing (RDR2): one gesture, one way back.
    void offerFrontierUndo()
 }
 
 // The explicit unread rewind — the frontier menu's second action and the
-// reader's U key: everything from the current article (inclusive) to the
-// latest becomes unread across the current selection — the one gesture allowed
-// to lower a seen frontier (nav.markUnreadFrom; plain backward navigation no
-// longer does). The reader stays on the article; only its chrome re-derives.
+// reader's U key: everything from the current article (inclusive) to the latest
+// becomes unread across the current selection. The reader stays on the article.
 export function markUnreadFromHere(): void {
    const chron = nav.currentChron()
-   if (chron >= 0 && nav.markUnreadFrom(chron)) afterFrontierMove()
+   if (chron >= 0) nav.markUnreadFrom(chron)
 }
 
 // The frontier menu — both seen-frontier gestures live behind a secondary

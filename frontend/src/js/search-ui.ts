@@ -21,17 +21,12 @@
 // change) calls clearSearchDebounce() — one owner, so the timer can't be cleared
 // from two places that disagree about who holds it.
 import { el } from "./els"
-import * as list from "./list"
+import { layout } from "./layout"
 import * as nav from "./nav"
 import { togglePane } from "./pane"
 import { isSplit } from "./split"
 
 export interface SearchDeps {
-   // Is the LIST pane on screen (app.ts's layout facade)? Search is a list
-   // filter mode and the bar rides the list pane, so every gate here asks the
-   // layout, never which surface has key focus — under split the pane (and the
-   // bar) stays on screen while `view` flips to "reader".
-   listVisible: () => boolean
    // Enter / leave search as ONE history step (app.ts owns the router). A TOKEN
    // LIST, not a token: a scoped query is `q:<query>` plus its lane.
    selectTokens: (tokens: string[]) => Promise<void>
@@ -39,16 +34,6 @@ export interface SearchDeps {
    // the ritual). false = replaceState: per-keystroke queries must not spam
    // history.
    commitListHash: (push: boolean) => void
-   // The single writer of document.title, and the list's own title text.
-   setTitle: (base: string) => void
-   listTitle: () => string
-   // The retryable error popup.
-   showError: (e: unknown, retry?: () => void) => void
-   // Split view: the reader pane keeps the article it is showing while a query
-   // changes under it (a query is a list presentation mode, not a landing), so
-   // its arrows and pending pill have to be re-derived against the new hit set.
-   // A no-op off split / with no article in the pane — app.ts owns that test.
-   reprobeReader: () => void
 }
 
 let d: SearchDeps
@@ -70,12 +55,12 @@ export function setup(deps: SearchDeps): void {
    d = deps
    el.searchInput.addEventListener("input", () => {
       clearTimeout(searchDebounce)
-      searchDebounce = setTimeout(() => void applySearchQuery(el.searchInput.value), 200)
+      searchDebounce = setTimeout(() => applySearchQuery(el.searchInput.value), 200)
    })
    el.searchInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
          e.preventDefault()
-         void applySearchQuery(el.searchInput.value)
+         applySearchQuery(el.searchInput.value)
       } else if (e.key === "Escape") {
          // Stop the document-level Escape handler from also acting; leave search.
          e.preventDefault()
@@ -109,7 +94,7 @@ export function toggleSearch(): void {
    // Layout-gated so `/` from the split reader can close the bar too — the
    // strict list-only test made it a one-way door there, leaving a pinned bar
    // and a live query the key could no longer dismiss.
-   if (d.listVisible() && nav.isSearchFilter()) void exitSearch()
+   if (layout().listMounted && nav.isSearchFilter()) void exitSearch()
    else void enterSearch()
 }
 
@@ -144,27 +129,19 @@ function exitSearch(): Promise<void> {
    return d.selectTokens(scope ? [scope] : [])
 }
 
-async function applySearchQuery(q: string): Promise<void> {
+// A keystroke's query is the lane write plus the history replace. The rebuild,
+// the bar's re-sync after it (the short-query/truncation note needs the loaded
+// hit set), the reader's chrome and the tab title all follow model.laneTokens.
+function applySearchQuery(q: string): void {
    clearTimeout(searchDebounce)
    // Defense in depth against a debounce that fired after the user already left
    // search (e.g. opened an article): only the list-search surface owns the
-   // query — and "up" is listVisible, exactly as syncSearchBar gates the bar
-   // itself, or stepping the split reader pane through hits would swallow every
-   // further keystroke into a bar still on screen and focusable.
-   if (!d.listVisible() || !nav.isSearchFilter()) return
+   // query — and "up" is layout().listMounted, exactly as syncSearchBar gates
+   // the bar itself, or stepping the split reader pane through hits would
+   // swallow every further keystroke into a bar still on screen and focusable.
+   if (!layout().listMounted || !nav.isSearchFilter()) return
    nav.applyFilter(searchTokens(q, nav.searchScope()))
    d.commitListHash(false)
-   d.setTitle(d.listTitle())
-   try {
-      await list.rerender()
-   } catch (e) {
-      d.showError(e, () => void applySearchQuery(q))
-      return
-   }
-   syncSearchBar()
-   // The hit set just moved under the split view's reader pane; its arrows and
-   // pill describe neighbours in THIS query now.
-   d.reprobeReader()
 }
 
 // Reflect the active search state into the bar: show/hide it (CSS gates display
@@ -173,9 +150,9 @@ async function applySearchQuery(q: string): Promise<void> {
 // entered from the settings menu's "Search articles…" row, not a toolbar button.)
 export function syncSearchBar(): void {
    const on = nav.isSearchFilter()
-   // The bar shows while the list pane does (listVisible) — under split that is
-   // whatever surface has key focus.
-   const searching = on && d.listVisible()
+   // The bar shows while the list pane does (layout().listMounted) — under
+   // split that is on screen no matter which surface has key focus.
+   const searching = on && layout().listMounted
    document.body.classList.toggle("srr-searching", searching)
    if (!on) {
       el.searchNote.hidden = true

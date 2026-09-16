@@ -5,6 +5,7 @@ import { timeAgo, stampSrc, dayLabelCtx, dayLabelWith, countBadge, type DayLabel
 import { ROW_SWIPE_TRIGGER, setPullRefresh, setRowSwipe } from "./gestures"
 import { prefersReducedMotion, restartAnimation } from "./motion"
 import * as nav from "./nav"
+import * as model from "./model"
 // Named, NOT `import * as refresh`: this module exports its own refresh(), and a
 // namespace binding of that name is shadowed by the local function declaration —
 // silently, since the collision only shows up when the callback below runs.
@@ -15,6 +16,7 @@ import { refreshNow } from "./refresh"
 // on screen. search.ts stays DOM-free — it hands back raw-string ranges and the
 // element building lives below.
 import { matchSpans } from "./search"
+import { untracked } from "./signals"
 import { windowScroller, type Scroller } from "./scroller"
 import { isSplit } from "./split"
 // The two frontier-write primitives, taken from ./seen rather than through nav's
@@ -109,33 +111,6 @@ export function setCursorOwner(fn: () => boolean): void {
    readerHoldsCursor = fn
 }
 
-// "A row's ★ just moved" — injected for the same reason readerHoldsCursor is
-// (reader.ts already imports this module, so an edge back to the controller
-// would be a cycle). Under split the reader's own save button is on screen and
-// may be describing this very article, and the row star and that button are two
-// paints of ONE set: the row's toggle alone left the button asserting the
-// opposite, and a second toggle from the button then composed the two into a
-// state neither of them showed. The default is the single-surface truth — no
-// reader on screen to tell, and the button re-derives on its next render.
-let notifySavedChanged: (chron: number) => void = () => {}
-export function setSavedSink(fn: (chron: number) => void): void {
-   notifySavedChanged = fn
-}
-
-// "A row's READ state just moved" — the seen-frontier twin of the sink above,
-// injected for the same reason. refresh() below re-derives the ROWS, and that is
-// all it can do: the reader's pending pill counts the unread AHEAD of the cursor
-// and the tab title carries the store's unread badge, and neither is this
-// module's to write. Every other frontier gesture goes through
-// menus.afterFrontierMove, which reconciles both; the row swipe is the one that
-// does not, and off split that stayed invisible because the reader re-derives on
-// its next arrival and takes the badge with it. Under split there is no arrival:
-// the pill sits on screen beside the rows it disagrees with, permanently.
-let notifyFrontierMoved: () => void = () => {}
-export function setFrontierSink(fn: () => void): void {
-   notifyFrontierMoved = fn
-}
-
 // Freshness token: a new render() reassigns it so any in-flight load (or pending
 // observer callback) from the prior filter bails before touching the DOM — the
 // same discipline as dropdown's fill tokens and nav's prefetch.
@@ -148,7 +123,7 @@ let loadingTop = false // a newer-load is in flight (re-entry guard for fetchNew
 let loadingBottom = false // an older-load is in flight (re-entry guard for fetchOlder)
 let pumping = false // a downward viewport-fill loop is running (re-entry guard for pump)
 let growing = false // an onStoreGrown reopen/rebuild is in flight (re-entry guard)
-let builtKey: string | null = null // filterKey() the current DOM was built for
+let builtKey: string | null = null // membershipKey() the current DOM was built for
 let observer: IntersectionObserver | null = null
 // Set by a genuine user scroll gesture (wheel/touch/key) during a render, so the
 // post-fill anchor re-assert never yanks the page out from under the reader.
@@ -482,10 +457,8 @@ function endRowSwipe(row: HTMLElement, dir: -1 | 0 | 1): void {
    // a row read in the reader does on the way back (show() → refresh()), and the
    // membership re-derives on the next natural rebuild.
    refresh()
-   // …but "on the way back" only covers what the LIST paints. A read toggle also
-   // moved the frontier the reader's pill and the unread badge are derived from,
-   // and under split the pane never leaves for a return path to fix them.
-   if (act.kind === "read") notifyFrontierMoved()
+   // The pill, the badge and the other pane follow the frontier/saved write the
+   // action made (model.seen / model.saved) — nothing to announce from here.
 }
 
 // The ★ Saved toggle, shared by the star tap and the → swipe so the two cannot
@@ -495,9 +468,6 @@ function toggleRowSave(a: HTMLElement): void {
    const nowSaved = nav.toggleSaved(chron)
    a.classList.toggle("srr-row-saved", nowSaved)
    a.querySelector(".srr-row-star")?.setAttribute("aria-pressed", String(nowSaved))
-   // Before the Saved-lane removal below, so the sink still fires for the row it
-   // is about to drop — that is exactly the case the reader's button is stale in.
-   notifySavedChanged(chron)
    if (nav.isSavedFilter() && !nowSaved) {
       a.remove()
       relabelDividers() // drop a day divider the removed row may have orphaned
@@ -1032,6 +1002,33 @@ function mayClaimCursor(): boolean {
 const atOldestEnd = (chron: number): boolean => nav.laneChronOrdered() && chron === 0
 const atNewestEnd = (chron: number): boolean => nav.laneChronOrdered() && chron === data.db.total_art - 1
 
+// What a built window is FOR: the store, the filter, and — under unread-only —
+// the frontier epoch its raised bounds were derived at. Show-read membership does
+// not depend on the frontier, so a Mark-all-read there re-greys rows in place
+// (the listRows effect) instead of rebuilding under the reader's scroll. Read
+// untracked: render() can run inside an effect's surface call.
+function membershipKey(): string {
+   return untracked(() => {
+      const epoch = model.unreadOnly() ? `u${model.frontierEpoch()}` : "r"
+      return [model.activeMid(), nav.filterKey(), epoch].join("\0")
+   })
+}
+
+// The listSurface effect's entry point: rebuild a window built for a membership
+// that no longer holds. Returns the rebuild (the effect chains the search bar's
+// re-sync and the error report onto it), or null when there is nothing to do —
+// never built or invalidated (the next show() builds), already current, or a
+// hidden single-surface list, which is invalidated for its return path instead:
+// rebuilding a display:none list would pin zero row heights.
+export function reconcile(mounted: boolean): Promise<void> | null {
+   if (builtKey === null || builtKey === membershipKey()) return null
+   if (!mounted) {
+      invalidate()
+      return null
+   }
+   return rerender()
+}
+
 export async function render(anchorNow = false, onInteractive?: () => void): Promise<void> {
    const my = (tok = {})
    teardownObserver()
@@ -1039,7 +1036,7 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    exhaustedTop = exhaustedBottom = false
    loadingTop = loadingBottom = false
    pumping = false
-   builtKey = nav.filterKey()
+   builtKey = membershipKey()
    rowsEl = null
    // A rebuild lays a fresh window: whatever the pill was pointing at is gone
    // with the old rows, and no reopened runway is in flight any more.
@@ -1338,7 +1335,7 @@ export function invalidate(): void {
 // anchor immediately instead of land-once.
 export async function show(anchorNow = false, onInteractive?: () => void): Promise<void> {
    const pos = nav.currentChron()
-   if (builtKey === nav.filterKey() && rowsEl && pos >= 0 && findRow(pos)) {
+   if (builtKey === membershipKey() && rowsEl && pos >= 0 && findRow(pos)) {
       refresh()
       scrollChronToView(pos)
       notifyScroll()
@@ -1366,7 +1363,7 @@ export function followCursor(): void {
    // on its next open" is a promise about a surface that never closes. There is
    // no row to anchor, so rebuild unanchored rather than early-returning.
    if (chron < 0) {
-      if (builtKey !== nav.filterKey()) void show(true).catch(onError)
+      if (builtKey !== membershipKey()) void show(true).catch(onError)
       return
    }
    // The same freshness gate show() applies, and for the same reason: a window
@@ -1377,7 +1374,7 @@ export function followCursor(): void {
    // infinite scroll permanently dead. The breakpoint crossing is exactly that
    // sequence: onSplitChange invalidates, then route() reaches this through
    // guard()'s render path.
-   const row = builtKey === nav.filterKey() ? findRow(chron) : null
+   const row = builtKey === membershipKey() ? findRow(chron) : null
    if (!row) {
       // Report a failed rebuild instead of swallowing it. Under split this
       // fallback IS the pane's only build path for a reader-side step, so a
@@ -1398,8 +1395,13 @@ export function followCursor(): void {
 // re-anchoring.
 export function refresh(): void {
    if (!rowsEl) return
-   const seen = nav.getSeenMap()
-   const savedSet = nav.getSavedSet()
+   // model.seen/model.saved already hold exactly what nav.getSeenMap()/
+   // getSavedSet() would re-parse from localStorage — seen.ts/saved.ts publish
+   // them on every write — so read the model instead of paying a
+   // localStorage.getItem + JSON.parse on every refresh() (untracked: this can
+   // run inside an effect's surface call, same as membershipKey() above).
+   const seen = untracked(() => model.seen())
+   const savedSet = new Set(untracked(() => model.saved()))
    const savedView = nav.isSavedFilter()
    const current = nav.currentChron()
    let removedAny = false

@@ -3943,4 +3943,54 @@ describe("model mirror — cursor, lane, unread-only, frontier epoch", () => {
       nav.bumpFrontierEpoch()
       expect(model.frontierEpoch()).toBe(before + 3)
    })
+
+   it("the cursor has one home: nav reads model.cursor", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }])
+      await nav.goTo(1)
+      model.cursor.set({ chron: 0, feedId: 1 }) // a test-only write — no mirror left to disagree with
+      expect(nav.currentChron()).toBe(0)
+   })
+})
+
+// state-store P6 as amended by D1: the unread-only bounds are a derivation nav
+// maintains itself — re-derived when the mode flips and, under unread-only, when
+// a filter-scoped bulk frontier move bumps the epoch; never by ordinary reading.
+describe("membership re-derivation follows the model (D1)", () => {
+   afterEach(() => nav.setUnreadOnly(false))
+
+   it("a Show-read flip re-derives the bounds with no caller re-applying", () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 1 }))
+      nav.applyFilter(["1"])
+      expect(nav.filter.matches(1, 0)).toBe(true)
+      nav.setUnreadOnly(true)
+      expect(nav.filter.matches(1, 1)).toBe(false)
+      expect(nav.filter.matches(1, 2)).toBe(true)
+   })
+
+   it("under unread-only, a bulk frontier move re-derives the bounds and ordinary reading does not", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      nav.setUnreadOnly(true)
+      nav.applyFilter(["1"])
+      await nav.goTo(1) // recorded: feed:1 → 1
+      expect(nav.filter.matches(1, 1)).toBe(true) // NOT re-derived from seen: ← still reaches it
+      expect(nav.markAllRead()).toBe(true) // raises to 3, bumps the epoch
+      expect(nav.filter.matches(1, 3)).toBe(false) // re-derived: nothing unread is left
+   })
+})
+
+describe("a profile merge republishes nav's own state (S14)", () => {
+   afterEach(() => nav.setUnreadOnly(false))
+
+   it("adopts a restored unread-only preference and republishes seen and saved", () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }])
+      nav.setUnreadOnly(false)
+      localStorage.setItem("srr-unread-only", "1")
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 1, "feed:99": 0 }))
+      localStorage.setItem("srr-saved", JSON.stringify([1]))
+      model.profileRev.update((n) => n + 1) // profile.ts's announcement
+      expect(nav.isUnreadOnly()).toBe(true)
+      expect(model.seen()).toEqual({ "feed:1": 1 }) // pruned, then published
+      expect(model.saved()).toEqual([1])
+   })
 })

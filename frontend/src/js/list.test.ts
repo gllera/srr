@@ -64,10 +64,32 @@ const nav = vi.hoisted(() => {
    // (no valid reader article), so render() lays a newest-first feed like before.
    let pos = -1
    let anchor = -1
+   // list.ts's refresh() now reads model.seen/model.saved directly (they're what
+   // seen.ts/saved.ts publish on every real write) instead of re-parsing
+   // localStorage via getSeenMap/getSavedSet — so this mock's `seen`/`saved`
+   // must mirror into whichever `./model` instance the test currently has
+   // (rebound per test via `_setModel`, since vi.resetModules() gives every
+   // test a fresh model registry). Every mutator below calls syncModel().
+   let modelRef: typeof import("./model") | null = null
+   function syncModel() {
+      modelRef?.seen.set({ ...seen })
+      modelRef?.saved.set([...saved])
+   }
    return {
       filter,
-      _setSeen: (s: Record<string, number>) => (seen = s),
-      _setSaved: (s: number[]) => (saved = new Set(s)),
+      _setModel: (m: typeof import("./model")) => {
+         modelRef = m
+         syncModel()
+      },
+      _syncModel: syncModel,
+      _setSeen: (s: Record<string, number>) => {
+         seen = s
+         syncModel()
+      },
+      _setSaved: (s: number[]) => {
+         saved = new Set(s)
+         syncModel()
+      },
       _setSearch: (term: string) => {
          filter.search = true
          filter.active = true
@@ -135,6 +157,7 @@ const nav = vi.hoisted(() => {
       undoFrontierMove: vi.fn((u: { prev: Record<string, number | undefined>; to: number }) => {
          for (const [k, prev] of Object.entries(u.prev)) seen[k] = prev ?? -1
          nav._undo = null
+         syncModel()
          return true
       }),
       isSaved: vi.fn((chron: number) => saved.has(chron)),
@@ -142,9 +165,11 @@ const nav = vi.hoisted(() => {
       toggleSaved: vi.fn((chron: number) => {
          if (saved.has(chron)) {
             saved.delete(chron)
+            syncModel()
             return false
          }
          saved.add(chron)
+         syncModel()
          return true
       }),
       savedCount: vi.fn(() => saved.size),
@@ -202,6 +227,7 @@ const seenMod = vi.hoisted(() => ({
          map[k] = pos
       }
       if (Object.keys(prev).length > 0) nav._undo = { prev, to: pos }
+      nav._syncModel()
    }),
    markUnreadFrom: vi.fn((chron: number, scope: { peek: boolean; members: Iterable<number> }) => {
       if (scope.peek) return false
@@ -213,6 +239,7 @@ const seenMod = vi.hoisted(() => ({
          map[k] = chron - 1
          moved = true
       }
+      if (moved) nav._syncModel()
       return moved
    }),
 }))
@@ -258,6 +285,7 @@ const $chrons = () => $rows().map((a) => Number(a.dataset.chron))
 
 describe("list", () => {
    let list: List
+   let model: typeof import("./model")
    let container: HTMLElement
    let opened: number[]
 
@@ -278,6 +306,8 @@ describe("list", () => {
       nav._setAnchor(-1)
       nav._setSearchScope("")
       vi.resetModules()
+      model = await import("./model") // the instance list.ts reads (same registry)
+      nav._setModel(model) // rebind the nav mock's seen/saved mirror to this instance
       list = await import("./list")
       emptyStateEl = (await import("./empty-state")).emptyStateEl
       list.setup(container, (chron) => opened.push(chron))
@@ -1107,6 +1137,55 @@ describe("list", () => {
       })
    })
 
+   // The listSurface effect's entry point (state-store P5). A built window is FOR
+   // one membership — the store, the filter, and under unread-only the frontier
+   // epoch its raised bounds came from.
+   describe("reconcile", () => {
+      it("does nothing before the first build", () => {
+         expect(list.reconcile(true)).toBeNull()
+      })
+
+      it("does nothing while the built window still matches its membership", async () => {
+         setIndex(3)
+         await list.render()
+         expect(list.reconcile(true)).toBeNull()
+      })
+
+      it("rebuilds a mounted list whose unread-only mode flipped", async () => {
+         setIndex(3)
+         await list.render()
+         model.unreadOnly.set(true)
+         const build = list.reconcile(true)
+         expect(build).not.toBeNull()
+         await build
+         expect($chrons()).toEqual([2, 1, 0])
+         expect(list.reconcile(true)).toBeNull() // current again
+      })
+
+      it("rebuilds under unread-only when the frontier epoch moved, but not under show-read", async () => {
+         setIndex(3)
+         await list.render()
+         model.frontierEpoch.set(1) // show-read: membership does not depend on the frontier
+         expect(list.reconcile(true)).toBeNull()
+         model.unreadOnly.set(true)
+         await list.reconcile(true)
+         model.frontierEpoch.set(2)
+         const again = list.reconcile(true)
+         expect(again).not.toBeNull()
+         await again // never leave a rebuild running into the next case
+      })
+
+      it("invalidates a hidden list instead of rebuilding it", async () => {
+         setIndex(3)
+         await list.render()
+         model.activeMid.set("s7")
+         expect(list.reconcile(false)).toBeNull()
+         // Invalidated: nothing is built, so even a mounted reconcile waits for show().
+         expect(list.reconcile(true)).toBeNull()
+         model.activeMid.set("0")
+      })
+   })
+
    it("anchors at the current position: newer ('next') rows above, older below", async () => {
       setIndex(10)
       nav._setAnchor(5) // the reader's article
@@ -1337,26 +1416,6 @@ describe("list", () => {
       const row = $rows().find((a) => Number(a.dataset.chron) === 2)!
       expect(row.classList.contains("srr-row-saved")).toBe(true)
       expect($star(2).getAttribute("aria-pressed")).toBe("true")
-   })
-
-   // The reader's save button paints the SAME set, and under split it is on
-   // screen beside these rows — so the row's toggle has to say so. The sink is
-   // injected (app.ts owns that button; this module sits below it), and it must
-   // fire for the ★ Saved lane's removal case too, which is exactly the one the
-   // stale button was most visible in.
-   it("announces a row's ★ toggle to the other surface", async () => {
-      const seen: number[] = []
-      list.setSavedSink((chron) => seen.push(chron))
-      try {
-         setIndex(3)
-         await list.render()
-         tapStar(2)
-         expect(seen).toEqual([2])
-         tapStar(2)
-         expect(seen).toEqual([2, 2])
-      } finally {
-         list.setSavedSink(() => {})
-      }
    })
 
    it("the saved view renders only saved chrons, in save order (newest save on top)", async () => {
@@ -1925,29 +1984,6 @@ describe("list", () => {
                .find((r) => r.dataset.chron === "2")!
                .classList.contains("srr-row-unread"),
          ).toBe(true)
-      })
-
-      // refresh() re-derives the ROWS, and that is all this module can do. A
-      // frontier move also invalidates the reader's pending pill and the tab's
-      // unread badge, which live above it — so it says so, the same injected way
-      // the ★ sink does. Both DIRECTIONS of the read toggle announce (each one
-      // moves the frontier), and the ★ swipe does NOT: it changes no frontier,
-      // and it already has its own sink.
-      it("announces a row swipe's frontier move to the other surface", async () => {
-         const moves: string[] = []
-         list.setFrontierSink(() => moves.push("moved"))
-         try {
-            setIndex(4, (c) => (c < 2 ? 1 : 2))
-            await list.render()
-            swipe($rows().find((r) => r.dataset.chron === "1")!, READ)
-            expect(moves).toEqual(["moved"])
-            swipe($rows().find((r) => r.dataset.chron === "1")!, READ) // back to unread
-            expect(moves).toEqual(["moved", "moved"])
-            swipe($rows().find((r) => r.dataset.chron === "3")!, SAVE)
-            expect(moves).toEqual(["moved", "moved"]) // a ★ moves no frontier
-         } finally {
-            list.setFrontierSink(() => {})
-         }
       })
 
       it("a left swipe on a read row rewinds that feed alone (the explicit rewind)", async () => {
