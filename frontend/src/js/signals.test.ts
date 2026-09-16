@@ -171,15 +171,16 @@ describe("effect (semantic 4)", () => {
 })
 
 describe("flush (semantics 5 and 7)", () => {
-   it("runs pending effects in creation order", () => {
+   it("runs pending effects in creation order, even after an earlier effect re-subscribed", () => {
       const s = signal(0)
+      const t = signal(0)
       const order: string[] = []
-      effect(() => void (s(), order.push("a")))
+      effect(() => void (s(), t(), order.push("a")))
       effect(() => void (s(), order.push("b")))
-      effect(() => void (s(), order.push("c")))
+      t.set(1) // a re-runs and re-subscribes to s AFTER b
       order.length = 0
       s.set(1)
-      expect(order).toEqual(["a", "b", "c"])
+      expect(order).toEqual(["a", "b"])
    })
 
    it("a write made by an effect reaches its dependents in the same flush", () => {
@@ -432,9 +433,106 @@ describe("onChange / diffed (the shared prime-then-diff primitive)", () => {
       s.set(2) // moves while gated — must not be swallowed nor treated as "unchanged" later
       expect(body).toHaveBeenCalledTimes(1)
       skip = false
-      s.set(3) // an effect only reruns on a WRITE, so unblocking alone doesn't refire it
+      s.set(3) // a plain (non-signal) gate: unblocking alone doesn't refire it
       expect(body).toHaveBeenCalledTimes(2)
       expect(body).toHaveBeenLastCalledWith(3, 1) // prev is 1 (the last value it actually processed), not the missed 2
+   })
+
+   it("diffed: a signal-backed skip gate re-fires the body when it clears (the rendering hold)", () => {
+      const s = signal(1)
+      const gate = signal(false)
+      const body = vi.fn()
+      diffedForEffects(s, body, { fireOnFirst: true, skip: () => gate() })
+      gate.set(true)
+      s.set(2)
+      expect(body).toHaveBeenCalledTimes(1)
+      gate.set(false) // releasing the gate alone re-runs the effect
+      expect(body).toHaveBeenCalledTimes(2)
+      expect(body).toHaveBeenLastCalledWith(2, 1)
+   })
+})
+
+describe("robustness", () => {
+   it("a computed that throws rethrows on read and still reaches its readers on the next write", () => {
+      const s = signal(0)
+      const c = computed(() => {
+         if (s() === 1) throw new Error("boom")
+         return s()
+      })
+      const seen: number[] = []
+      effect(() => {
+         try {
+            seen.push(c())
+         } catch {
+            seen.push(-1)
+         }
+      })
+      s.set(1)
+      s.set(2)
+      s.set(3)
+      expect(seen).toEqual([0, -1, 2, 3])
+   })
+
+   it("a reader whose first read of a computed throws still subscribes to it", () => {
+      const s = signal(1)
+      const c = computed(() => {
+         if (s() === 1) throw new Error("boom")
+         return s()
+      })
+      const seen: number[] = []
+      effect(() => {
+         try {
+            seen.push(c())
+         } catch {
+            seen.push(-1)
+         }
+      })
+      s.set(2)
+      expect(seen).toEqual([-1, 2])
+   })
+
+   it("a computed that recovers to the SAME value it held before the throw still counts as fresh", () => {
+      const s = signal(0)
+      const c = computed(() => {
+         if (s() === 1) throw new Error("boom")
+         return 7
+      })
+      const seen: number[] = []
+      effect(() => {
+         try {
+            seen.push(c())
+         } catch {
+            seen.push(-1)
+         }
+      })
+      s.set(1)
+      s.set(2) // recovers to 7 — the value held before the throw — not a new one
+      expect(seen).toEqual([7, -1, 7])
+   })
+
+   it("an effect that disposes itself runs the cleanup it returned and stays unsubscribed", () => {
+      const s = signal(0)
+      const cleaned = vi.fn()
+      const runs = vi.fn()
+      let stop: () => void = () => {}
+      stop = effect(() => {
+         runs(s())
+         if (s() === 1) stop()
+         return cleaned
+      })
+      s.set(1)
+      expect(cleaned).toHaveBeenCalledTimes(2) // the first run's, then its own
+      s.set(2)
+      expect(runs).toHaveBeenCalledTimes(2)
+   })
+
+   it("onChange compares a null dependency like any other value", () => {
+      const s = signal<string | null>(null)
+      const t = signal(0)
+      const body = vi.fn()
+      onChange(() => (t(), s()), body) // primes on null
+      t.set(1) // re-runs the effect; the dependency is still null
+      expect(body).not.toHaveBeenCalled()
    })
 })
 

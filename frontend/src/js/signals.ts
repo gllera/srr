@@ -9,9 +9,10 @@
 // gives computed its equality cutoff without a second propagation pass.
 //
 // The flush is SYNCHRONOUS at the end of the outermost batch — no scheduler, no
-// microtask. That is load-bearing for app.ts's guard(): when `await fn()`
-// returns, every derived paint for the writes made inside it has already run.
-// The only asynchrony anywhere in this module is a resource loader's own promise.
+// microtask. A write returns only after every effect it feeds has run, except
+// the ones that choose to wait: effects.ts's deferred paints skip while
+// model.rendering is held and run when the command's hold is released. The only
+// asynchrony anywhere in this module is a resource loader's own promise.
 
 export interface Signal<T> {
    (): T
@@ -107,6 +108,11 @@ class ComputedNode<T> implements Source, Observer {
    private stale = true
    private has = false
    private value: T | undefined
+   // What the last computation threw, if it threw. A throw is this node's value
+   // for its current dependency versions, not a reason to stay stale: a stale
+   // node stops propagating (markStale returns early), so its readers would
+   // never hear of the write that fixes it.
+   private failure: { error: unknown } | null = null
 
    constructor(
       private readonly fn: () => T,
@@ -121,14 +127,30 @@ class ComputedNode<T> implements Source, Observer {
 
    refresh(): void {
       if (!this.stale) return
-      if (this.has && !depsMoved(this.deps)) {
+      if ((this.has || this.failure) && !depsMoved(this.deps)) {
          this.stale = false
          return
       }
-      // A throwing fn leaves the node stale, so the next read retries.
-      const next = collect(this, this.fn)
+      let next: T
+      try {
+         next = collect(this, this.fn)
+      } catch (error) {
+         this.stale = false
+         this.failure = { error }
+         this.version++
+         return
+      }
       this.stale = false
-      if (!this.has || !this.equals(this.value as T, next)) {
+      // Recovering from a failure must bump version even when `next` equals
+      // the LAST GOOD value — `this.value` was never touched while failing, so
+      // an equals() check alone can't tell "recovered back to an old value"
+      // from "never changed". A reader's stored dep version was captured
+      // while `failure` was set (the throw branch above always bumps), so
+      // skipping the bump here would leave that version looking unmoved and
+      // the reader silently stuck on the stale error forever.
+      const recovered = this.failure !== null
+      this.failure = null
+      if (!this.has || recovered || !this.equals(this.value as T, next)) {
          this.value = next
          this.version++
       }
@@ -137,7 +159,10 @@ class ComputedNode<T> implements Source, Observer {
 
    get(): T {
       this.refresh()
+      // Tracked even when the value is a throw, so the reader re-runs once a
+      // dependency moves.
       track(this)
+      if (this.failure) throw this.failure.error
       return this.value as T
    }
 }
@@ -161,6 +186,13 @@ class EffectNode implements Observer {
       this.runCleanup()
       this.ran = true
       const r = collect(this, this.fn)
+      if (this.disposed) {
+         // fn disposed its own effect: it may have read signals after doing so,
+         // and the cleanup it just returned is the last one it gets to run.
+         this.unsubscribe()
+         if (typeof r === "function") r()
+         return
+      }
       if (typeof r === "function") this.cleanup = r
    }
 
@@ -168,9 +200,13 @@ class EffectNode implements Observer {
       if (this.disposed) return
       this.disposed = true
       pending.delete(this)
+      this.unsubscribe()
+      this.runCleanup()
+   }
+
+   private unsubscribe(): void {
       for (const src of this.deps.keys()) src.observers.delete(this)
       this.deps.clear()
-      this.runCleanup()
    }
 
    private runCleanup(): void {
@@ -335,20 +371,19 @@ export function resource<K, T>(
 
 export interface DiffedOpts<K> {
    equals?: Equals<K>
-   // Fire on the very first run too (with prev === null) — effects.ts's
-   // deferred() wants this (a fresh mount still has a first paint to do);
-   // onChange()'s callers don't (their first run is a baseline, not a change).
+   // Fire on the very first run too (with prev === null) — for a caller whose
+   // first run is itself a paint to do, as opposed to onChange()'s callers,
+   // whose first run is a baseline rather than a change.
    fireOnFirst?: boolean
    // An extra gate re-checked on every run, independent of whether dep()
-   // changed — deferred()'s model.rendering() wait. Skipping here (rather than
-   // in the caller's dep()) means a change during the gate is not lost: it is
-   // compared against the stale `last` on the next run once the gate clears.
+   // changed. Skipping here (rather than in the caller's dep()) means a change
+   // during the gate is not lost: it is compared against the stale `last` on
+   // the next run once the gate clears.
    skip?: () => boolean
 }
 
-// The one "effect + diff + act under untracked" state machine, parameterized
-// by the two policies that vary per caller. onChange() and effects.ts's
-// deferred() are both one-line wrappers over this.
+// The one "effect + diff + act under untracked" state machine. onChange() is a
+// one-line wrapper over it; see diffedForEffects below for the other export.
 function diffed<K>(dep: () => K, body: (now: K, prev: K | null) => void, opts: DiffedOpts<K> = {}): () => void {
    const { equals = Object.is, fireOnFirst = false, skip } = opts
    let last: K | null = null
@@ -363,7 +398,7 @@ function diffed<K>(dep: () => K, body: (now: K, prev: K | null) => void, opts: D
          if (fireOnFirst) untracked(() => body(now, prev))
          return
       }
-      if (last !== null && equals(last, now)) return
+      if (equals(last as K, now)) return
       const prev = last
       last = now
       untracked(() => body(now, prev))
@@ -378,9 +413,12 @@ export function onChange<K>(dep: () => K, body: (now: K, prev: K) => void, equal
    return diffed(dep, (now, prev) => body(now, prev as K), { equals })
 }
 
-// Exported for effects.ts's deferred() alone — the fireOnFirst/skip policy is
-// specific to the derived-paint table's own rules (a fresh mount paints once;
-// a paint waits out model.rendering), not a second general-purpose primitive.
+// Currently unused in production — effects.ts's deferred() was a one-line
+// wrapper over this until it needed to prime through a boot hold (see that
+// module's own docblock for why), and was rewritten as a small hand-rolled
+// variant instead. Exported (and exercised by signals.test.ts) for the
+// fireOnFirst/skip policy this primitive documents, which has no other
+// caller today; collapse the two back into one if a second caller needs it.
 export { diffed as diffedForEffects }
 
 export function shallowEqual<T extends object>(a: T, b: T): boolean {
