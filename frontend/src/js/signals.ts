@@ -333,6 +333,56 @@ export function resource<K, T>(
    }
 }
 
+export interface DiffedOpts<K> {
+   equals?: Equals<K>
+   // Fire on the very first run too (with prev === null) — effects.ts's
+   // deferred() wants this (a fresh mount still has a first paint to do);
+   // onChange()'s callers don't (their first run is a baseline, not a change).
+   fireOnFirst?: boolean
+   // An extra gate re-checked on every run, independent of whether dep()
+   // changed — deferred()'s model.rendering() wait. Skipping here (rather than
+   // in the caller's dep()) means a change during the gate is not lost: it is
+   // compared against the stale `last` on the next run once the gate clears.
+   skip?: () => boolean
+}
+
+// The one "effect + diff + act under untracked" state machine, parameterized
+// by the two policies that vary per caller. onChange() and effects.ts's
+// deferred() are both one-line wrappers over this.
+function diffed<K>(dep: () => K, body: (now: K, prev: K | null) => void, opts: DiffedOpts<K> = {}): () => void {
+   const { equals = Object.is, fireOnFirst = false, skip } = opts
+   let last: K | null = null
+   let primed = false
+   return effect(() => {
+      const now = dep()
+      if (skip?.()) return
+      if (!primed) {
+         primed = true
+         const prev = last
+         last = now
+         if (fireOnFirst) untracked(() => body(now, prev))
+         return
+      }
+      if (last !== null && equals(last, now)) return
+      const prev = last
+      last = now
+      untracked(() => body(now, prev))
+   })
+}
+
+// Fires body on every dependency change AFTER the first — the initial
+// subscribe establishes a baseline rather than being a "change" itself.
+// Several modules hand-rolled this "prime, then diff and act" shape over
+// profileRev/activeMid-style merge counters; this is the one copy.
+export function onChange<K>(dep: () => K, body: (now: K, prev: K) => void, equals: Equals<K> = Object.is): () => void {
+   return diffed(dep, (now, prev) => body(now, prev as K), { equals })
+}
+
+// Exported for effects.ts's deferred() alone — the fireOnFirst/skip policy is
+// specific to the derived-paint table's own rules (a fresh mount paints once;
+// a paint waits out model.rendering), not a second general-purpose primitive.
+export { diffed as diffedForEffects }
+
 export function shallowEqual<T extends object>(a: T, b: T): boolean {
    if (Object.is(a, b)) return true
    const ka = Object.keys(a)

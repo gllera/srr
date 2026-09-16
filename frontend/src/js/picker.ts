@@ -759,15 +759,17 @@ async function fillUnread(
 // render's fillToken, so a newer render supersedes this fill the same way.
 async function fillWatch(rows: [HTMLAnchorElement, string][]): Promise<void> {
    const my = fillToken
-   for (const [row, rule] of rows) {
-      try {
-         const n = await nav.watchLaneCount(rule)
-         if (my !== fillToken) return
-         if (n > 0) row.appendChild(unreadBadge(n))
-      } catch {
-         // A region that will not load leaves this row without a badge.
-      }
-   }
+   await Promise.all(
+      rows.map(async ([row, rule]) => {
+         try {
+            const n = await nav.watchLaneCount(rule)
+            if (my !== fillToken) return
+            if (n > 0) row.appendChild(unreadBadge(n))
+         } catch {
+            // A region that will not load leaves this row without a badge.
+         }
+      }),
+   )
 }
 
 // ── Status ───────────────────────────────────────────────────────────────────

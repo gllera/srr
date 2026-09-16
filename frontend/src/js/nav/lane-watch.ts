@@ -164,22 +164,21 @@ export class WatchLane implements Lane {
    // region's position has since dropped below the new tail. So a resident plane
    // is kept only when it is strictly below the new tail AND was already a full
    // pack when fetched; anything else — at-or-above the new tail, or a stale
-   // partial now finalized below it — is dropped. EVERY dropped position is
-   // reloaded here, not just the new tail: a plane dropped for being a stale
-   // former-tail (now finalized, below the new tail) would otherwise never be
-   // refetched, since prepare() only ever fetches the new tail position — and
-   // matches()/anchorChron would misread a genuine hit there as "no match" until
-   // something else happened to fault that position back in.
+   // partial now finalized below it — is dropped. matches()/anchorChron would
+   // misread a dropped position as "no match" until something faults it back in,
+   // so the new tail and every dropped position — a stale former-tail included,
+   // never just the new tail — are reloaded together in the one pass below.
    async refreshed(): Promise<void> {
-      const tail = Math.floor((this.end() - 1) / WATCH_PACK_SIZE)
-      const stale: number[] = []
+      const end = this.end()
+      if (end <= this.floor()) return
+      const tail = Math.floor((end - 1) / WATCH_PACK_SIZE)
+      const reload = new Set([tail])
       for (const [p, plane] of this.planes)
          if (p >= tail || plane.n < WATCH_PACK_SIZE) {
             this.planes.delete(p)
-            stale.push(p)
+            reload.add(p)
          }
-      await Promise.all(stale.map((p) => this.plane(p)))
-      await this.prepare()
+      await Promise.all([...reload].map((p) => this.plane(p)))
    }
 
    landed(): void {

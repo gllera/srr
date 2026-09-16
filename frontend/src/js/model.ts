@@ -30,8 +30,8 @@ export const unreadOnly = signal(false)
 export const activeMid = signal<string>(HOME_MID)
 
 // ── Device state (the VALUE after each write; localStorage stays the store) ────
-export const seen = signal<Readonly<Record<string, number>>>({})
-export const saved = signal<readonly number[]>([]) // insertion order, as srr-saved stores it
+export const seen = signal<Readonly<Record<string, number>>>({}, shallowEqual)
+export const saved = signal<readonly number[]>([], arrayEqual) // insertion order, as srr-saved stores it
 // Bumped only by a filter-scoped bulk frontier move (D1) — never by ordinary reading.
 export const frontierEpoch = signal(0)
 // Bumped by a profile merge that changed local state / moved the mount table (S14).

@@ -429,13 +429,17 @@ const seedSeen = (map: Record<string, number>) => M?.seen.set({ ...map })
 // both model.seen (raiseFilterRead/lowerFilterFrom) and model.frontierEpoch,
 // one flush — so a frontier gesture starts the readerChrome effect's probe
 // exactly once, matching production.
+let bumpSeq = 0
 const bumpFrontierAndSeen = () => {
    const b = M?.frontierEpoch
    const s = M?.seen
    if (!b || !s || !S) return
    S.batch(() => {
       b.update((n) => n + 1)
-      s.set({})
+      // A real frontier write always raises some feed's stored chron — content
+      // that genuinely differs, not a same-shape {} — so it must still bump
+      // model.seen's version under its shallowEqual cutoff.
+      s.update((prev) => ({ ...prev, [`__bump${bumpSeq++}`]: 0 }))
    })
 }
 // What refresh.publishSnapshot does after nav reconciled to a new db.gz.
@@ -3228,19 +3232,25 @@ describe("profile re-anchor — the boot pull changed read positions", () => {
    // in place, and list.ts's membershipKey() never keys off model.seen under
    // unread-only, only model.frontierEpoch — so a post-interaction merge left a
    // just-read row seated in an unread-only list until the mode flipped, a
-   // frontier gesture fired, or the page reloaded.
+   // frontier gesture fired, or the page reloaded. The fix routes through the SAME
+   // mechanism an ordinary bulk frontier move (Mark all read) uses — bumping
+   // model.frontierEpoch — rather than a bespoke reapplyLane()+rerender() call: the
+   // listSurface/laneMode effects that already watch frontierEpoch (exercised in
+   // effects.test.ts and nav.test.ts) are what actually rebuild the list and
+   // re-derive the bounds in a real boot; this suite mocks nav/list, so it can only
+   // pin app.ts's own half of the contract — that a merge calls bumpFrontierEpoch.
    it("a merge after the first interaction still REBUILDS an open unread-only list (not just a re-anchor)", async () => {
       await boot()
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }))
       seedUnreadOnly(true)
       nav.reapplyLane.mockClear()
+      nav.bumpFrontierEpoch.mockClear()
       list.render.mockClear()
       list.rerender.mockClear()
       M!.profileRev.update((n) => n + 1) // profile.ts's announcement…
       seedSeen({ "feed:1": 9 }) // …another device's reads, as seen.ts republishes them
       await flush()
-      expect(nav.reapplyLane).toHaveBeenCalledTimes(1) // re-snapshot the raised bounds
-      expect(list.rerender).toHaveBeenCalledTimes(1) // …a full rebuild, forced regardless of builtKey…
+      expect(nav.bumpFrontierEpoch).toHaveBeenCalledTimes(1) // the general "membership moved" signal…
       expect(list.render).not.toHaveBeenCalled() // …never the pre-interaction RE-ANCHOR path
    })
 
@@ -3252,12 +3262,14 @@ describe("profile re-anchor — the boot pull changed read positions", () => {
       try {
          nav.applyFilter.mockClear()
          nav.reapplyLane.mockClear()
+         nav.bumpFrontierEpoch.mockClear()
          list.render.mockClear()
          list.rerender.mockClear()
          M!.profileRev.update((n) => n + 1)
          await flush()
          expect(nav.applyFilter).not.toHaveBeenCalled()
          expect(nav.reapplyLane).not.toHaveBeenCalled()
+         expect(nav.bumpFrontierEpoch).not.toHaveBeenCalled()
          expect(list.render).not.toHaveBeenCalled()
          expect(list.rerender).not.toHaveBeenCalled()
       } finally {
@@ -3278,10 +3290,12 @@ describe("profile re-anchor — the boot pull changed read positions", () => {
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }))
       seedUnreadOnly(true)
       nav.reapplyLane.mockClear()
+      nav.bumpFrontierEpoch.mockClear()
       list.rerender.mockClear()
       M!.profileRev.update((n) => n + 1)
       await flush()
       expect(nav.reapplyLane).not.toHaveBeenCalled()
+      expect(nav.bumpFrontierEpoch).not.toHaveBeenCalled()
       expect(list.rerender).not.toHaveBeenCalled()
    })
 })

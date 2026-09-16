@@ -15,6 +15,7 @@ const data = vi.hoisted(() => ({
 vi.mock("../data", () => data)
 
 import { emptyPlane, parseWatchPlane, type WatchPlane } from "../watch-plane"
+import { b64, bytesOf } from "../watch-plane.testfixtures"
 import { WatchLane } from "./lane-watch"
 
 const WPS = 50000
@@ -25,13 +26,7 @@ const WPS = 50000
 // refreshed() must tell apart from an already-finalized region.
 function plane(p: number, rules: Record<string, number[]>, n = WPS): WatchPlane {
    const bits: Record<string, string> = {}
-   for (const [rule, set] of Object.entries(rules)) {
-      const bytes = new Uint8Array(WPS / 8)
-      for (const i of set) bytes[i >> 3] |= 1 << (i & 7)
-      let bin = ""
-      for (const b of bytes) bin += String.fromCharCode(b)
-      bits[rule] = btoa(bin)
-   }
+   for (const [rule, set] of Object.entries(rules)) bits[rule] = b64(bytesOf(WPS, set))
    return parseWatchPlane({ v: 1, base: p * WPS, n, bits }, p * WPS)
 }
 

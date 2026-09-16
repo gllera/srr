@@ -1,16 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import { bitAt, emptyPlane, nextSet, parseWatchPlane, popcountRange, prevSet, WATCH_DOC_VERSION } from "./watch-plane"
-
-// A plane of `n` chrons with the given offsets set, built by hand from the
-// writer's layout (backend/watch.go: plane[i>>3] |= 1 << (i&7)) so the decoder is
-// checked against the format, not against itself.
-function bytesOf(n: number, set: number[]): Uint8Array {
-   const b = new Uint8Array(Math.ceil(n / 8))
-   for (const i of set) b[i >> 3] |= 1 << (i & 7)
-   return b
-}
-const b64 = (b: Uint8Array) => btoa(String.fromCharCode(...b))
+import { b64, bytesOf } from "./watch-plane.testfixtures"
 
 describe("parseWatchPlane", () => {
    it("decodes each rule's base64 plane LSB-first and caches its popcount", () => {

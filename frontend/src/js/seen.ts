@@ -12,7 +12,7 @@ import * as data from "./data"
 import { seenKey, seenTsKey } from "./keys"
 import * as model from "./model"
 import { feedIdOf } from "./route"
-import { effect, untracked } from "./signals"
+import { onChange } from "./signals"
 import { stampTsMap } from "./storage"
 import * as sync from "./sync"
 
@@ -82,25 +82,14 @@ export function publishSeen(): void {
 // profile merge (S14) republish it. The first run only subscribes: at import
 // time the data layer may not have booted, and app.ts publishes once after
 // data.init().
-let seenPrimed = false
-let seenMerge = 0
-effect(() => {
-   model.activeMid()
-   const merge = model.profileRev()
-   if (!seenPrimed) {
-      seenPrimed = true
-      seenMerge = merge
-      return
-   }
-   untracked(() => {
+onChange(
+   () => [model.activeMid(), model.profileRev()] as const,
+   ([, merge], [, prevMerge]) => {
       // A merge may have brought keys for feeds this store no longer has.
-      if (merge !== seenMerge) {
-         seenMerge = merge
-         pruneSeen()
-      }
+      if (merge !== prevMerge) pruneSeen()
       publishSeen()
-   })
-})
+   },
+)
 
 // The parsed seen map (feed key → last-viewed chronIdx) under its list-surface
 // name — one function, two exports, so the list's per-row read/unread dot and

@@ -15,7 +15,7 @@ import * as model from "./model"
 import * as nav from "./nav"
 import { forgetStoreState } from "./mounts"
 import { isPinned, listPins, pinFilter, unpinFilter } from "./pin"
-import { effect, untracked } from "./signals"
+import { onChange } from "./signals"
 
 // Offline-pin progress: show a transient "Downloading N / M…" note in the
 // status bar while the SW caches the filter's packs, then restore.
@@ -199,27 +199,17 @@ export async function syncSavedAssets(chron: number, saved: boolean): Promise<vo
 // re-baseline without syncing, because neither is a save made on this device —
 // exactly the scope the old hook had.
 export function initSavedAssets(): () => void {
-   let mid = untracked(() => model.activeMid())
-   let merges = untracked(() => model.profileRev())
-   let prev = new Set(untracked(() => model.saved()))
-   return effect(() => {
-      const next = new Set(model.saved())
-      const m = model.activeMid()
-      const r = model.profileRev()
-      if (m !== mid || r !== merges) {
-         mid = m
-         merges = r
-         prev = next
-         return
-      }
-      const before = prev
-      prev = next
-      untracked(() => {
+   return onChange(
+      () => [model.activeMid(), model.profileRev(), model.saved()] as const,
+      ([m, r, nextArr], [prevMid, prevMerges, beforeArr]) => {
+         if (m !== prevMid || r !== prevMerges) return
+         const next = new Set(nextArr)
+         const before = new Set(beforeArr)
          // Failures are silent: a save must never fail on account of an optional cache write.
          for (const chron of next) if (!before.has(chron)) void syncSavedAssets(chron, true).catch(() => {})
          for (const chron of before) if (!next.has(chron)) void syncSavedAssets(chron, false).catch(() => {})
-      })
-   })
+      },
+   )
 }
 
 // Tell the service worker which store roots are mounted (docs/MULTI-STORE-SPEC.md

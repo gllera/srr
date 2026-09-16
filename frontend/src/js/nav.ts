@@ -33,7 +33,7 @@ import {
    unreadCounts,
    type FrontierScope,
 } from "./seen"
-import { batch, effect, untracked } from "./signals"
+import { batch, onChange, untracked } from "./signals"
 
 // nav is the FACADE over the four modules split out of it (finding ENG3):
 // ./seen (frontier persistence, the explicit gestures, the unread tallies),
@@ -951,16 +951,13 @@ export function publishHash(): void {
 // to localStorage itself (S14). Adopt it — only when it differs, since flipping
 // the mode re-applies the lane. A sync pull never touches prefs, so this is a
 // no-op for it.
-let unreadOnlyMerge = untracked(() => model.profileRev())
-effect(() => {
-   const merge = model.profileRev()
-   if (merge === unreadOnlyMerge) return
-   unreadOnlyMerge = merge
-   untracked(() => {
+onChange(
+   () => model.profileRev(),
+   () => {
       const stored = lsGet(UNREAD_ONLY_KEY)
       if (stored !== null && (stored === "1") !== unreadOnly) setUnreadOnly(stored === "1")
-   })
-})
+   },
+)
 
 // Membership is derived (state-store spec rule 2, as amended by D1). The
 // unread-only bounds re-derive when the MODE flips, and — under unread-only —
@@ -970,14 +967,11 @@ effect(() => {
 // reconciles through onStoreRefreshed instead (bounds only rise). Created at
 // module load, before any surface's effect, so a flush always re-derives the
 // lane BEFORE the list or the chrome reads it.
-let laneMode = untracked(() => model.unreadOnly())
-let laneEpoch = untracked(() => model.frontierEpoch())
-effect(() => {
-   const mode = model.unreadOnly()
-   const epoch = model.frontierEpoch()
-   const flipped = mode !== laneMode
-   const moved = epoch !== laneEpoch
-   laneMode = mode
-   laneEpoch = epoch
-   if (flipped || (moved && mode)) untracked(() => reapplyLane())
-})
+onChange(
+   () => [model.unreadOnly(), model.frontierEpoch()] as const,
+   ([mode, epoch], [prevMode, prevEpoch]) => {
+      const flipped = mode !== prevMode
+      const moved = epoch !== prevEpoch
+      if (flipped || (moved && mode)) reapplyLane()
+   },
+)

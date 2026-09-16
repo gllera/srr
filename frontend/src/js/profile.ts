@@ -72,7 +72,7 @@ import {
    type MountRecord,
 } from "./mounts"
 import * as model from "./model"
-import { batch } from "./signals"
+import { batch, shallowEqual } from "./signals"
 import { lsGet, lsSet, readIdSet } from "./storage"
 import { isValidHttpish, normalizeHttpish } from "./urlish"
 
@@ -161,14 +161,6 @@ function capSavedTs(sd: Record<string, number>, members: Set<number>): Record<st
 // re-fire the trigger on every single cycle.
 function savedTsView(mid = HOME_MID): Record<string, number> {
    return capSavedTs(readSavedTs(mid), new Set(readSavedOrder(mid)))
-}
-
-// Order-independent equality for the stamp maps, so a merge that only reshuffled
-// key order doesn't rewrite localStorage on every cycle.
-function sameTsMap(a: Record<string, number>, b: Record<string, number>): boolean {
-   const ak = Object.keys(a)
-   if (ak.length !== Object.keys(b).length) return false
-   return ak.every((k) => a[k] === b[k])
 }
 
 // The incoming `sd` map, or null when the blob carried NONE — the signal that
@@ -310,7 +302,7 @@ function mergeSaved(
          lsSet(savedKey(mid), JSON.stringify(next))
          changed = true
       }
-      if (!sameTsMap(capped, sd)) lsSet(savedTsKey(mid), JSON.stringify(capped))
+      if (!shallowEqual(capped, sd)) lsSet(savedTsKey(mid), JSON.stringify(capped))
       return changed
    } catch {
       return false

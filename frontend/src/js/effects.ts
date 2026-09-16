@@ -11,25 +11,20 @@
 // Deliberately NOT here: the article render (guard() does it — it IS the
 // navigation), the frontier-undo snackbar offer (a response to one write, not a
 // projection of state), and anything that navigates.
-import { layout, type Layout } from "./layout"
+import { layout } from "./layout"
 import * as model from "./model"
-import { arrayEqual, effect, resource, untracked } from "./signals"
+import { arrayEqual, diffedForEffects, effect, resource, untracked } from "./signals"
 
 // An effect whose body must not run inside a command (D3, S16): it tracks
 // `inputs`, waits out model.rendering, and runs once per change of the input
 // tuple — so a guarded landing that moved three of its inputs costs one run, at
 // the end, over the state the command left. `prev` is the tuple of the last run
-// (null on the first), for bodies that care what moved.
+// (null on the first), for bodies that care what moved. The one "effect + diff
+// + act" state machine lives in signals.ts (onChange()'s own primitive); this
+// is that machine with this table's two policies — always fire once, wait out
+// a render — as parameters, not a second hand-rolled copy of it.
 function deferred(inputs: () => unknown[], body: (now: unknown[], prev: unknown[] | null) => void): () => void {
-   let last: unknown[] | null = null
-   return effect(() => {
-      const now = inputs()
-      if (model.rendering()) return
-      if (last !== null && arrayEqual(now, last)) return
-      const prev = last
-      last = now
-      untracked(() => body(now, prev))
-   })
+   return diffedForEffects(inputs, body, { equals: arrayEqual, fireOnFirst: true, skip: () => model.rendering() })
 }
 
 export interface EffectSurfaces {
@@ -99,13 +94,12 @@ export function registerEffects(s: EffectSurfaces): Effects {
    // names moved under it (a lane, a store, a feed renamed by a refresh). The
    // reader names its own article through ReaderDeps.setTitle on each render.
    stops.push(
-      effect(() => {
-         const focus = layout().focus
-         model.laneTokens()
-         model.activeMid()
-         model.snapshot()
-         if (focus === "list") untracked(() => s.setListTitle())
-      }),
+      deferred(
+         () => [layout().focus, model.laneTokens(), model.activeMid(), model.snapshot()],
+         ([focus]) => {
+            if (focus === "list") s.setListTitle()
+         },
+      ),
    )
 
    // ── pickerStatus ────────────────────────────────────────────────────────────
@@ -208,9 +202,9 @@ export function registerEffects(s: EffectSurfaces): Effects {
    // list decide between nothing, invalidate (hidden) and rebuild (on screen).
    stops.push(
       deferred(
-         () => [layout(), model.laneTokens(), model.unreadOnly(), model.frontierEpoch(), model.activeMid()],
-         ([l]) => {
-            const build = s.reconcileList((l as Layout).listMounted)
+         () => [layout().listMounted, model.laneTokens(), model.unreadOnly(), model.frontierEpoch(), model.activeMid()],
+         ([listMounted]) => {
+            const build = s.reconcileList(listMounted as boolean)
             if (build)
                build.then(
                   () => s.afterListBuild(),
@@ -227,14 +221,13 @@ export function registerEffects(s: EffectSurfaces): Effects {
    // hidden behind the single-surface reader re-derives on its way back (show()).
    stops.push(
       deferred(
-         () => [layout(), model.seen(), model.saved(), model.cursor()],
-         ([l, , , c], prev) => {
-            const lay = l as Layout
-            if (!lay.listMounted) return
-            const was = prev?.[0] as Layout | undefined
+         () => [layout().listMounted, layout().split, layout().readerLive, model.cursor(), model.seen(), model.saved()],
+         ([listMounted, split, readerLive, c], prev) => {
+            if (!listMounted) return
+            const wasLive = prev?.[2] as boolean | undefined
             const moved = prev !== null && (prev[3] as model.Cursor).chron !== (c as model.Cursor).chron
-            const becameLive = was !== undefined && !was.readerLive && lay.readerLive
-            if (lay.split && lay.readerLive && (moved || becameLive)) s.followListCursor()
+            const becameLive = wasLive !== undefined && !wasLive && readerLive
+            if (split && readerLive && (moved || becameLive)) s.followListCursor()
             else s.refreshListRows()
          },
       ),
@@ -243,14 +236,12 @@ export function registerEffects(s: EffectSurfaces): Effects {
    // ── listGrowth ──────────────────────────────────────────────────────────────
    // Every adopted snapshot reopens the top of an on-screen list (the "N new"
    // pill, S21) — once per snapshot, never for a layout change.
-   let grownFor = untracked(() => model.snapshot())
    stops.push(
       deferred(
-         () => [layout(), model.snapshot()],
-         ([l, n]) => {
-            if (n === grownFor) return
-            grownFor = n as number
-            if ((l as Layout).listMounted) s.listGrown()
+         () => [layout().listMounted, model.snapshot()],
+         ([listMounted, n], prev) => {
+            if (prev === null || prev[1] === n) return
+            if (listMounted) s.listGrown()
          },
       ),
    )

@@ -18,7 +18,7 @@
 import * as data from "./data"
 import { savedKey, savedTsKey } from "./keys"
 import * as model from "./model"
-import { effect, untracked } from "./signals"
+import { onChange } from "./signals"
 import { readIdSet, stampTsMap, writeIdSet } from "./storage"
 import * as sync from "./sync"
 
@@ -52,16 +52,7 @@ export function publishSaved(): void {
 // The saved atom names the ACTIVE store's set as stored; a store switch and a
 // profile merge (S14) republish it. First run subscribes only (see seen.ts for
 // why).
-let savedPrimed = false
-effect(() => {
-   model.activeMid()
-   model.profileRev()
-   if (!savedPrimed) {
-      savedPrimed = true
-      return
-   }
-   untracked(publishSaved)
-})
+onChange(() => [model.activeMid(), model.profileRev()] as const, publishSaved)
 
 // ★ Saved unsave-of-current anchor (the saved cousin of filter.anchor). Un-saving
 // the article on screen drops it from the queue but leaves it in the reader

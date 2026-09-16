@@ -218,7 +218,7 @@ describe("saveButton", () => {
       })
       expect(s.paintSaveButton).toHaveBeenLastCalledWith(true, true)
       s.isSaved.mockReturnValue(false)
-      model.saved.set([])
+      model.saved.set([1]) // a genuine change — [] to [] would no-op under arrayEqual
       expect(s.paintSaveButton).toHaveBeenLastCalledWith(true, false)
       model.readerPainted.set(false) // a placeholder replaced the article
       expect(s.paintSaveButton).toHaveBeenLastCalledWith(false, false)

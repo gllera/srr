@@ -31,7 +31,7 @@ import * as nav from "./nav"
 import * as picker from "./picker"
 import { forgetMountState, pinMenuEntry, postMounts } from "./pin-ui"
 import { enterSearch } from "./search-ui"
-import { batch, effect, untracked } from "./signals"
+import { batch, onChange } from "./signals"
 
 export interface MenuDeps {
    // The retryable error popup (the pin row's only app-level need).
@@ -55,13 +55,10 @@ let stopMountMerge: (() => void) | null = null
 export function setup(deps: MenuDeps): void {
    d = deps
    stopMountMerge?.()
-   let adopted = untracked(() => model.profileMountsRev())
-   stopMountMerge = effect(() => {
-      const rev = model.profileMountsRev()
-      if (rev === adopted) return
-      adopted = rev
-      untracked(() => afterMountChange(loadMounts()))
-   })
+   stopMountMerge = onChange(
+      () => model.profileMountsRev(),
+      () => afterMountChange(loadMounts()),
+   )
 }
 
 // RDR1/RDR2 — after a landing (or a Mark all read) has raised the frontier,

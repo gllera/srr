@@ -33,7 +33,7 @@ import { ensureSchema } from "./schema"
 import { elementScroller, windowScroller } from "./scroller"
 import * as searchUI from "./search-ui"
 import { initSplit, isSplit, onSplitChange } from "./split"
-import { effect, untracked } from "./signals"
+import { effect, onChange, untracked } from "./signals"
 import { lsSet } from "./storage"
 import * as sync from "./sync"
 
@@ -895,26 +895,20 @@ async function init() {
    // but the OLD `refreshAfterMerge` guarantee this replaced still owes one thing:
    // under unread-only, a peer's merge (a sync pull, a backup import) can mark an
    // article this list is showing as read, and unread-only membership is keyed on
-   // model.frontierEpoch (list.ts's membershipKey), never on model.seen — so
-   // seen.ts's own listRows effect only re-derives the `.srr-row-unread` class in
-   // place and leaves the row seated. Left alone, the stale row survives every
-   // further navigation until the mode is flipped, a frontier gesture fires, or
-   // the page reloads. So a POST-interaction merge still triggers a full rebuild
-   // (nav.reapplyLane() re-snapshots the raised bounds off the fresh seen map,
-   // exactly like the pre-interaction path; list.rerender() forces the window
-   // regardless of builtKey) whenever unread-only is on and the list is showing —
-   // including a split pane sitting beside a live reader, the case the guarantee
-   // was written for. Show-read membership doesn't depend on the frontier at all
-   // (list.ts's comment on membershipKey), so a show-read list is left to the
-   // ordinary derived class toggle; peek lanes (★ Saved/search) stay exempt, same
-   // as pre-interaction. This still fires only once per merge (model.profileRev),
-   // never per ordinary seen write, which is what keeps it "reconcile once".
-   let bootMerge = untracked(() => model.profileRev())
-   effect(() => {
-      const merge = model.profileRev()
-      if (merge === bootMerge) return
-      bootMerge = merge
-      untracked(() => {
+   // model.frontierEpoch (list.ts's membershipKey). So a POST-interaction merge
+   // bumps that epoch itself, exactly as an ordinary bulk frontier move (Mark all
+   // read) does — the existing listSurface effect already depends on
+   // model.frontierEpoch and rebuilds a mounted list whose membershipKey moved, and
+   // nav's own frontierEpoch effect re-derives the raised bounds (reapplyLane) off
+   // the same bump, so nothing here needs to call either directly. Show-read
+   // membership doesn't depend on the frontier at all (list.ts's comment on
+   // membershipKey), so a bump there is a no-op reconcile; peek lanes (★
+   // Saved/search) stay exempt, same as pre-interaction. This still fires only
+   // once per merge (model.profileRev), never per ordinary seen write, which is
+   // what keeps it "reconcile once".
+   onChange(
+      () => model.profileRev(),
+      () => {
          const l = layout()
          if (!l.listShown || nav.lanePeek()) return
          if (!hasInteracted) {
@@ -923,11 +917,9 @@ async function init() {
             void list.render()
             return
          }
-         if (!nav.isUnreadOnly()) return
-         nav.reapplyLane()
-         void list.rerender()
-      })
-   })
+         if (nav.isUnreadOnly()) nav.bumpFrontierEpoch()
+      },
+   )
 
    // Hand the extracted controllers what they need from the orchestrator (the
    // house DI pattern — see list.setup / picker.setup / setupGestures). None of
