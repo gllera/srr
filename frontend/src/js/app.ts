@@ -239,6 +239,9 @@ async function guard(fn: () => Promise<IShowFeed>) {
    const token = acquire()
    if (token === null) return
    const hold = beginRendering()
+   // This command's render records the landing THIS fn commits, never one a
+   // dropped render (a failed step, a reclaimed mutex) left behind.
+   effects?.beginLanding()
    // Two veil classes, one progress bar: `srr-loading` is the shared top-edge
    // bar, `srr-loading-reader` additionally dims the ARTICLE — which only this
    // path may do. renderListSurface takes the first alone, because under split

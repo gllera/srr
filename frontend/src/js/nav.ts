@@ -521,6 +521,9 @@ async function resolve(target: number, o: Stamped = {}): Promise<IShowFeed> {
    // frontier (state-store spec, "What the commands become").
    batch(() => {
       model.cursor.set({ chron: target, feedId: article.f })
+      // The landing itself, which the cursor alone cannot say: a landing on the
+      // chron the list already selected moves nothing else (effects.ts readerChrome).
+      model.landed.update((n) => n + 1)
       // A landing the raised unseen-only bounds do NOT cover is an entry anchor
       // (isValidSeen accepted it by true add_idx: switchFilter's resume position,
       // a restored/shared #pos). Remember it so feedLeft/feedRight keep it in the
@@ -600,6 +603,7 @@ function resolveNoMatch(o: Stamped & { notStarted?: boolean } = {}): IShowFeed {
    // after the cleanup and the hash write, not between them.
    batch(() => {
       model.cursor.set({ chron: -1, feedId: -1 })
+      model.landed.update((n) => n + 1)
       // Same cleanup as resolve(): the cached neighbor probes, the saved ghost, and
       // any in-flight media prefetch belong to the PREVIOUS filter's article and are
       // now stale.

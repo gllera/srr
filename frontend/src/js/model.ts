@@ -24,6 +24,10 @@ export type Focus = "list" | "reader"
 
 // ── What is on screen ─────────────────────────────────────────────────────────
 export const cursor = signal<Cursor>({ chron: -1, feedId: -1 }, (a, b) => a.chron === b.chron && a.feedId === b.feedId)
+// Bumped once per landing nav commits (resolve/resolveNoMatch), inside the
+// landing's own batch — a list command's cursor seed and nav.select are not
+// landings. effects.ts records the chrome inputs a landing committed off it.
+export const landed = signal(0)
 // The lane's identity; nav derives its membership.
 export const laneTokens = signal<readonly string[]>([], arrayEqual)
 export const unreadOnly = signal(false)

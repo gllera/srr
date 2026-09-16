@@ -135,6 +135,9 @@ export interface EffectSurfaces {
 }
 
 export interface Effects {
+   // guard() calls this before its fn(): forget any landing a dropped render
+   // never consumed, so this command records its own.
+   beginLanding(): void
    // guard() calls this right after reader.render(o), while model.rendering is
    // still held: the chrome it just painted is current for the inputs the
    // landing committed (D3).
@@ -214,14 +217,17 @@ export function registerEffects(s: EffectSurfaces): Effects {
    let paintedKey: unknown[] | null = null
    let paintedGrowth = untracked(() => model.storeGrown())
    // The chrome inputs as the landing COMMITTED them: nav's resolve() writes the
-   // cursor and its seen raise in one batch, so this runs once per landing with
-   // both in place. A write that lands later, while showFeed's probes are still
-   // awaited (a sync merge, a row ★), is not in what reader.render is about to
-   // paint — so markChromePainted records this key rather than the one current
-   // at paint time, and that later write still gets its probe.
+   // cursor, its seen raise and model.landed in one batch, so this runs once per
+   // landing with all of them in place. A write that lands later, while
+   // showFeed's probes are still awaited (a sync merge, a row ★), is not in what
+   // reader.render is about to paint — so markChromePainted records this key
+   // rather than the one current at paint time, and that later write still gets
+   // its probe. Keyed on model.landed, not the cursor: a landing on the row the
+   // list already selected leaves the cursor where it was, and a list command's
+   // cursor seed under its own hold is not a landing at all.
    let landingKey: unknown[] | null = null
    effect(() => {
-      model.cursor()
+      model.landed()
       if (untracked(() => model.rendering())) landingKey = untracked(chromeKey)
    })
    const chrome = resource<unknown[] | null, IShowFeed | null>(
@@ -395,6 +401,9 @@ export function registerEffects(s: EffectSurfaces): Effects {
    )
 
    return {
+      beginLanding: () => {
+         landingKey = null
+      },
       markChromePainted: () =>
          untracked(() => {
             paintedKey = landingKey ?? chromeKey()

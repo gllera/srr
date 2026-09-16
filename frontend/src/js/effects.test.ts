@@ -176,12 +176,97 @@ describe("readerChrome (D3)", () => {
          model.readerPainted.set(true)
          model.cursor.set({ chron: 5, feedId: 1 }) // resolve()'s commit…
          model.seen.set({ "feed:1": 5 })
+         model.landed.update((n) => n + 1)
       })
       model.seen.set({ "feed:1": 5, "feed:2": 9 }) // …a sync merge while showFeed awaits
       fx.markChromePainted() // reader.render painted the counts from BEFORE the merge
       model.rendering.set(false)
       await tick()
       expect(s.probeChrome).toHaveBeenCalledTimes(1)
+   })
+
+   // A phone reader showed 5, went back to the list, and the list's own row step
+   // (no hold) left the cursor on 7.
+   const backOnTheListAt7 = async () => {
+      const s = fakes()
+      const fx = effects.registerEffects(s)
+      model.rendering.set(true)
+      signals.batch(() => {
+         model.focus.set("reader")
+         model.readerPainted.set(true)
+         model.cursor.set({ chron: 5, feedId: 1 })
+         model.seen.set({ "feed:1": 5 })
+         model.landed.update((n) => n + 1)
+      })
+      fx.markChromePainted()
+      model.rendering.set(false)
+      model.focus.set("list")
+      model.cursor.set({ chron: 7, feedId: 1 })
+      await tick()
+      s.probeChrome.mockClear()
+      return { s, fx }
+   }
+
+   it("a landing that does not move the cursor still records its own inputs, so a merge during showFeed gets its probe", async () => {
+      const { s, fx } = await backOnTheListAt7()
+      fx.beginLanding()
+      model.rendering.set(true) // guard(() => nav.goTo(7)) on the row the list selected
+      signals.batch(() => {
+         model.cursor.set({ chron: 7, feedId: 1 }) // unchanged
+         model.seen.set({ "feed:1": 7 }) // recordSeen
+         model.landed.update((n) => n + 1)
+      })
+      model.seen.set({ "feed:1": 7, "feed:2": 9 }) // a sync merge while showFeed awaits
+      model.focus.set("reader")
+      fx.markChromePainted() // painted the counts from before the merge
+      model.rendering.set(false)
+      await tick()
+      expect(s.probeChrome).toHaveBeenCalledTimes(1)
+   })
+
+   it("a list command's cursor seed under its hold is not a landing: opening that row costs no probe", async () => {
+      const s = fakes()
+      const fx = effects.registerEffects(s)
+      model.rendering.set(true) // renderListSurface: list.render seeds the anchor row
+      model.cursor.set({ chron: 7, feedId: 1 })
+      model.rendering.set(false)
+      await tick()
+      fx.beginLanding()
+      model.rendering.set(true) // the user taps the highlighted row
+      signals.batch(() => {
+         model.cursor.set({ chron: 7, feedId: 1 }) // unchanged
+         model.seen.set({ "feed:1": 7 })
+         model.landed.update((n) => n + 1)
+      })
+      model.focus.set("reader")
+      model.readerPainted.set(true)
+      fx.markChromePainted() // painted exactly these inputs
+      model.rendering.set(false)
+      await tick()
+      expect(s.probeChrome).not.toHaveBeenCalled()
+   })
+
+   it("a guarded render with no landing of its own records the inputs it painted, not a stale landing's", async () => {
+      const s = fakes()
+      const fx = effects.registerEffects(s)
+      model.rendering.set(true) // a landing whose render was dropped (reclaimed mutex)
+      signals.batch(() => {
+         model.cursor.set({ chron: 3, feedId: 1 })
+         model.landed.update((n) => n + 1)
+      })
+      model.rendering.set(false)
+      await tick()
+      fx.beginLanding() // the next guard() starts
+      model.rendering.set(true)
+      signals.batch(() => {
+         model.split.set(true)
+         model.readerPainted.set(true)
+         model.cursor.set({ chron: 5, feedId: 1 }) // committed without a landing bump
+      })
+      fx.markChromePainted()
+      model.rendering.set(false)
+      await tick()
+      expect(s.probeChrome).not.toHaveBeenCalled()
    })
 
    it("a failed probe applies nothing, and the next input change probes again", async () => {

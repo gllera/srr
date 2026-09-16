@@ -4220,6 +4220,28 @@ describe("model mirror — cursor, lane, unread-only, frontier epoch", () => {
       expect(model.cursor()).toEqual({ chron: -1, feedId: -1 })
    })
 
+   it("every landing bumps model.landed in its own flush — a same-chron one too — and a list selection does not", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }])
+      const log: Array<[number, number]> = []
+      const stop = effect(() => void log.push([model.landed(), model.cursor().chron]))
+      const base = model.landed()
+      log.length = 0
+      try {
+         await nav.goTo(1)
+         nav.select(0, 1) // the list's highlight is not a landing
+         await nav.goTo(0) // lands on the chron the cursor already names
+         await nav.switchFilter(nav.SAVED_TOKEN) // nothing saved → the placeholder is a landing too
+      } finally {
+         stop()
+      }
+      expect(log.filter(([n]) => n > base)).toEqual([
+         [base + 1, 1],
+         [base + 1, 0], // select: the cursor moved, landed did not
+         [base + 2, 0],
+         [base + 3, -1],
+      ])
+   })
+
    it("one landing is ONE flush: the cursor and the seen write land together", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 1 }])
       const log: Array<[number, number | undefined]> = []

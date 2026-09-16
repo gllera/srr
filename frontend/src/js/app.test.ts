@@ -4715,3 +4715,34 @@ describe("split — the resting pane after a crossing from the narrow list", () 
       }
    })
 })
+
+// guard() records the chrome its render painted as the inputs its OWN landing
+// committed (nav bumps model.landed inside that batch — stood in for here).
+describe("guard() — the landing key", () => {
+   it("a landing whose step failed leaves no key for the next guarded render to record", async () => {
+      await boot()
+      await setSplit(true)
+      try {
+         const prev = document.querySelector(".srr-prev") as HTMLButtonElement
+         nav.left.mockImplementationOnce(async () => {
+            seedCursor(3)
+            M!.landed.update((n) => n + 1)
+            throw new Error("pack 404")
+         })
+         prev.disabled = false
+         prev.click()
+         await flush()
+         nav.left.mockImplementationOnce(async () => {
+            seedCursor(5) // committed without a landing bump
+            return showFeed()
+         })
+         nav.probeCurrent.mockClear()
+         prev.disabled = false
+         prev.click()
+         await flush()
+         expect(nav.probeCurrent).not.toHaveBeenCalled() // the render painted exactly these inputs
+      } finally {
+         document.body.classList.remove("srr-split") // initSplit reads it back on the next boot
+      }
+   })
+})

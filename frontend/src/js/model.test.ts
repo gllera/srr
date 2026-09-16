@@ -10,6 +10,7 @@ import { effect } from "./signals"
 // anywhere else is a review finding, and this test is that review.
 const OWNERS: Record<string, string> = {
    cursor: "nav.ts",
+   landed: "nav.ts",
    laneTokens: "nav.ts",
    unreadOnly: "nav.ts",
    frontierEpoch: "nav.ts",
@@ -62,7 +63,8 @@ describe("model", () => {
       expect(model.syncStatus()).toEqual({ on: false, okAt: 0, error: "" })
       expect(model.refreshError()).toBe("")
       expect(model.focus()).toBe("list")
-      for (const n of [model.frontierEpoch, model.snapshot, model.storeGrown, model.mountsRev]) expect(n()).toBe(0)
+      for (const n of [model.frontierEpoch, model.landed, model.snapshot, model.storeGrown, model.mountsRev])
+         expect(n()).toBe(0)
       for (const n of [model.profileRev, model.profileMountsRev]) expect(n()).toBe(0)
       for (const b of [model.rendering, model.split, model.paneHidden, model.readerPainted, model.printOverride])
          expect(b()).toBe(false)
