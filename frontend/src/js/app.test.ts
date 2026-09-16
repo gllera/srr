@@ -40,6 +40,7 @@ const nav = vi.hoisted(() => {
    const mock = {
       SAVED_TOKEN: "~saved",
       SEARCH_PREFIX: "q:",
+      WATCH_PREFIX: "w:",
       pruneSeen: vi.fn(),
       fromHash: vi.fn(async () => sf()),
       applyFilter: vi.fn((tokens: string[]) => M?.laneTokens.set([...tokens])),
@@ -2456,6 +2457,21 @@ describe("back-button filter breadcrumb (which lane is the reader in)", () => {
       hashTo("#3!~saved")
       await flush()
       expect(backLabel().textContent).toBe("★ Saved")
+      expect(backLabel().dataset.src).toBeUndefined()
+   })
+
+   it("names a watch lane by its label, without a hashtag", async () => {
+      // Set before boot, like the sibling cases above: the mocked getCurrentFilterKey
+      // is static (doesn't key off the hash's actual tokens), and the feedLabel
+      // effect (model.laneTokens/activeMid/mountsRev/snapshot) only re-runs off a
+      // list-path token application — a mocked reader-path fromHash() never moves
+      // those atoms — so the boot-time initial effect run is what must see the value.
+      nav.getCurrentFilterKey.mockReturnValue("w:hot")
+      await boot()
+      hashTo("#3!w%3Ahot")
+      await flush()
+      // The mock filterLabel echoes the key; what is under test is the absent "#".
+      expect(backLabel().textContent).toBe("w:hot")
       expect(backLabel().dataset.src).toBeUndefined()
    })
 

@@ -54,7 +54,7 @@ const data = vi.hoisted(() => {
 vi.mock("./data", () => data)
 
 const nav = vi.hoisted(() => {
-   const filter = { feeds: new Map<number, number>(), active: false, saved: false, search: false }
+   const filter = { feeds: new Map<number, number>(), active: false, saved: false, search: false, watch: false }
    let seen: Record<string, number> = {}
    let saved = new Set<number>()
    let searchTerm = ""
@@ -113,8 +113,8 @@ const nav = vi.hoisted(() => {
       isFilterActive: vi.fn(() => filter.active),
       // The lane reads (nav lanes P2), answered from the same mock `filter` the
       // cases seed — exactly what the real lane answers for each mode.
-      laneDividers: vi.fn(() => !filter.saved && !filter.search),
-      lanePeek: vi.fn(() => filter.saved || filter.search),
+      laneDividers: vi.fn(() => !filter.saved && !filter.search && !filter.watch),
+      lanePeek: vi.fn(() => filter.saved || filter.search || filter.watch),
       laneChronOrdered: vi.fn(() => !filter.saved),
       // "" outside search, as the real accessor answers — the list's term
       // highlighting keys on it.
@@ -299,6 +299,7 @@ describe("list", () => {
       nav.filter.active = false
       nav.filter.saved = false
       nav.filter.search = false
+      nav.filter.watch = false
       nav._setUnreadOnly(false)
       nav._setSeen({})
       nav._setSaved([])
@@ -351,7 +352,7 @@ describe("list", () => {
          await list.render()
          expect(document.querySelectorAll(".srr-day-divider").length).toBe(0)
       } finally {
-         nav.laneDividers.mockImplementation(() => !nav.filter.saved && !nav.filter.search)
+         nav.laneDividers.mockImplementation(() => !nav.filter.saved && !nav.filter.search && !nav.filter.watch)
       }
    })
 
@@ -989,6 +990,20 @@ describe("list", () => {
       // The emphasized name is the feed's title (filterLabel resolves the id), not "99".
       expect(empty!.querySelector(".srr-empty-em")!.textContent).toBe("Feed99")
       expect(empty!.querySelector(".srr-empty-msg")!.textContent).toBe("Nothing unread in Feed99.")
+   })
+
+   it("a watch lane with no hits names its rule instead of claiming all caught up", async () => {
+      setIndex(4, () => 1)
+      nav.filter.active = true
+      nav.filter.watch = true
+      nav.filter.feeds = new Map([[99, 0]]) // nothing matches
+      nav._setUnreadOnly(true)
+      nav.getCurrentFilterKey.mockReturnValueOnce("w:hot")
+      await list.render()
+      const empty = container.querySelector(".srr-list-empty")!
+      expect(empty.querySelector(".srr-caughtup-check")).toBeNull()
+      expect(empty.querySelector(".srr-empty-eyebrow")!.textContent).toBe("Watch")
+      expect(empty.querySelector(".srr-empty-msg")!.textContent).toBe("No articles match w:hot yet.")
    })
 
    it("renders the 'not started' message for a never-opened feed (distinct from caught-up)", () => {

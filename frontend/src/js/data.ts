@@ -6,6 +6,7 @@ import {
    IDX_HEADER_PREFIX,
    META_PACK_SIZE,
    SEARCH_BLOOM_BYTES,
+   WATCH_PACK_SIZE,
    type IMetaWire,
 } from "./format.gen"
 import {
@@ -33,6 +34,7 @@ import {
    type StoreNames,
 } from "./names"
 import { ASSET_KEY_SRC } from "./sw-grammar"
+import { emptyPlane, parseWatchPlane, type WatchPlane } from "./watch-plane"
 
 export { IDX_PACK_SIZE, META_PACK_SIZE }
 
@@ -119,6 +121,8 @@ export interface Store extends StoreContext {
    expiredCounts: Uint32Array
    dataCache: LRU<Promise<IArticle[]>>
    metaCache: LRU<Promise<IMetaWire[]>>
+   // Decoded watch/ bitmap objects by position (loadWatchPlane).
+   watchCache: LRU<Promise<WatchPlane>>
    groupCache: Partial<Record<"active" | "all", GroupResult>>
    // One in-flight-or-resolved manifest, keyed by its generation number.
    // Manifest names are write-once, so this can never go stale; it exists so an
@@ -145,6 +149,7 @@ function makeStore(ctx: StoreContext): Store {
       expiredCounts: new Uint32Array(0),
       dataCache: makeLRU<Promise<IArticle[]>>(20),
       metaCache: makeLRU<Promise<IMetaWire[]>>(20),
+      watchCache: makeLRU<Promise<WatchPlane>>(8),
       groupCache: {} as Partial<Record<"active" | "all", GroupResult>>,
       manifestMemo: null as Store["manifestMemo"],
       bgRefresh: false,
@@ -472,6 +477,8 @@ async function fromManifestRoot(store: Store, raw: IRootWire): Promise<Snapshot>
       head: man.head,
       hb: man.hb,
       pack_off: man.pack_off ?? 0,
+      wf: man.wf,
+      wc: man.wc,
       feeds: (man.feeds ?? {}) as Record<number, IFeed>,
       // The name-derivation counters the manifest RETIRES (§5.1). They are
       // synthesized from the LISTED names purely so the reader's coverage
@@ -523,6 +530,7 @@ async function applyDb(store: Store, snap: Snapshot): Promise<void> {
 
    store.dataCache = makeLRU<Promise<IArticle[]>>(20)
    store.metaCache = makeLRU<Promise<IMetaWire[]>>(20)
+   store.watchCache = makeLRU<Promise<WatchPlane>>(8)
    store.groupCache = {}
    // Reset idxFetches with the other derived caches — BEFORE the empty-store
    // early return — so a re-run against a total_art===0 store can never leave it
@@ -1219,6 +1227,34 @@ export async function loadMeta(chronIdx: number, store: Store = active): Promise
    }
    const a = await loadArticle(chronIdx, store)
    return metaCardOf(a)
+}
+
+// The keyword-watchlist roster (manifest `wf`: rule → the first chron its plane
+// describes) and the exclusive end of the published coverage (`wc`). A store with
+// no rules carries neither: no rules, no coverage.
+export function watchRules(store: Store = active): Readonly<Record<string, number>> {
+   return store.db.wf ?? {}
+}
+
+export function watchCovered(store: Store = active): number {
+   return store.db.wc ?? 0
+}
+
+// One watch/ object by POSITION — bit i of position p is chron p·WATCH_PACK_SIZE+i
+// — decoded once and cached for the snapshot. A position the manifest lists no
+// object for reads as all-zero rather than failing: coverage ([wf, wc)) is what
+// says whether a zero means "no hit" or "not covered", and the lane checks it.
+// The tail position takes the guarded stale-tab reload like every other tail.
+export function loadWatchPlane(p: number, store: Store = active): Promise<WatchPlane> {
+   return cachedPromise(store.watchCache, p, async () => {
+      const base = p * WATCH_PACK_SIZE
+      const n = Math.max(0, Math.min(store.db.total_art - base, WATCH_PACK_SIZE))
+      const list = store.names.series.get("watch")
+      const key = list?.keys[p]
+      if (!list || !key) return emptyPlane(base, n)
+      const buf = await fetchPackBytes(key, p === list.tail, store)
+      return parseWatchPlane(JSON.parse(new TextDecoder().decode(buf)), base)
+   })
 }
 
 type GroupResult = { tagged: Map<string, IFeed[]>; sortedTags: string[]; untagged: IFeed[] }

@@ -33,17 +33,19 @@ CDN data layer: fetches `db.gz`, then the idx header summary (`idx/h<hdrs>.gz`) 
 
 `nav.ts` holds one active `Lane` (`src/js/nav/lane.ts`) and asks it every question whose answer depends on the filter mode. The implementations and what each answers:
 
-| Question | `MembersLane` ([ALL]/feed/tag) | `SavedLane` | `SearchLane` |
-|---|---|---|---|
-| `matches(f, c)` | `c ≥ members[f]` | `isSaved(c)` | hit set has `c` |
-| `older/newer` | value seam ∓ 1, entry anchor folded in | save-index step (`savedNeighbor`) | hit set ∓ 1 |
-| `atOrBelow/atOrAbove` (value seam) | `data.findLeft/Right` + anchor | a walk over no feeds (-1) | hit set, after `prepare()` |
-| `oldest/newest` | first member ≥ smallest bound / last member | queue front / back | oldest / newest hit |
-| `anchor()` (list anchor) | oldest UNREAD member | queue front | -1 (newest-first) |
-| `ahead(floor)` (next pill) | `tallyWith` floored at `floor` | `savedAhead` | hits `> floor` |
-| `peek` / `dividers` / `chronOrdered` | false / true / true | true / false / false | true / false / true |
-| `entry()` | the decision tree below | queue front | newest hit |
-| `refreshed()` | `reconcileMembers` (bounds only rise) | — | reconcile scope, reload snapshot |
+| Question | `MembersLane` ([ALL]/feed/tag) | `SavedLane` | `SearchLane` | `WatchLane` |
+|---|---|---|---|---|
+| `matches(f, c)` | `c ≥ members[f]` | `isSaved(c)` | hit set has `c` | bit set ∧ `[wf, wc)` ∧ not expired, resident region only |
+| `older/newer` | value seam ∓ 1, entry anchor folded in | save-index step (`savedNeighbor`) | hit set ∓ 1 | bit scan across regions, faulting regions in |
+| `atOrBelow/atOrAbove` (value seam) | `data.findLeft/Right` + anchor | a walk over no feeds (-1) | hit set, after `prepare()` | the same scans |
+| `oldest/newest` | first member ≥ smallest bound / last member | queue front / back | oldest / newest hit | first / last set bit in coverage |
+| `anchor()` (list anchor) | oldest UNREAD member | queue front | -1 (newest-first) | -1 |
+| `ahead(floor)` (next pill) | `tallyWith` floored at `floor` | `savedAhead` | hits `> floor` | popcount in `(floor, wc)`, expiry not subtracted |
+| `peek` / `dividers` / `chronOrdered` | false / true / true | true / false / false | true / false / true | true / false / true |
+| `entry()` | the decision tree below | queue front | newest hit | newest hit |
+| `refreshed()` | `reconcileMembers` (bounds only rise) | — | reconcile scope, reload snapshot | drop resident regions, reload the tail |
+
+**The watch lane.** One lane per key of the manifest's `wf`, token `w:<rule>` (alone — a companion token falls through to membership like an unknown tag). `data.loadWatchPlane(p)` fetches the object the manifest lists at position `p` of the `watch` series (an unlisted position reads all-zero), `watch-plane.ts` decodes it once per rule and caches the region's popcount, and `data.ts`'s `applyDb` drops the cache with the other derived ones. `matches` answers only for regions the lane has loaded (`prepare()` loads the tail region, so a switch and a deep link near the head are valid); the walks fault older regions in. It is a peek lane for a structural reason: one frontier per feed cannot describe a sparse subset of a feed without marking the skipped articles read.
 
 Rules the code enforces:
 
@@ -57,6 +59,9 @@ Rules the code enforces:
 
 **`switchFilter(token)` — the decision tree** (`MembersLane.entry()` for feed/tag, moved verbatim from `frontend/CLAUDE.md`):
 - `switchFilter(token)`: sets the lane to token (or [ALL] if `""`); resumes at last seen position for that feed/tag if valid (in unseen-only mode too — `isValidSeen` validates against the true `add_idx`, not the raised bound, so you open at your current position, not the oldest unseen; the landing becomes the lane's entry anchor, so ← can step back to it after → walks into the unseen), otherwise jumps to `first()` (show-read) or a placeholder (unread-only, below). **In unread-only mode the reader is a resume surface, so a feed/tag with no already-read article to resume onto resolves to a placeholder (`resolveNoMatch`) rather than opening an unread article — two flavors keyed by `IShowFeed.notStarted`: a fully-read lane (no unread left — `noUnreadLeft`: nothing matches the raised bounds) shows the "All caught up" empty state (`notStarted: false`); a never-opened lane (has unread but `getSeen` is undefined) shows the distinct "Not started" empty state (`notStarted: true`, `list.emptyStateEl({notStarted, startFeed})`) with Next **armed** (`has_right` + the full-backlog pill == the picker badge) — a →-step starts reading at the oldest unread right there, no detour through the list — and `IShowFeed.startFeed` (that oldest-unread article's own feed, probed warm right after `noUnreadLeft`) lets the station name WHICH feed is the never-read one as its opening wire-head line (masthead-first, like the article that replaces it) — the masthead-voice name between dashed hairlines, source-tinted (`.srr-empty-name[data-src]` in `.srr-empty-wirehead`) — a tag lane's label alone couldn't say which member feed is new (probe-blip fallback: the lane label); "All caught up" would be false there (the lane HAS unread). (The pill tracks the picker badge — the same tally floored at the cursor, and with no article on screen the placeholder's pill IS the badge — so the placeholder is purely the resume-surface call: a mere switch must not drop the reader onto unread it won't record.) The caught-up guard also covers `fromHash` (a reload onto a caught-up lane) and the `""` ([ALL]) fully-caught-up case; the not-started placeholder is feed/tag-only — the `""` [ALL] case keeps landing on the oldest unseen. Show-read mode opens the article as before — you browse read items there.** `""` ([ALL]) opens at the **oldest unseen** article across all feeds (the same `oldestUnread` scan `listAnchor` uses), falling back to `last()` only when fully caught up. **Every switch landing resolves with `record: false`** — a filter switch (a picker click, and the W/S / ↑↓ / two-finger cycle via `cycleFilter`) is a resume, not a read, so it never advances the seen frontier: merely visiting a lane can't decrement its unread count, and a never-seen feed/tag lands on its oldest article still unread (show-read mode; in unread-only mode it shows the not-started placeholder instead — above). Reading forward (Right) records normally from there
+
+**`cycleToken(dir)`** (moved from `frontend/CLAUDE.md`):
+- `cycleToken(dir)` (async): the next **cyclable** filter-entry token by `dir` (+1/-1) — it walks `getFilterEntries()` from `cycleOriginKey()` skipping non-cyclable lanes (`cyclableLanes`: ★ Saved is **always** skipped; in unread-only mode a tag/feed lane is skipped when it has 0 unread — `[ALL]` always survives), wrapping, so W/S/↑↓/swipe land only on lanes worth reading. Async because unread is idx-derived (`unreadCounts`)
 
 ## `list.ts`
 

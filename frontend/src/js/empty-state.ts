@@ -101,6 +101,11 @@ export function emptyStateEl(opts: { notStarted?: boolean; startFeed?: number } 
       const star = el("span", "srr-empty-star")
       star.textContent = "★"
       msg.append("Tap ", star, " on any article to keep it here for later.")
+   } else if (nav.lanePeek()) {
+      // Any other peek lane — today a keyword-watchlist rule. It has no unread, so
+      // like ★ Saved it must be answered BEFORE the caught-up reward below.
+      eyebrow("Watch")
+      msg.append("No articles match ", em(nav.filterLabel(nav.getCurrentFilterKey())), " yet.")
    } else if (nav.isUnreadOnly() && data.db.total_art > 0) {
       // The one empty state that's a reward, not an absence (unseen-only spans
       // [ALL] too): an empty list with articles present means there's nothing

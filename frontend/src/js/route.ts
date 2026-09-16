@@ -91,6 +91,7 @@ export function feedIdOf(token: string): number | null {
 // Parse the `!tokens` segment of a hash into an array of decoded token strings.
 // Called by both app.ts route() (the list path) and fromHash() (the reader path).
 // A malformed %-escape passes through verbatim rather than crashing navigation.
+// Token prefixes the lanes classify (nav/lane.ts): `~saved`, `q:<query>`, `w:<rule>` — the grammar itself has no knowledge of them.
 export function parseHashTokens(hash: string): string[] {
    const bang = hash.indexOf("!")
    if (bang === -1) return []

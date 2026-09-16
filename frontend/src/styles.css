@@ -1610,11 +1610,13 @@ body:not(.srr-view-list):not(.srr-split) .srr-toolbar {
    & .srr-tag-collapsed .srr-tag-toggle::after {
       transform: rotate(-45deg);
    }
-   /* The ★ Favorites lane header (RDR9) is a plain div, not a link — the lane is
-      a VIEW of the feeds you marked, not a filter token nav can resolve, so a
-      tap on it has nothing to select. It borrows the tag header's layout plus
-      the row padding the `& a` rule above gives its link siblings. */
-   & .srr-fav-header {
+   /* The ★ Favorites lane header (RDR9) and the keyword-watchlist lane header
+      are plain divs, not links — each is a VIEW (a set of feeds you marked /
+      a peek over a watch rule's bitmap plane), not a filter token nav can
+      resolve, so a tap on either has nothing to select. Both borrow the tag
+      header's layout plus the row padding the `& a` rule above gives its
+      link siblings. */
+   & :is(.srr-fav-header, .srr-watch-header) {
       display: flex;
       align-items: center;
       padding: 0.4rem 0.75rem 0.45rem;

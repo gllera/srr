@@ -1,10 +1,12 @@
 // nav/make-lane.ts — the ONE place a token list becomes a lane. It lives apart
 // from lane.ts so the interface and its implementations never import each other.
+import * as data from "../data"
 import { readSeen } from "../seen"
 import { classifyTokens, type Lane, type LaneEnv } from "./lane"
 import { isKnownToken, MembersLane, resolveMembership } from "./lane-members"
 import { SavedLane } from "./lane-saved"
 import { SearchLane } from "./lane-search"
+import { WatchLane } from "./lane-watch"
 
 // `keepKnownEmpty`: applyFilter and switchFilter keep a KNOWN feed/tag with no
 // articles scoped to itself — an empty lane under its own token, so a reload or
@@ -14,6 +16,9 @@ export function makeLane(tokens: readonly string[], env: LaneEnv, opts: { keepKn
    const c = classifyTokens(tokens)
    if (c.kind === "saved") return new SavedLane(tokens)
    if (c.kind === "search") return new SearchLane(tokens, c.q, env)
+   // A rule the store no longer lists is an unknown token like any other: it falls
+   // through to membership resolution, which finds nothing and lands on [ALL].
+   if (c.kind === "watch" && Object.hasOwn(data.watchRules(), c.rule)) return new WatchLane(tokens, c.rule)
    if (tokens.length > 0) {
       const members = resolveMembership(tokens)
       if (members.size > 0) return withUnseen(new MembersLane(tokens, members, env))

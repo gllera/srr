@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 const data = vi.hoisted(() => ({
    db: { total_art: 6, feeds: {} as Record<number, IFeed> } as unknown as IDB,
    feedTitle: vi.fn((id: number) => `F${id}`),
+   watchRules: vi.fn(() => ({ hot: 0 }) as Record<string, number>),
+   watchCovered: vi.fn(() => 0),
    activeStore: () => ({ mid: "0", base: new URL("http://localhost/") }),
 }))
 vi.mock("../data", () => data)
@@ -47,6 +49,13 @@ describe("makeLane", () => {
       expect([nope.kind, nope.tokens]).toEqual(["all", []])
       expect(makeLane(["empty"], env()).kind).toBe("all")
       expect(makeLane(["empty", "nope"], env(), { keepKnownEmpty: true }).kind).toBe("all")
+   })
+
+   it("builds a watch lane only for a rule the store lists", () => {
+      expect(makeLane(["w:hot"], env()).kind).toBe("watch")
+      const gone = makeLane(["w:gone"], env(), { keepKnownEmpty: true })
+      expect([gone.kind, gone.tokens]).toEqual(["all", []])
+      expect(makeLane(["w:hot", "1"], env()).kind).toBe("members")
    })
 
    it("keeps a KNOWN empty feed or tag scoped to itself when asked (D8)", () => {

@@ -21,6 +21,10 @@ const data = vi.hoisted(() => {
       mountRecords: vi.fn(() => [{ id: "0", url: "http://localhost/", label: "", ord: 0, role: "home", cred: false }]),
       mountStatus: vi.fn(() => ({ state: "ok", kind: "", error: "" })),
       unreadTally: vi.fn(() => ({ counts: new Map<number, number>(), rare: [] as IFeed[] })),
+      // The keyword-watchlist roster (nav lanes P3); "no rules" by default.
+      watchRules: vi.fn<() => Record<string, number>>(() => ({})),
+      watchCovered: vi.fn<() => number>(() => 0),
+      loadMeta: vi.fn(async (chron: number) => ({ f: 0, w: 1000 + chron })),
    }
    return mock
 })
@@ -30,6 +34,8 @@ const nav = vi.hoisted(() => ({
    getCurrentFilterKey: vi.fn(() => ""),
    savedCount: vi.fn(() => 0),
    SAVED_TOKEN: "~saved",
+   WATCH_PREFIX: "w:",
+   watchLaneCount: vi.fn<(rule: string) => Promise<number>>(async () => 0),
    feedIdOf: (token: string) => (/^\d+$/.test(token) ? Number(token) : null),
    isUnreadOnly: vi.fn(() => false),
    setUnreadOnly: vi.fn<(on: boolean) => void>(),
@@ -122,6 +128,9 @@ beforeEach(() => {
    nav.isUnreadOnly.mockReturnValue(false)
    nav.unreadCounts.mockResolvedValue(new Map())
    data.groupFeedsByTag.mockReturnValue({ tagged: new Map(), sortedTags: [], untagged: [] })
+   data.watchRules.mockReturnValue({})
+   data.watchCovered.mockReturnValue(0)
+   nav.watchLaneCount.mockResolvedValue(0)
    data.lastFetchedAt.mockReturnValue(0)
    data.hasArticles.mockReturnValue(true)
    data.metaReady.mockReturnValue(true)
@@ -1218,5 +1227,54 @@ describe("mount switcher (§6.3)", () => {
       picker.render()
       ;($(".srr-picker").querySelector('[data-mount="s3f9a1c22"]') as HTMLElement).dispatchEvent(click())
       expect(hooks.onSwitchMount).toHaveBeenCalledWith("s3f9a1c22")
+   })
+})
+
+describe("the Watch group (keyword-watchlist lanes)", () => {
+   it("renders nothing when the store lists no rules", async () => {
+      const picker = await mount()
+      picker.open()
+      expect($$(".srr-watch-group")).toHaveLength(0)
+   })
+
+   it("lists one row per rule, sorted, picked like any lane, badged with its hit count", async () => {
+      data.watchRules.mockReturnValue({ hot: 5, cve: 0 })
+      nav.watchLaneCount.mockImplementation(async (rule: string) => (rule === "hot" ? 3 : 0))
+      const picker = await mount()
+      picker.open()
+      await flush()
+      expect($(".srr-watch-header").textContent).toContain("Watch")
+      const rows = $$<HTMLAnchorElement>(".srr-watch-group [data-value]")
+      expect(rows.map((r) => r.dataset.value)).toEqual(["w:cve", "w:hot"])
+      expect(rows[1].querySelector(".srr-unread")!.textContent).toBe("×3")
+      expect(rows[0].querySelector(".srr-unread")).toBeNull()
+      rows[1].dispatchEvent(click())
+      expect(hooks.onSelect).toHaveBeenCalledWith("w:hot")
+   })
+
+   it("marks the active rule, and unread-only never hides a rule (it has no unread)", async () => {
+      data.watchRules.mockReturnValue({ hot: 0 })
+      nav.getCurrentFilterKey.mockReturnValue("w:hot")
+      nav.isUnreadOnly.mockReturnValue(true)
+      const picker = await mount()
+      picker.open()
+      await flush()
+      const row = $<HTMLAnchorElement>(".srr-watch-group [data-value='w:hot']")
+      expect(row.classList.contains("srr-active")).toBe(true)
+      expect(row.classList.contains("srr-hidden")).toBe(false)
+   })
+
+   it("in Info mode a rule row opens its card: coverage as two dates and the match count", async () => {
+      data.watchRules.mockReturnValue({ hot: 5 })
+      data.watchCovered.mockReturnValue(10)
+      nav.watchLaneCount.mockResolvedValue(3)
+      const picker = await mount()
+      picker.open()
+      $(".srr-picker-info").click()
+      $(".srr-watch-group [data-value='w:hot']").dispatchEvent(click())
+      await flush()
+      expect($(".srr-info-title").textContent).toBe("hot")
+      expect($(".srr-info-coverage").textContent).toBe("D1005 – D1009") // loadMeta(5).w, loadMeta(9).w
+      expect($(".srr-info-unread").textContent).toBe("3")
    })
 })

@@ -594,6 +594,28 @@ function renderFilterList(): void {
       addGroup(header, group, expanded ? "srr-tag-group" : "srr-tag-group srr-tag-collapsed")
    }
 
+   // The keyword-watchlist lanes: one row per rule the manifest lists, in a group
+   // after the tags. A rule is a PEEK lane — no unread, never hidden by Show read —
+   // so its badge is its hit count (fillWatch), not an unread count.
+   const watchRows: [HTMLAnchorElement, string][] = []
+   const rules = Object.keys(data.watchRules()).sort()
+   if (rules.length > 0) {
+      const groupDiv = divEl("srr-tag-group srr-watch-group")
+      // A plain div, like the ★ Favorites header: the group is not a lane itself.
+      const header = divEl("srr-tag-header srr-watch-header")
+      header.appendChild(rowTitle("Watch"))
+      stampMatch(header, "Watch")
+      header.appendChild(collapseToggle(groupDiv))
+      groupDiv.appendChild(header)
+      for (const rule of rules) {
+         const token = nav.WATCH_PREFIX + rule
+         const row = link(token, rule, cls("srr-tag-item", token))
+         watchRows.push([row, rule])
+         groupDiv.appendChild(row)
+      }
+      frag.appendChild(groupDiv)
+   }
+
    if (sortedTags.length > 0 && untagged.length > 0) frag.appendChild(divEl("srr-tag-sep"))
    for (const ch of untagged) frag.appendChild(feedRow(ch, ""))
 
@@ -613,6 +635,7 @@ function renderFilterList(): void {
    // flip, a favorite mark), and the fresh rows come out unfiltered.
    applyQuery()
    void fillUnread(unreadRows, headerRows, allRow)
+   void fillWatch(watchRows)
 }
 
 // The per-mount status chip (docs/MULTI-STORE-SPEC.md §8.3). A CORS rejection and
@@ -731,6 +754,22 @@ async function fillUnread(
    }
 }
 
+// The Watch rows' badges: each rule's hit count, from the lane itself so the
+// number is the one its walk steps through. fillUnread has already minted this
+// render's fillToken, so a newer render supersedes this fill the same way.
+async function fillWatch(rows: [HTMLAnchorElement, string][]): Promise<void> {
+   const my = fillToken
+   for (const [row, rule] of rows) {
+      try {
+         const n = await nav.watchLaneCount(rule)
+         if (my !== fillToken) return
+         if (n > 0) row.appendChild(unreadBadge(n))
+      } catch {
+         // A region that will not load leaves this row without a badge.
+      }
+   }
+}
+
 // ── Status ───────────────────────────────────────────────────────────────────
 
 // A flagged status — an amber caution row with a leading dot, matching the
@@ -807,6 +846,7 @@ export function renderStatus(box: HTMLElement): void {
 function openRowInfo(value: string): void {
    if (value === "") return openStoreInfo()
    if (value === nav.SAVED_TOKEN) return
+   if (value.startsWith(nav.WATCH_PREFIX)) return openWatchInfo(value.slice(nav.WATCH_PREFIX.length))
    const id = nav.feedIdOf(value)
    if (id !== null) {
       const ch = data.db.feeds[id]
@@ -960,6 +1000,38 @@ function openTagInfo(tag: string): void {
    if (!group?.length) return
    openInfoDialog(tag, buildGroupInfo(group, false))
    void fillStoreUnread(group)
+}
+
+// A watch rule's card: its name, the chrons its planes cover as two dates, and its
+// hit count. Coverage is [wf[rule], wc) — nothing claims more than the store published.
+function openWatchInfo(rule: string): void {
+   const from = data.watchRules()[rule]
+   if (from === undefined) return
+   const end = data.watchCovered()
+   const sec = infoSection("Watch")
+   addRow(sec.dl, "Rule", rule)
+   addRow(sec.dl, "Coverage", end > from ? "…" : "Not started", "srr-info-coverage")
+   addRow(sec.dl, "Matches", "…", "srr-info-unread")
+   const frag = document.createDocumentFragment()
+   frag.appendChild(sec.sec)
+   openInfoDialog(rule, frag)
+   void fillWatchInfo(rule, from, end)
+}
+
+async function fillWatchInfo(rule: string, from: number, end: number): Promise<void> {
+   const my = {}
+   infoFillToken = my
+   try {
+      const n = await nav.watchLaneCount(rule)
+      const range = end > from ? [await data.loadMeta(from), await data.loadMeta(end - 1)] : null
+      if (my !== infoFillToken) return
+      const count = infoBodyEl.querySelector(".srr-info-unread")
+      if (count) count.textContent = String(n)
+      const cov = infoBodyEl.querySelector(".srr-info-coverage")
+      if (cov && range) cov.textContent = `${formatDate(range[0].w)} – ${formatDate(range[1].w)}`
+   } catch {
+      // Best-effort: the card keeps its placeholders.
+   }
 }
 
 // The feed card's async live-unread fill, summed store-wide.

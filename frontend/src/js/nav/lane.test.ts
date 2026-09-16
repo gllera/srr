@@ -71,6 +71,11 @@ describe("classifyTokens — the one place a token list is classified", () => {
       expect(classifyTokens(["q:x", "q:y"])).toEqual({ kind: "search", q: 0 })
       expect(classifyTokens(["q:x", "a", "b"])).toEqual({ kind: "members" })
    })
+
+   it("classifies a lone w: token as a watch lane, and only a lone one", () => {
+      expect(classifyTokens(["w:hot"])).toEqual({ kind: "watch", rule: "hot" })
+      expect(classifyTokens(["w:hot", "1"])).toEqual({ kind: "members" })
+   })
 })
 
 describe("keyOf / labelFor / minOf", () => {
@@ -89,6 +94,10 @@ describe("keyOf / labelFor / minOf", () => {
       expect(labelFor("99")).toBe("[DELETED]")
       expect(labelFor("news")).toBe("news")
       expect(labelFor("1e3")).toBe("1e3")
+   })
+
+   it("labels a watch lane by its rule name", () => {
+      expect(labelFor("w:hot")).toBe("hot")
    })
 
    it("takes a minimum without spreading, 0 for nothing", () => {

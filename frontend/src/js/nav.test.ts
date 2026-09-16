@@ -46,6 +46,10 @@ const data = vi.hoisted(() => ({
    // article-base it hands fmt.extractPrefetchMedia. Home mid "0" ⇒ nav uses the
    // bare srr-seen/srr-saved keys the tests below assert on directly.
    activeStore: () => ({ mid: "0", base: new URL("http://localhost/") }),
+   // The keyword-watchlist accessors (nav lanes P3); "no rules" unless a case says otherwise.
+   watchRules: vi.fn<() => Record<string, number>>(() => ({})),
+   watchCovered: vi.fn<() => number>(() => 0),
+   loadWatchPlane: vi.fn<(p: number) => Promise<import("./watch-plane").WatchPlane>>(),
 }))
 
 vi.mock("./data", () => data)
@@ -87,6 +91,7 @@ vi.mock("./search", () => searchMod)
 
 import * as nav from "./nav"
 import { setImgProxy } from "./fmt"
+import { parseWatchPlane } from "./watch-plane"
 import * as model from "./model"
 import { effect } from "./signals"
 
@@ -3776,6 +3781,66 @@ describe("lane reads (laneDividers / lanePeek / laneChronOrdered)", () => {
 // docs/MULTI-STORE-SPEC.md §6.3 — the @<mid> token grammar. Bare tokens keep
 // meaning the home mount, so every existing deep link + stored srr-hash still
 // works; a peer mount rides IN the token as @<mid> ([ALL]) or @<mid>:<token>.
+describe("watch lane (w:<rule>)", () => {
+   // Ten articles alternating feeds 1/2; the rule "hot" marks chrons 2, 5 and 7.
+   function setupWatch() {
+      setupIndex(Array.from({ length: 10 }, (_, i) => ({ feedId: i % 2 ? 2 : 1 })))
+      const bytes = new Uint8Array(2)
+      for (const i of [2, 5, 7]) bytes[i >> 3] |= 1 << (i & 7)
+      const plane = parseWatchPlane({ v: 1, base: 0, n: 10, bits: { hot: btoa(String.fromCharCode(...bytes)) } }, 0)
+      data.watchRules.mockReturnValue({ hot: 0 })
+      data.watchCovered.mockReturnValue(10)
+      data.loadWatchPlane.mockResolvedValue(plane)
+   }
+   afterEach(() => {
+      data.watchRules.mockReturnValue({})
+      data.watchCovered.mockReturnValue(0)
+   })
+
+   it("a switch lands on the newest hit, keyed and labelled by the rule, recording nothing", async () => {
+      setupWatch()
+      const o = await nav.switchFilter("w:hot")
+      expect(nav.currentChron()).toBe(7)
+      expect([o.has_right, o.right_count]).toEqual([false, 0])
+      expect(nav.getCurrentFilterKey()).toBe("w:hot")
+      expect(nav.filterLabel("w:hot")).toBe("hot")
+      expect(nav.tokensSuffix()).toBe("!w%3Ahot")
+      expect(localStorage.getItem("srr-seen")).toBeNull()
+   })
+
+   it("← walks the hits; reading them moves no frontier", async () => {
+      setupWatch()
+      await nav.switchFilter("w:hot")
+      await nav.left()
+      expect(nav.currentChron()).toBe(5)
+      const o = await nav.left()
+      expect(nav.currentChron()).toBe(2)
+      expect([o.has_left, o.right_count]).toEqual([false, 2])
+      expect(localStorage.getItem("srr-seen")).toBeNull()
+      expect(nav.markAllRead()).toBe(false)
+      expect([nav.lanePeek(), nav.laneDividers()]).toEqual([true, false])
+   })
+
+   it("a rule the store does not list takes the unknown-token path", async () => {
+      setupWatch()
+      await nav.switchFilter("w:gone")
+      expect(nav.isFilterActive()).toBe(false)
+   })
+
+   it("watchLaneCount is the lane's own count, 0 for an unlisted rule", async () => {
+      setupWatch()
+      expect(await nav.watchLaneCount("hot")).toBe(3)
+      expect(await nav.watchLaneCount("gone")).toBe(0)
+   })
+
+   it("a #pos!w: deep link lands on that hit", async () => {
+      setupWatch()
+      await nav.fromHash("5!w%3Ahot")
+      expect(nav.currentChron()).toBe(5)
+      expect(nav.getCurrentFilterKey()).toBe("w:hot")
+   })
+})
+
 describe("§6.3 mount token grammar", () => {
    afterEach(() => {
       data.activeStore = realActiveStore

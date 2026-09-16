@@ -15,6 +15,8 @@ import { feedIdOf } from "../route"
 import { SAVED_TOKEN } from "../saved"
 
 export const SEARCH_PREFIX = "q:"
+// A keyword-watchlist lane: `w:<rule>`, alone (a companion token has no meaning).
+export const WATCH_PREFIX = "w:"
 
 export type LaneKind = "all" | "members" | "saved" | "search" | "watch"
 export type SeenMap = Record<string, number>
@@ -80,9 +82,18 @@ export interface Lane {
    entryAnchor(): number
    // The meta card of a hit, for lanes that already hold them (search).
    card?(chron: number): IMetaWire | undefined
+   // Fault in whatever matches() needs to answer for exactly this chron — for a
+   // lane whose matches() depends on lazily-loaded state (the watch lane's
+   // per-region planes) rather than something already resident after prepare().
+   // Absent (the default) where matches() is already total post-prepare().
+   ensureRegion?(chron: number): Promise<void>
 }
 
-export type TokenClass = { kind: "saved" } | { kind: "search"; q: number } | { kind: "members" }
+export type TokenClass =
+   | { kind: "saved" }
+   | { kind: "search"; q: number }
+   | { kind: "watch"; rule: string }
+   | { kind: "members" }
 
 // The ONE classification of a token list. ★ Saved is a lone reserved token; a
 // query is a `q:` token with at most one companion (its RDR8 scope); anything
@@ -91,6 +102,8 @@ export function classifyTokens(tokens: readonly string[]): TokenClass {
    if (tokens.length === 1 && tokens[0] === SAVED_TOKEN) return { kind: "saved" }
    const q = tokens.findIndex((t) => t.startsWith(SEARCH_PREFIX))
    if (q >= 0 && tokens.length <= 2) return { kind: "search", q }
+   if (tokens.length === 1 && tokens[0].startsWith(WATCH_PREFIX))
+      return { kind: "watch", rule: tokens[0].slice(WATCH_PREFIX.length) }
    return { kind: "members" }
 }
 
@@ -107,6 +120,7 @@ export function labelFor(key: string): string {
       const q = key.slice(SEARCH_PREFIX.length)
       return q ? `Search: ${q}` : "Search"
    }
+   if (key.startsWith(WATCH_PREFIX)) return key.slice(WATCH_PREFIX.length)
    const id = feedIdOf(key)
    return id !== null ? data.feedTitle(id) : key
 }
@@ -138,6 +152,7 @@ export async function validResume(lane: Lane, idx: number, unreadOnly: boolean):
    if (idx < 0 || idx >= data.db.total_art) return false
    const feedId = await data.getFeedId(idx)
    if (unreadOnly && !lane.peek) return lane.members.has(feedId) && idx >= (data.db.feeds[feedId]?.add_idx ?? 0)
+   await lane.ensureRegion?.(idx)
    return lane.matches(feedId, idx)
 }
 

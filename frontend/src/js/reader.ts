@@ -545,7 +545,9 @@ export function paintFeedLabel() {
    // lane prev/next walk. Empty on the unfiltered wire — silence means [ALL],
    // the same rule that keeps the list readout neutral. The span is aria-hidden;
    // the filter rides the button's aria-label/tooltip instead.
-   const crumb = key === "" ? "" : feedId !== null || key === nav.SAVED_TOKEN ? label : "#" + label
+   // Only a TAG reads as a hashtag: a feed, ★ Saved and a watch rule are names.
+   const named = feedId !== null || key === nav.SAVED_TOKEN || key.startsWith(nav.WATCH_PREFIX)
+   const crumb = key === "" ? "" : named ? label : "#" + label
    el.backLabel.textContent = crumb
    if (feedId !== null) stampSrc(el.backLabel, feedId)
    else delete el.backLabel.dataset.src

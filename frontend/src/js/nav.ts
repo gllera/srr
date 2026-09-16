@@ -1,7 +1,15 @@
 import * as data from "./data"
 import { UNREAD_ONLY_KEY } from "./keys"
 import * as model from "./model"
-import { firstUnreadProbe, labelFor, validResume, type Lane, type LaneEntry, type LaneEnv } from "./nav/lane"
+import {
+   firstUnreadProbe,
+   labelFor,
+   validResume,
+   WATCH_PREFIX,
+   type Lane,
+   type LaneEntry,
+   type LaneEnv,
+} from "./nav/lane"
 import { MembersLane } from "./nav/lane-members"
 import type { SearchLane } from "./nav/lane-search"
 import { makeLane } from "./nav/make-lane"
@@ -50,7 +58,7 @@ export {
 } from "./seen"
 import { lsGet, lsSet } from "./storage"
 export type { FrontierUndo } from "./seen"
-export { SEARCH_PREFIX } from "./nav/lane"
+export { SEARCH_PREFIX, WATCH_PREFIX } from "./nav/lane"
 export { resetSearchStream, searchCard, searchTruncated } from "./nav/lane-search"
 export {
    feedIdOf,
@@ -303,6 +311,15 @@ export function lanePeek(): boolean {
 }
 export function laneChronOrdered(): boolean {
    return lane.chronOrdered
+}
+
+// The picker's badge for one watch rule: the lane's own count over its whole
+// coverage, from a lane built for the question alone — a watch lane carries no
+// state a speculative construction could disturb (unlike a search lane, whose
+// snapshot is shared). 0 for a rule the store no longer lists.
+export function watchLaneCount(rule: string): Promise<number> {
+   const l = makeLane([WATCH_PREFIX + rule], env)
+   return l.kind === "watch" ? l.ahead(-1) : Promise.resolve(0)
 }
 
 // After data.refresh() swapped the store snapshot: reconcile the filter and the
