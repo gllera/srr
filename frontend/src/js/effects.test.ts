@@ -327,6 +327,41 @@ describe("restingPane (D4)", () => {
       expect(s.restingState).toHaveBeenCalledTimes(1)
    })
 
+   it("repaints when the seen map or the saved set moves — its pill and copy count them", async () => {
+      const s = fakes()
+      s.restingState.mockResolvedValue(PANEL)
+      effects.registerEffects(s)
+      splitList()
+      await tick()
+      s.restingState.mockClear()
+      model.seen.set({ "feed:1": 4 }) // a row swipe, a sync merge
+      await tick()
+      expect(s.restingState).toHaveBeenCalledTimes(1)
+      model.saved.set([3]) // a row ★
+      await tick()
+      expect(s.restingState).toHaveBeenCalledTimes(2)
+      model.cursor.set({ chron: 4, feedId: 1 }) // still not on a row step
+      await tick()
+      expect(s.restingState).toHaveBeenCalledTimes(2)
+   })
+
+   it("a probe that lands while a command holds rendering is retried once the hold ends", async () => {
+      const lands: Array<(o: IShowFeed) => void> = []
+      const s = fakes()
+      s.restingState.mockImplementation(() => new Promise<IShowFeed>((r) => lands.push(r)))
+      effects.registerEffects(s)
+      splitList() // the crossing's flush starts the probe…
+      model.rendering.set(true) // …then relayoutPane's list rebuild takes its hold
+      lands[0](PANEL)
+      await tick()
+      expect(s.renderResting).not.toHaveBeenCalled() // never over a command
+      model.rendering.set(false) // the rebuild reached first paint; no input moved
+      expect(s.restingState).toHaveBeenCalledTimes(2)
+      lands[1](PANEL)
+      await tick()
+      expect(s.renderResting).toHaveBeenCalledExactlyOnceWith(PANEL)
+   })
+
    it("drops a probe that lands after an article opened", async () => {
       const lands: Array<(o: IShowFeed) => void> = []
       const s = fakes()
@@ -457,6 +492,18 @@ describe("listRows", () => {
       model.rendering.set(false) // the boot hold releases once the landing settles
       expect(s.followListCursor).toHaveBeenCalledTimes(1)
       expect(s.refreshListRows).not.toHaveBeenCalled()
+   })
+
+   it("under split with nothing under the cursor, a landing that moved nothing still lets the pane build", () => {
+      const s = fakes()
+      model.split.set(true)
+      model.rendering.set(true) // app.ts's boot hold
+      effects.registerEffects(s)
+      // A reload onto a caught-up #pos: the guarded placeholder landing leaves the
+      // cursor at -1 and paints nothing live, and no list command runs.
+      model.focus.set("reader")
+      model.rendering.set(false)
+      expect(s.followListCursor).toHaveBeenCalledTimes(1)
    })
 
    it("a cursor the list itself moved repaints nothing (selectRow already did)", () => {

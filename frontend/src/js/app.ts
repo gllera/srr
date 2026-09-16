@@ -468,8 +468,17 @@ function relayoutPane(): void {
    if (layout().focus === "reader") {
       // followCursor rebuilds the PANE beside the article; off split there is no
       // pane to rebuild and the reader owns the whole window.
-      if (isSplit()) list.followCursor()
+      if (isSplit()) followListCursor()
    } else void renderListSurface()
+}
+
+// A rebuild list.followCursor starts is a list build like the other two
+// (renderListSurface, the listSurface effect): the search bar re-syncs after it,
+// or a search pane built this way — a split deep link, a widened search reader
+// — shows its hits with no bar above them.
+function followListCursor(): void {
+   const build = list.followCursor()
+   if (build) void build.then(searchUI.syncSearchBar)
 }
 
 // Commit the LIST surface's hash (`#!tokens`, no position) into history AND the
@@ -1253,7 +1262,7 @@ async function init() {
       afterListBuild: searchUI.syncSearchBar,
       onListError: (e) => showError(e, () => void renderListSurface()),
       refreshListRows: list.refresh,
-      followListCursor: list.followCursor,
+      followListCursor,
       listGrown: () => void list.onStoreGrown(),
       pickerOpen: picker.isOpen,
       renderPicker: picker.render,

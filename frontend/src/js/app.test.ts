@@ -4607,3 +4607,111 @@ describe("guard() — a landing the store switched under", () => {
       expect(popup.classList.contains("srr-open")).toBe(true)
    })
 })
+
+// A crossing's own flush starts the resting probe, and relayoutPane's list
+// rebuild then holds rendering past it: the dropped paint must come back once
+// the rebuild reaches first paint, or the pane stays blank beside the list.
+describe("split — the resting pane after a crossing from the narrow list", () => {
+   const article = () => document.querySelector("article.srr-reader") as HTMLElement
+   const crossWhileTheListBuilds = async () => {
+      let finish!: () => void
+      list.show.mockImplementationOnce(() => new Promise<void>((r) => (finish = r)))
+      crossSplit(true)
+      await flush()
+      finish()
+      await flush()
+      await flush()
+   }
+
+   it("paints the resting panel when the list's rebuild outlasts the resting probe", async () => {
+      stubBreakpoint(false)
+      try {
+         await boot("#!")
+         expect(article().classList.contains("srr-reader-empty")).toBe(false) // narrow: nothing painted
+         await crossWhileTheListBuilds()
+         expect(nav.restingState).toHaveBeenCalled()
+         expect(article().classList.contains("srr-reader-empty")).toBe(true)
+      } finally {
+         crossSplit(false)
+         vi.unstubAllGlobals()
+      }
+   })
+
+   it("a split reload onto a caught-up reading position builds the list pane beside the placeholder", async () => {
+      stubBreakpoint(true)
+      try {
+         nav.fromHash.mockResolvedValue({ ...showFeed(), placeholder: true })
+         await boot("#5")
+         expect(article().classList.contains("srr-reader-empty")).toBe(true)
+         expect(list.show.mock.calls.length + list.followCursor.mock.calls.length).toBeGreaterThan(0)
+      } finally {
+         crossSplit(false)
+         vi.unstubAllGlobals()
+      }
+   })
+
+   describe("a search pane built by following the cursor", () => {
+      const searching = () => document.body.classList.contains("srr-searching")
+      // The list pane's build path here is list.followCursor (a rebuild it
+      // started), not renderListSurface — the bar must still come up after it.
+      const landOnASearchHit = () =>
+         nav.fromHash.mockImplementationOnce(async () => {
+            nav.isSearchFilter.mockReturnValue(true)
+            seedCursor(31)
+            return showFeed()
+         })
+      beforeEach(() => list.followCursor.mockImplementation(() => Promise.resolve()))
+      afterEach(() => {
+         list.followCursor.mockReset()
+         nav.isSearchFilter.mockReturnValue(false)
+         document.body.classList.remove("srr-searching") // boot() resets the body's children, not its classes
+      })
+
+      it("shows the bar beside a search deep link booted at split", async () => {
+         stubBreakpoint(true)
+         try {
+            landOnASearchHit()
+            await boot("#31!q%3Atitle")
+            expect(list.followCursor).toHaveBeenCalled()
+            expect(searching()).toBe(true)
+         } finally {
+            crossSplit(false)
+            vi.unstubAllGlobals()
+         }
+      })
+
+      it("shows the bar when a narrow search reader widens", async () => {
+         stubBreakpoint(false)
+         try {
+            landOnASearchHit()
+            await boot("#31!q%3Atitle")
+            expect(searching()).toBe(false) // the phone reader hides the list pane
+            crossSplit(true)
+            await flush()
+            expect(searching()).toBe(true)
+         } finally {
+            crossSplit(false)
+            vi.unstubAllGlobals()
+         }
+      })
+   })
+
+   it("replaces the other store's article a narrow store switch left in the pane", async () => {
+      stubBreakpoint(false)
+      try {
+         await boot("#2")
+         expect(document.querySelector(".srr-content")!.textContent).toContain("body")
+         hashTo("#!")
+         await flush()
+         hashTo("#!@s7:") // a peer store's list: its chron 2 is another article
+         await flush()
+         expect(M!.readerPainted()).toBe(false)
+         await crossWhileTheListBuilds()
+         expect(article().classList.contains("srr-reader-empty")).toBe(true)
+         expect(document.querySelector(".srr-content")!.textContent).not.toContain("body")
+      } finally {
+         crossSplit(false)
+         vi.unstubAllGlobals()
+      }
+   })
+})

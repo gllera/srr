@@ -13,7 +13,7 @@
 // projection of state), and anything that navigates.
 import { layout, type Layout } from "./layout"
 import * as model from "./model"
-import { arrayEqual, effect, resource, untracked } from "./signals"
+import { arrayEqual, effect, resource, signal, untracked } from "./signals"
 
 // An effect whose body must not run inside a command (D3, S16): it tracks
 // `inputs`, waits out model.rendering, and runs once per change of the input
@@ -282,9 +282,13 @@ export function registerEffects(s: EffectSurfaces): Effects {
    // panel — derived, not remembered. It repaints when that condition turns true
    // and when what the panel counts moved while it holds; never on the cursor,
    // which the list moves on every row step and the panel does not follow. A
-   // probe that lands after the layout moved on — an article opened, a command
-   // started, a newer run — drops.
+   // probe that lands after the layout moved on — an article opened, a newer
+   // run — drops. One that lands while a command holds rendering is retried
+   // once the hold ends instead: the command may leave the pane resting with
+   // none of these inputs moved (a crossing's list rebuild outlasts the probe
+   // its own flush started), and a dropped paint nothing re-arms is a blank pane.
    const resting = (l: Layout) => l.split && l.focus === "list" && !l.readerLive
+   const restingRetry = signal(0)
    let restingGen = 0
    deferred(
       () => [
@@ -292,8 +296,13 @@ export function registerEffects(s: EffectSurfaces): Effects {
          model.laneTokens(),
          model.unreadOnly(),
          model.frontierEpoch(),
+         // The panel's pill and copy count the device state too: a row swipe or
+         // a sync merge moves them while the pane rests.
+         model.seen(),
+         model.saved(),
          model.activeMid(),
          model.snapshot(),
+         restingRetry(),
       ],
       ([now]) => {
          const my = ++restingGen
@@ -302,7 +311,8 @@ export function registerEffects(s: EffectSurfaces): Effects {
             .restingState()
             .catch(() => null)
             .then((o) => {
-               if (!o || my !== restingGen || model.rendering() || !resting(layout())) return
+               if (!o || my !== restingGen || !resting(layout())) return
+               if (model.rendering()) return restingRetry.update((n) => n + 1)
                paint(() => s.renderResting(o))
             })
       },
@@ -339,6 +349,11 @@ export function registerEffects(s: EffectSurfaces): Effects {
       () => [layout().listMounted, layout().split, layout().readerLive, model.cursor(), model.seen(), model.saved()],
       ([listMounted, split, readerLive, c, seen, saved], prev) => {
          if (!listMounted) return
+         // A split pane with nothing under the cursor has no row to follow, but it
+         // may have no ROWS either: a guarded placeholder landing (a reload onto a
+         // caught-up #pos) moves nothing tracked here and runs no list command.
+         // followCursor rebuilds only a window built for another membership.
+         if (split && (c as model.Cursor).chron < 0) paint(s.followListCursor)
          if (prev !== null && prev[0] === listMounted && prev[1] === split) {
             const moved = (prev[3] as model.Cursor).chron !== (c as model.Cursor).chron
             const becameLive = !prev[2] && (readerLive as boolean)

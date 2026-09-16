@@ -2433,4 +2433,27 @@ describe("list", () => {
          expect($pill()).toBeNull()
       })
    })
+
+   // followCursor hands back the rebuild it starts, so app.ts can chain the
+   // search bar's sync after a pane built this way.
+   it("followCursor returns the rebuild it starts, and null when it starts none", async () => {
+      setIndex(4)
+      await list.render()
+      nav._setPos(Number($rows()[0].dataset.chron))
+      expect(list.followCursor()).toBeNull() // fast path: a rendered row
+      list.invalidate()
+      const stale = list.followCursor()
+      expect(stale).toBeInstanceOf(Promise)
+      await stale
+      nav._setPos(-1)
+      expect(list.followCursor()).toBeNull() // no cursor, window still fits
+      list.invalidate()
+      const unanchored = list.followCursor()
+      expect(unanchored).toBeInstanceOf(Promise)
+      await unanchored
+      nav._setAnchor(2)
+      const build = list.rerender()
+      expect(list.followCursor()).toBeNull() // joins the rebuild in flight
+      await build
+   })
 })

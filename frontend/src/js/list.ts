@@ -1366,8 +1366,10 @@ export async function show(anchorNow = false, onInteractive?: () => void): Promi
 // row highlight and nudge the cursor row into the pane's live band without
 // re-centering on every keypress. A cursor that stepped outside the loaded
 // window falls back to show(true)'s bounded rebuild (whose fast path is
-// exactly this scroll when the row exists).
-export function followCursor(): void {
+// exactly this scroll when the row exists). Returns that rebuild (its failure
+// already reported through onError), or null when none started — a pane built
+// here still owes the search bar its sync, which the caller chains.
+export function followCursor(): Promise<void> | null {
    const chron = nav.currentChron()
    // A landing with NO cursor is still a landing. nav.switchFilter answers an
    // unstarted lane with the armed "not started" placeholder at pos = -1, so
@@ -1380,8 +1382,7 @@ export function followCursor(): void {
    // on its next open" is a promise about a surface that never closes. There is
    // no row to anchor, so rebuild unanchored rather than early-returning.
    if (chron < 0) {
-      if (builtKey !== membershipKey()) void show(true).catch(onError)
-      return
+      return builtKey !== membershipKey() ? show(true).catch(onError) : null
    }
    // The same freshness gate show() applies, and for the same reason: a window
    // built for another filter — or invalidated (builtKey === null) — must
@@ -1394,7 +1395,7 @@ export function followCursor(): void {
    // render() clears the rows synchronously and anchors on the cursor itself —
    // typically the listSurface effect's, in this same flush. A second show()
    // would only supersede it.
-   if (!rowsEl && builtKey === membershipKey() && builtFor === chron) return
+   if (!rowsEl && builtKey === membershipKey() && builtFor === chron) return null
    const row = builtKey === membershipKey() ? findRow(chron) : null
    if (!row) {
       // Report a failed rebuild instead of swallowing it. Under split this
@@ -1403,11 +1404,11 @@ export function followCursor(): void {
       // retry — the one place a silent catch costs a whole surface. onError is
       // the same seam a scroll-paging failure uses (app.ts: the popup, whose
       // retry re-renders the list).
-      void show(true).catch(onError)
-      return
+      return show(true).catch(onError)
    }
    refresh()
    scrollRowIntoView(row)
+   return null
 }
 
 // Re-derive read/unread dots + saved stars + the current-article highlight from
