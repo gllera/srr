@@ -98,9 +98,79 @@ describe("split", () => {
       expect(document.body.classList.contains("srr-split")).toBe(false)
       expect(model.split()).toBe(true)
       expect(seen).toEqual([])
+
+      // The override must survive a layout write it never asked for:
+      // layout.ts's effect reruns on ANY of its five inputs, not just split,
+      // and must not re-stamp the class from the (unmoved) screen-truth
+      // model.split while the print override is still active.
+      model.focus.set("reader")
+      expect(document.body.classList.contains("srr-split")).toBe(false)
+
       fire!({ matches: true })
       expect(document.body.classList.contains("srr-split")).toBe(true)
       expect(model.split()).toBe(true)
+      expect(seen).toEqual([])
+   })
+
+   // A resize during the print-preview dialog can re-fire the crossing more
+   // than once before the real undo — the override must not depend on the
+   // nominal "crossing, then undo" pair to stay engaged.
+   it("survives a same-direction crossing repeated without an intervening undo", async () => {
+      matches = true
+      const { model, start } = await load()
+      start()
+      printing = true
+      fire!({ matches: false })
+      expect(document.body.classList.contains("srr-split")).toBe(false)
+      expect(model.printOverride()).toBe(true)
+
+      fire!({ matches: false }) // repeats — no undo happened yet
+      expect(document.body.classList.contains("srr-split")).toBe(false)
+      expect(model.printOverride()).toBe(true) // still engaged, not flipped off
+
+      model.focus.set("reader") // an unrelated layout write, mid-print
+      expect(document.body.classList.contains("srr-split")).toBe(false) // still holds
+
+      fire!({ matches: true }) // the eventual real undo
+      expect(document.body.classList.contains("srr-split")).toBe(true)
+      expect(model.printOverride()).toBe(false)
+   })
+
+   // Chrome's REAL order, measured with a headless print-to-PDF: beforeprint, the
+   // crossing (print matches), afterprint, and only THEN the undo — delivered with
+   // print media no longer matching. The undo must still hand the class back.
+   it("restores the class when the undo arrives after print media stopped matching", async () => {
+      matches = true
+      const { split, model, start } = await load()
+      start()
+      const seen: boolean[] = []
+      split.onSplitChange((on) => seen.push(on))
+      printing = true
+      fire!({ matches: false })
+      expect(document.body.classList.contains("srr-split")).toBe(false)
+      printing = false
+      window.dispatchEvent(new Event("afterprint"))
+      expect(document.body.classList.contains("srr-split")).toBe(true)
+      expect(model.printOverride()).toBe(false)
+      fire!({ matches: true }) // the late undo: nothing moved on screen
+      expect(document.body.classList.contains("srr-split")).toBe(true)
+      expect(seen).toEqual([]) // no crossing reached the app
+      model.focus.set("reader") // the layout effect owns the class again
+      expect(document.body.classList.contains("srr-split")).toBe(true)
+   })
+
+   it("a late undo with no afterprint still restores the class", async () => {
+      matches = true
+      const { split, model, start } = await load()
+      start()
+      const seen: boolean[] = []
+      split.onSplitChange((on) => seen.push(on))
+      printing = true
+      fire!({ matches: false })
+      printing = false
+      fire!({ matches: true })
+      expect(document.body.classList.contains("srr-split")).toBe(true)
+      expect(model.printOverride()).toBe(false)
       expect(seen).toEqual([])
    })
 

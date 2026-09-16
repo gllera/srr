@@ -51,6 +51,13 @@ export const paneHidden = signal(false)
 export const readerPainted = signal(false)
 // A command that ends in a surface paint is in flight (D3, S16).
 export const rendering = signal(false)
+// split.ts's print-time override (Chrome re-evaluates the split breakpoint
+// against the page box while printing). True exactly while the raw class
+// split.ts toggled differs from the screen-truth model.split; cleared when
+// printing ends (afterprint, or any crossing delivered outside print media).
+// layout.ts's applyLayout skips srr-split while it is set, so a write to any of
+// the other four layout inputs mid-print cannot revert the raw toggle.
+export const printOverride = signal(false)
 
 // ── Status the settings footer reads ──────────────────────────────────────────
 export const syncStatus = signal<SyncStatus>({ on: false, okAt: 0, error: "" }, shallowEqual)

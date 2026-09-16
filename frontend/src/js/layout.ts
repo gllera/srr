@@ -72,12 +72,17 @@ export interface LayoutHosts {
 
 // The whole DOM contract of the layout. The ONLY writer of these five body
 // classes and of the two hosts' `hidden` (split.ts's print crossing toggles
-// srr-split alone, deliberately). srr-view-list stays for the CSS and the
-// browser suites that key on it; srr-list-shown / srr-reader-shown are stamped
-// for a later selector migration.
+// srr-split alone, deliberately) — EXCEPT while split.ts's print override is
+// active (`model.printOverride`), when this effect must skip srr-split
+// entirely: any of the other four inputs moving mid-print would otherwise
+// rerun this effect and re-stamp the class from the (unmoved) screen-truth
+// model.split, reverting split.ts's raw toggle while printing is still live.
+// srr-view-list stays for the CSS and the browser suites that key on it;
+// srr-list-shown / srr-reader-shown are stamped for a later selector
+// migration.
 export function applyLayout(l: Layout, hosts: LayoutHosts): void {
    const body = document.body.classList
-   body.toggle("srr-split", l.split)
+   if (!model.printOverride()) body.toggle("srr-split", l.split)
    body.toggle("srr-pane-hidden", l.paneHidden)
    body.toggle("srr-view-list", l.focus === "list")
    body.toggle("srr-list-shown", l.listShown)

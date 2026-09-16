@@ -24,6 +24,7 @@ const OWNERS: Record<string, string> = {
    rendering: "app.ts",
    focus: "app.ts",
    split: "split.ts",
+   printOverride: "split.ts",
    paneHidden: "pane.ts",
    readerPainted: "reader.ts",
    profileRev: "profile.ts",

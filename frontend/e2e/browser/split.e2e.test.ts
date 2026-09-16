@@ -930,6 +930,28 @@ describe("browser: split view (two-pane desktop)", () => {
       }
    })
 
+   // Printing re-evaluates the breakpoint against the PAGE box: Chrome fires a
+   // crossing, then — after print media has stopped matching — its undo. The
+   // screen layout must come back exactly as it was, and stay.
+   it("comes back from printing with the two-pane layout intact", async () => {
+      const ctx = await browser.createBrowserContext()
+      try {
+         const p = await ctx.newPage()
+         await p.setViewport({ width: 1280, height: 900 })
+         await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
+         await waitList(p)
+         await p.waitForFunction(() => document.body.classList.contains("srr-split"))
+         await p.pdf({ width: "600px", height: "800px" })
+         await p.waitForFunction(() => document.body.classList.contains("srr-split"), { timeout: 5_000 })
+         // A later layout write (focus moving to the reader) must not lose it either.
+         await clickRow(p, "news title 0")
+         await waitReader(p)
+         expect(await p.evaluate(() => document.body.classList.contains("srr-split"))).toBe(true)
+      } finally {
+         await ctx.close()
+      }
+   })
+
    it("stays single-surface below the breakpoint (regression)", async () => {
       const ctx = await browser.createBrowserContext()
       try {

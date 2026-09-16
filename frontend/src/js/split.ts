@@ -23,18 +23,28 @@ export function initSplit(): void {
    }
    const mql = matchMedia(QUERY)
    model.split.set(mql.matches)
+   const printing = () => typeof matchMedia === "function" && matchMedia("print").matches
    const onChange = (e: { matches: boolean }) => {
       // Chrome evaluates width queries against the PAGE BOX while printing, so
-      // Ctrl-P fires a full crossing and its undo. The CLASS still follows the
-      // media — the single-surface layout is the better one to print — but the
-      // model (and so the scroller, the built list window, every layout effect)
-      // is left exactly as the screen had it, in both directions of the pair.
-      // This raw toggle is the one layout-class write outside layout.ts, and it
-      // is deliberate (layout plan deviation D5).
-      if (typeof matchMedia === "function" && matchMedia("print").matches) {
+      // Ctrl-P fires a crossing and, later, its undo. While print media matches,
+      // the CLASS follows the media (the single-surface layout is the better one
+      // to print) and the model — the scroller, the built list window, every
+      // layout effect — stays exactly as the screen has it. This raw toggle is
+      // the one layout-class write outside layout.ts (layout plan deviation D5).
+      // The override flag stops applyLayout re-stamping over it; it is derived
+      // fresh on every firing, so a crossing Chrome repeats during print preview
+      // keeps it engaged.
+      if (printing()) {
          document.body.classList.toggle("srr-split", e.matches)
+         model.printOverride.set(e.matches !== model.split())
          return
       }
+      // Chrome delivers the undo AFTER print media stopped matching (measured:
+      // beforeprint → crossing → afterprint → undo), so it lands here. Printing
+      // is over either way: hand the class back to layout.ts first.
+      model.printOverride.set(false)
+      // A print's undo moved nothing on screen — there is no crossing to handle.
+      if (e.matches === model.split()) return
       // The model first: its effects re-stamp the classes, the hosts and the
       // scroller synchronously, so every listener below reads a settled layout.
       model.split.set(e.matches)
@@ -43,6 +53,9 @@ export function initSplit(): void {
    // Safari < 14 has no addEventListener on MediaQueryList.
    if (typeof mql.addEventListener === "function") mql.addEventListener("change", onChange)
    else (mql as LegacyMQL).addListener?.(onChange)
+   // Printing ended: whatever override the job left is over, whether or not
+   // Chrome has delivered the undo crossing yet.
+   window.addEventListener("afterprint", () => model.printOverride.set(false))
 }
 
 export function isSplit(): boolean {

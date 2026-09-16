@@ -11,6 +11,7 @@ function resetInputs(): void {
    model.paneHidden.set(false)
    model.readerPainted.set(false)
    model.cursor.set({ chron: -1, feedId: -1 })
+   model.printOverride.set(false)
 }
 
 const DERIVED = ["listMounted", "listShown", "readerMounted", "readerLive", "readerSteppable", "listKeys"] as const
@@ -153,6 +154,25 @@ describe("initLayout — the one DOM writer", () => {
       model.cursor.set({ chron: 7, feedId: 3 }) // nothing painted: readerLive stays false
       model.readerPainted.set(true) // painted and a cursor, but the reader is not mounted
       expect(toggle).not.toHaveBeenCalled()
+   })
+
+   // split.ts's print-time override raced applyLayout: printing sets the
+   // class directly and flags model.printOverride, but an unrelated input
+   // (focus/paneHidden/readerPainted/cursor) still reruns this effect via
+   // layout() — and the effect must skip srr-split entirely while the flag is
+   // set, or it reverts the override back to the (unmoved) screen-truth
+   // model.split before printing has finished.
+   it("survives an unrelated layout write while the print override is active", () => {
+      model.split.set(true)
+      expect(classes()).toContain("srr-split")
+      // split.ts's print handler: raw class toggle + the override flag, model.split untouched.
+      document.body.classList.remove("srr-split")
+      model.printOverride.set(true)
+      model.focus.set("reader") // moves the record (listMounted/readerMounted) without touching split
+      expect(document.body.classList.contains("srr-split")).toBe(false)
+      // Printing ended: clearing the flag alone hands the class back to the effect.
+      model.printOverride.set(false)
+      expect(document.body.classList.contains("srr-split")).toBe(true)
    })
 
    it("stops writing once disposed", () => {
