@@ -4041,6 +4041,71 @@ describe("model mirror — seen and saved", () => {
          stop()
       }
    })
+
+   // Throws once armed, from every write to the seen map.
+   const throwOnSeen = () => {
+      let armed = false
+      const stop = effect(() => {
+         model.seen()
+         if (armed) throw new Error("paint")
+      })
+      return {
+         arm: () => void (armed = true),
+         stop: () => {
+            armed = false
+            stop()
+         },
+      }
+   }
+
+   it("a bulk frontier move finishes its bookkeeping before a throwing effect can interrupt it", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }])
+      nav.clearFrontierUndo()
+      localStorage.removeItem("srr-profile-ts")
+      nav.publishSeen() // the atom outlives the case: republish the cleared map so the raise is a change
+      const { markAllRead } = await import("./seen")
+      const t = throwOnSeen()
+      try {
+         t.arm()
+         // Unbatched, unlike nav.markAllRead, so the publish flushes at once.
+         expect(() => markAllRead({ peek: false, members: [1] })).toThrow("paint")
+         expect(nav.pendingFrontierUndo()).not.toBeNull() // snapshotRaise ran
+         expect(localStorage.getItem("srr-profile-ts")).not.toBeNull() // sync.pushSoon ran
+      } finally {
+         t.stop()
+      }
+   })
+
+   it("a frontier undo finishes its bookkeeping before a throwing effect can interrupt it", () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }])
+      nav.clearFrontierUndo()
+      expect(nav.markAllRead()).toBe(true)
+      const pending = nav.pendingFrontierUndo()!
+      localStorage.removeItem("srr-profile-ts")
+      const t = throwOnSeen()
+      try {
+         t.arm()
+         expect(() => nav.undoFrontierMove(pending)).toThrow("paint")
+         expect(localStorage.getItem("srr-profile-ts")).not.toBeNull() // sync.pushSoon ran
+      } finally {
+         t.stop()
+      }
+   })
+
+   it("a prune finishes its bookkeeping before a throwing effect can interrupt it", () => {
+      setupIndex([{ feedId: 1 }])
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 0, "feed:99": 3 }))
+      localStorage.setItem("srr-seen-ts", JSON.stringify({ "feed:1": 5, "feed:99": 5 }))
+      nav.publishSeen() // so the pruned map is a change
+      const t = throwOnSeen()
+      try {
+         t.arm()
+         expect(() => nav.pruneSeen()).toThrow("paint")
+         expect(JSON.parse(localStorage.getItem("srr-seen-ts")!)).toEqual({ "feed:1": 5 }) // the stamps were pruned too
+      } finally {
+         t.stop()
+      }
+   })
 })
 
 describe("model mirror — cursor, lane, unread-only, frontier epoch", () => {

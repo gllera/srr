@@ -567,4 +567,64 @@ describe("a surface that throws", () => {
       expect(s.onPaintError).toHaveBeenCalledExactlyOnceWith(new Error("paint broke"))
       expect(s.reconcileList).toHaveBeenCalled() // later effects in the same flush still ran
    })
+
+   // Every surface call goes through paint(), synchronous and async alike. Each
+   // row makes ONE surface throw and drives the write (or the settle) that
+   // reaches it: the error is reported and never reaches the writer.
+   type Fakes = ReturnType<typeof fakes>
+   const live = () =>
+      signals.batch(() => {
+         model.split.set(true)
+         model.readerPainted.set(true)
+         model.cursor.set({ chron: 5, feedId: 1 })
+      })
+   const cases: Array<{ surface: keyof Fakes; drive: (s: Fakes) => void }> = [
+      { surface: "applyUnreadTotal", drive: () => model.seen.set({ "feed:1": 1 }) },
+      { surface: "setListTitle", drive: () => model.laneTokens.set(["news"]) },
+      { surface: "refreshSettingsStatus", drive: () => model.refreshError.set("boom") },
+      { surface: "applyChrome", drive: live },
+      { surface: "paintSaveButton", drive: () => model.saved.set([3]) },
+      { surface: "paintFeedLabel", drive: () => model.activeMid.set("s7") },
+      {
+         surface: "renderResting",
+         drive: (s) => {
+            s.restingState.mockResolvedValue({ ...PROBED, placeholder: true })
+            signals.batch(() => {
+               model.split.set(true)
+               model.focus.set("list")
+            })
+         },
+      },
+      { surface: "reconcileList", drive: () => model.unreadOnly.set(true) },
+      {
+         surface: "followListCursor",
+         drive: () => {
+            live()
+            model.rendering.set(true)
+            model.cursor.set({ chron: 6, feedId: 1 })
+            model.rendering.set(false)
+         },
+      },
+      { surface: "refreshListRows", drive: () => model.seen.set({ "feed:1": 2 }) },
+      { surface: "listGrown", drive: () => model.snapshot.update((n) => n + 1) },
+      {
+         surface: "renderPicker",
+         drive: (s) => {
+            s.pickerOpen.mockReturnValue(true)
+            model.unreadOnly.set(true)
+         },
+      },
+   ]
+   it.each(cases)("$surface is reported, never rethrown to the write that reached it", async ({ surface, drive }) => {
+      const s = fakes()
+      const boom = new Error(`${surface} broke`)
+      s[surface].mockImplementation(() => {
+         throw boom
+      })
+      effects.registerEffects(s)
+      s.onPaintError.mockClear()
+      expect(() => drive(s)).not.toThrow()
+      await tick()
+      expect(s.onPaintError).toHaveBeenCalledWith(boom)
+   })
 })

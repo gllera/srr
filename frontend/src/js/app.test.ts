@@ -2804,6 +2804,60 @@ describe("guard() — busy mutex", () => {
       }
    })
 
+   // A throw out of the rendering release that paint() cannot catch — any effect
+   // over model.rendering that is not a surface paint. Armed after creation, so
+   // the effect's own first run is quiet; it throws once, on the next release.
+   const throwOnNextRelease = () => {
+      let armed = false
+      const stop = S!.effect(() => {
+         if (!M!.rendering() && armed) {
+            armed = false
+            throw new Error("release broke")
+         }
+      })
+      armed = true
+      return stop
+   }
+
+   it("a landing whose rendering release throws still frees the mutex", async () => {
+      await boot()
+      hashTo("#2")
+      await flush()
+      const commit = pagerMock.setup.mock.calls.at(-1)![0].commit as (s: "prev" | "next") => Promise<boolean>
+      const stop = throwOnNextRelease()
+      try {
+         await expect(commit("next")).rejects.toThrow("release broke")
+         nav.right.mockClear()
+         await commit("next")
+         expect(nav.right).toHaveBeenCalledTimes(1) // not skipped as busy
+      } finally {
+         stop()
+      }
+   })
+
+   it("a list render whose rendering release throws at first paint is reported and frees the mutex", async () => {
+      await boot()
+      const stop = throwOnNextRelease()
+      try {
+         list.show.mockImplementationOnce(async (_anchorNow: boolean, onInteractive: () => void) => {
+            await Promise.resolve() // route()'s outer hold is gone: this release is the last one
+            onInteractive()
+         })
+         hashTo("#!news")
+         await flush()
+         expect(document.querySelector(".srr-popup-text")!.textContent).toBe("release broke")
+         // jsdom queues a native hashchange beside hashTo()'s own dispatch (see the
+         // paint-error case above): drain it before counting, count before the next.
+         for (let i = 0; i < 10; i++) await flush()
+         list.show.mockClear()
+         hashTo("#!sports") // route() reaches list.show synchronously
+         expect(list.show).toHaveBeenCalledTimes(1) // not skipped as busy
+         for (let i = 0; i < 10; i++) await flush()
+      } finally {
+         stop()
+      }
+   })
+
    it("a stale-mutex reclaim keeps the reclaiming command's own rendering hold", async () => {
       await boot()
       nav.fromHash.mockImplementationOnce(() => new Promise<never>(() => {}))
