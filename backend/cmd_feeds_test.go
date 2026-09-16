@@ -947,6 +947,39 @@ func TestValidateTag(t *testing.T) {
 	}
 }
 
+// TestTagCannotSpellAWatchToken pins the guarantee the reader leans on: no tag a
+// store can carry is spelled like a watch-lane token ("w:<rule>"), so
+// frontend/src/js/nav/lane.ts isWatchKey's precedence can never shadow a real
+// tag. Every write path reaches validateTag — the add/serve pre-flight through
+// validateFeedFields, every commit (feed upd/apply, the GUI and MCP saves, OPML
+// and config import) through normalizeFeed.
+func TestTagCannotSpellAWatchToken(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	for _, tag := range []string{"w:hot", "news/w:hot", "w:"} {
+		if err := validateFeedFields(0, 0, "", nil, tag); err == nil {
+			t.Errorf("validateFeedFields accepted tag %q", tag)
+		}
+		if err := normalizeFeed(&Feed{Title: "A", URL: "https://example.com/f.xml", Tag: tag}, map[string]Recipe{}); err == nil {
+			t.Errorf("normalizeFeed accepted tag %q", tag)
+		}
+	}
+	// srr serve's feed save and the MCP add/update tools (saveFeedTwoPhase → saveFeed).
+	if _, err := saveFeed(ctx, db, &feedView{Title: "A", URL: "https://example.com/g.xml", Tag: "w:hot"}); err == nil {
+		t.Error("saveFeed accepted a watch-token tag")
+	}
+	// OPML import, CLI and HTTP.
+	if err := commitImportedFeeds(ctx, db, []*Feed{{Title: "A", URL: "https://example.com/h.xml", Tag: "w:hot"}}); err == nil {
+		t.Error("commitImportedFeeds accepted a watch-token tag")
+	}
+	// Config import.
+	doc := &configDoc{Version: configExportVersion, Feeds: []configFeed{{Title: "A", URL: "https://example.com/i.xml", Tag: "w:hot"}}}
+	if err := applyConfigDoc(ctx, db, doc); err == nil {
+		t.Error("applyConfigDoc accepted a watch-token tag")
+	}
+	// `srr feed add` rejects it before the store lock and the network probe.
+	wantErr(t, (&AddCmd{Title: "A", URL: "https://example.com/j.xml", Tag: "w:hot"}).Run(), "tag")
+}
+
 func TestFeedEditApplyFailsPreservesTempfile(t *testing.T) {
 	setupFeedsTestDB(t)
 	// Editor writes valid JSON with an invalid URL — passes JSON parse

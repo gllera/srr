@@ -35,7 +35,9 @@ const nav = vi.hoisted(() => ({
    savedCount: vi.fn(() => 0),
    SAVED_TOKEN: "~saved",
    WATCH_PREFIX: "w:",
-   isWatchKey: vi.fn((k: string) => k.startsWith("w:")),
+   // The real rule (nav/lane.ts): a `w:` key names a lane only while the store
+   // lists that rule, so a TAG spelled `w:x` stays a tag.
+   isWatchKey: vi.fn((k: string) => k.startsWith("w:") && Object.hasOwn(data.watchRules(), k.slice(2))),
    watchLaneCount: vi.fn<(rule: string) => Promise<number>>(async () => 0),
    feedIdOf: (token: string) => (/^\d+$/.test(token) ? Number(token) : null),
    isUnreadOnly: vi.fn(() => false),
@@ -524,6 +526,20 @@ describe("info dialog", () => {
       expect(hooks.onSelect).not.toHaveBeenCalled() // stats mode never selects
       expect($(".srr-info-dialog").classList.contains("srr-open")).toBe(true)
       expect($(".srr-info-title").textContent).toBe("Feed5")
+   })
+
+   it("a tag spelled like a watch key opens its tag card when the store lists no such rule", async () => {
+      const a = feed({ id: 1, title: "A", tag: "w:x" })
+      data.db.feeds = { 1: a }
+      data.groupFeedsByTag.mockReturnValue({ tagged: new Map([["w:x", [a]]]), sortedTags: ["w:x"], untagged: [] })
+      data.watchRules.mockReturnValue({ hot: 0 }) // a roster that does not list "x"
+      const picker = await mount()
+      picker.open()
+      statsOn()
+      $(".srr-picker-filter .srr-tag-header").dispatchEvent(click())
+      await flush()
+      expect($(".srr-info-dialog").classList.contains("srr-open")).toBe(true)
+      expect($(".srr-info-title").textContent).toBe("w:x")
    })
 
    it("in stats mode ★ Saved is inert — no card of its own, no selection", async () => {

@@ -31,6 +31,9 @@ function plane(p: number, rules: Record<string, number[]>, n = WPS): WatchPlane 
 }
 
 let planes: Map<number, WatchPlane>
+// The positions loaded, in order (the second argument is the lane's pinned store,
+// undefined for an active-store lane).
+const loaded = () => data.loadWatchPlane.mock.calls.map((c) => c[0] as number)
 const lane = (rule = "hot") => new WatchLane([`w:${rule}`], rule)
 
 beforeEach(() => {
@@ -94,7 +97,7 @@ describe("WatchLane — walk", () => {
       expect(await l.older(50025)).toBe(-1)
       // The floor excludes region 0 entirely — the walk must never even fetch
       // it to discover that, not merely skip past its (irrelevant) bit 100.
-      expect(data.loadWatchPlane).not.toHaveBeenCalledWith(0)
+      expect(loaded()).not.toContain(0)
    })
 
    it("walks nothing when nothing is covered, and loads nothing to prepare", async () => {
@@ -111,7 +114,7 @@ describe("WatchLane — matches, counts, entry, refresh", () => {
       const l = lane()
       expect(l.matches(2, 50030)).toBe(false) // nothing loaded yet
       await l.prepare() // the region holding wc-1
-      expect(data.loadWatchPlane).toHaveBeenCalledWith(1)
+      expect(loaded()).toContain(1)
       expect(l.matches(2, 50030)).toBe(true)
       expect(l.matches(2, 50005)).toBe(false) // expired
       expect(l.matches(2, 50035)).toBe(false) // bit not set
@@ -157,6 +160,28 @@ describe("WatchLane — matches, counts, entry, refresh", () => {
       expect(l.matches(2, 50035)).toBe(true)
    })
 
+   it("a straddling load of a region its snapshot covered in full is still installed — that region is final", async () => {
+      const l = lane() // covered = 50040: region 0 is covered end to end
+      let release!: (p: WatchPlane) => void
+      data.loadWatchPlane.mockImplementationOnce(() => new Promise<WatchPlane>((r) => (release = r)))
+      const fault = l.ensureRegion(20) // listAnchor's fault of region 0, in flight
+      await l.refreshed() // region 0 is not resident, so the refresh reloads only the tail
+      expect(loaded()).toEqual([0, 1])
+      release(planes.get(0)!) // the finalized region lands after the refresh
+      await fault
+      expect(l.matches(1, 20)).toBe(true)
+   })
+
+   it("a refresh that expires more of a feed skips the newly expired hits in the walk and the pill", async () => {
+      const l = lane()
+      expect(await l.newest()).toBe(50030)
+      data.db.feeds[2].add_idx = 50031 // the adopted snapshot expired feed B up to 50030
+      await l.refreshed()
+      expect(await l.newest()).toBe(49999) // 50030 and 50005 are both expired now
+      expect(await l.newer(49999)).toBe(-1)
+      expect(await l.ahead(20)).toBe(1) // 49999 alone is reachable from 20
+   })
+
    it("an unexpired chron needs no idx lookup", async () => {
       data.db.feeds = { 1: { id: 1, title: "A", url: "u", total_art: 1, add_idx: 0 } as IFeed }
       const l = lane()
@@ -186,25 +211,52 @@ describe("WatchLane — matches, counts, entry, refresh", () => {
       // The tail alone is re-fetched — region 0 is immutable (docs/MANIFEST-SPEC.md
       // §4.8: compact leaves the watch series untouched) and never re-fetched.
       expect(data.loadWatchPlane).toHaveBeenCalledTimes(1)
-      expect(data.loadWatchPlane).toHaveBeenCalledWith(1)
+      expect(loaded()).toContain(1)
       expect(l.matches(1, 20)).toBe(true) // region 0 answers correctly with no refetch
       expect(l.matches(2, 50030)).toBe(true) // the reloaded tail still answers too
    })
 
-   it("keeps a region that WAS the tail resident once growth moves the tail past it", async () => {
+   it("reloads a region loaded while coverage had not reached its end, whatever n its plane claims", async () => {
       const l = lane()
-      await l.prepare() // loads region 1, the tail while covered = 50040
+      await l.prepare() // loads region 1 while covered = 50040 — its n is the snapshot's, not proof of finality
       expect(l.matches(2, 50030)).toBe(true)
       data.loadWatchPlane.mockClear()
 
       data.covered = 100050 // a background sync grows the store, pushing the tail into region 2
+      planes.set(1, plane(1, { hot: [5, 30, 60] })) // …and finished describing region 1
       await l.refreshed()
 
-      // Region 1 is no longer the tail but was already resident and is now provably
-      // immutable — it must NOT be re-fetched, only region 2 (the new tail) is.
-      expect(data.loadWatchPlane).not.toHaveBeenCalledWith(1)
-      expect(data.loadWatchPlane).toHaveBeenCalledWith(2)
-      expect(l.matches(2, 50030)).toBe(true) // still answers correctly with no refetch
+      expect(loaded()).toContain(1)
+      expect(loaded()).toContain(2)
+      expect(l.matches(2, 50060)).toBe(true) // the hit coverage reached after the first load
+   })
+
+   it("a straddling load of a region its snapshot had not covered is dropped, and the next fault sees the fresh plane", async () => {
+      data.covered = 30 // SyncWatch lagging: region 0 holds 50k articles, 30 covered
+      planes.delete(0) // …and the manifest lists no object there: an all-zero plane with the snapshot's full n
+      const l = lane()
+      let release!: (p: WatchPlane) => void
+      data.loadWatchPlane.mockImplementationOnce(() => new Promise<WatchPlane>((r) => (release = r)))
+      const fault = l.ensureRegion(20)
+      data.covered = 50040 // the catch-up sync published region 0
+      planes.set(0, plane(0, { hot: [20] }))
+      await l.refreshed()
+      release(emptyPlane(0, WPS)) // the old snapshot's all-zero plane lands last
+      await fault
+      await l.ensureRegion(20)
+      expect(l.matches(1, 20)).toBe(true)
+   })
+
+   it("a resident region its snapshot had not covered is reloaded by a refresh, though it sits below the tail", async () => {
+      data.covered = 30
+      planes.delete(0)
+      const l = lane()
+      await l.ensureRegion(20)
+      expect(l.matches(1, 20)).toBe(false) // nothing there yet
+      data.covered = 50040
+      planes.set(0, plane(0, { hot: [20] }))
+      await l.refreshed()
+      expect(l.matches(1, 20)).toBe(true) // refreshed() reloaded it itself
    })
 
    it("reloads a region loaded while it WAS the tail, even once the tail has moved two positions past it", async () => {
@@ -214,7 +266,7 @@ describe("WatchLane — matches, counts, entry, refresh", () => {
       // covers the 40 chrons that existed so far, not the full 50,000-wide region.
       planes.set(1, plane(1, { hot: [] }, 40))
       await l.prepare()
-      expect(data.loadWatchPlane).toHaveBeenCalledWith(1)
+      expect(loaded()).toContain(1)
       expect(l.matches(2, 50050)).toBe(false) // a hit here doesn't exist yet at fetch time
 
       // A background refresh grows the store far enough that the tail moves to
@@ -230,8 +282,8 @@ describe("WatchLane — matches, counts, entry, refresh", () => {
       // tail (region 3) — region 1 was dropped here for being a former-tail whose
       // recorded `n` went stale, and matches() must answer for it immediately,
       // with no separate fault from ensureRegion()/a walk needed afterwards.
-      expect(data.loadWatchPlane).toHaveBeenCalledWith(1)
-      expect(data.loadWatchPlane).toHaveBeenCalledWith(3)
+      expect(loaded()).toContain(1)
+      expect(loaded()).toContain(3)
       expect(l.matches(2, 50050)).toBe(true) // now visible, reloaded by refreshed() itself
    })
 
@@ -247,7 +299,7 @@ describe("WatchLane — matches, counts, entry, refresh", () => {
       const l = lane()
       expect(l.matches(1, 20)).toBe(false) // region 0 not resident yet
       await l.ensureRegion(20)
-      expect(data.loadWatchPlane).toHaveBeenCalledExactlyOnceWith(0)
+      expect(loaded()).toEqual([0])
       expect(l.matches(1, 20)).toBe(true)
    })
 

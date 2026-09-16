@@ -12,6 +12,7 @@ import {
 } from "./nav/lane"
 import { MembersLane } from "./nav/lane-members"
 import type { SearchLane } from "./nav/lane-search"
+import { WatchLane } from "./nav/lane-watch"
 import { makeLane } from "./nav/make-lane"
 import { abortPrefetch, prefetchTarget, releasePrefetch, schedulePrefetch } from "./prefetch"
 import {
@@ -329,16 +330,20 @@ export function laneChronOrdered(): boolean {
 // coverage, from a lane built for the question alone. A count only moves with
 // the store, while the picker re-renders on every seen/saved/lane write — so it
 // is memoized per snapshot, keyed on the db object data.ts replaces wholesale on
-// every adopted snapshot and on a store switch. A failed count is forgotten, so
-// the next render retries. 0 for a rule the store no longer lists.
+// every adopted snapshot and on a store switch. The lane is pinned to that
+// store: a count still walking regions when the user switches stores must not
+// finish on the other store's planes under this store's key. A failed count is
+// forgotten, so the next render retries. 0 for a rule the store no longer lists.
 const watchCounts = new WeakMap<object, Map<string, Promise<number>>>()
 export function watchLaneCount(rule: string): Promise<number> {
-   let memo = watchCounts.get(data.db)
-   if (!memo) watchCounts.set(data.db, (memo = new Map()))
+   const store = data.activeStore()
+   let memo = watchCounts.get(store.db)
+   if (!memo) watchCounts.set(store.db, (memo = new Map()))
    const hit = memo.get(rule)
    if (hit) return hit
-   const l = makeLane([WATCH_PREFIX + rule], env)
-   const count = l.kind === "watch" ? l.ahead(-1) : Promise.resolve(0)
+   const count = Object.hasOwn(data.watchRules(store), rule)
+      ? new WatchLane([WATCH_PREFIX + rule], rule, store).ahead(-1)
+      : Promise.resolve(0)
    const slots = memo
    slots.set(rule, count)
    count.catch(() => {

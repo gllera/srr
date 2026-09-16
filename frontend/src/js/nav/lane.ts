@@ -112,7 +112,10 @@ export function keyOf(tokens: readonly string[]): string {
 }
 
 // A `w:<rule>` key names a watch lane only while the store lists that rule — a
-// TAG that happens to be spelled `w:x` is still a tag.
+// TAG that happens to be spelled `w:x` is still a tag. The writer never stores
+// such a tag while the rule exists or otherwise: every tag write path runs
+// backend validateTag, whose segments are [a-z0-9_] (TestTagCannotSpellAWatchToken),
+// so a tag and a rule can never compete for one key.
 export function isWatchKey(key: string): boolean {
    return key.startsWith(WATCH_PREFIX) && Object.hasOwn(data.watchRules(), key.slice(WATCH_PREFIX.length))
 }

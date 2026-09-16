@@ -41,7 +41,8 @@ const nav = vi.hoisted(() => {
       SAVED_TOKEN: "~saved",
       SEARCH_PREFIX: "q:",
       WATCH_PREFIX: "w:",
-      isWatchKey: vi.fn((k: string) => k.startsWith("w:")),
+      // Faithful: a watch key names a rule the store lists, not any "w:" spelling.
+      isWatchKey: vi.fn((k: string) => k.startsWith("w:") && Object.hasOwn(data.watchRules(), k.slice(2))),
       pruneSeen: vi.fn(),
       // nav.resolve() throws this when the active store moved across its awaits.
       isStaleLanding: vi.fn((e: unknown) => e instanceof Error && e.message === "stale landing"),
@@ -202,6 +203,7 @@ const data = vi.hoisted(() => ({
    mountRecords: vi.fn(() => [{ id: "0", url: "http://localhost/", label: "", ord: 0, role: "home", cred: false }]),
    mountStatus: vi.fn(() => ({ state: "ok", kind: "", error: "" })),
    applyMountTable: vi.fn(async () => {}),
+   watchRules: vi.fn<() => Record<string, number>>(() => ({})),
 }))
 vi.mock("./data", () => data)
 
@@ -510,6 +512,7 @@ beforeEach(() => {
    seeded.unreadOnly = false
    M = undefined
    data.init.mockResolvedValue(undefined)
+   data.watchRules.mockReturnValue({})
    nav.listAnchor.mockImplementation(async () => M?.cursor().chron ?? -1)
    nav.fromHash.mockResolvedValue(showFeed())
    // vi.clearAllMocks clears calls but NOT mockReturnValue — pin the picker's
@@ -2806,12 +2809,22 @@ describe("back-button filter breadcrumb (which lane is the reader in)", () => {
       // list-path token application — a mocked reader-path fromHash() never moves
       // those atoms — so the boot-time initial effect run is what must see the value.
       nav.getCurrentFilterKey.mockReturnValue("w:hot")
+      data.watchRules.mockReturnValue({ hot: 0 })
       await boot()
       hashTo("#3!w%3Ahot")
       await flush()
       // The mock filterLabel echoes the key; what is under test is the absent "#".
       expect(backLabel().textContent).toBe("w:hot")
       expect(backLabel().dataset.src).toBeUndefined()
+   })
+
+   it("names a TAG spelled like a watch key as a hashtag when the store lists no such rule", async () => {
+      nav.getCurrentFilterKey.mockReturnValue("w:x")
+      data.watchRules.mockReturnValue({ hot: 0 })
+      await boot()
+      hashTo("#3!w%3Ax")
+      await flush()
+      expect(backLabel().textContent).toBe("#w:x")
    })
 
    it("stays empty (hidden) on the unfiltered wire — silence means [ALL]", async () => {

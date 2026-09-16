@@ -19,9 +19,9 @@ const NO_FEEDS: ReadonlyMap<number, number> = new Map()
 
 // The highest add_idx any feed carries. At or above it no article is expired,
 // so live() needs no idx lookup there.
-function maxAddIdx(): number {
+function maxAddIdx(feeds: IDB["feeds"]): number {
    let m = 0
-   for (const f of Object.values(data.db.feeds)) m = Math.max(m, f.add_idx ?? 0)
+   for (const f of Object.values(feeds)) m = Math.max(m, f.add_idx ?? 0)
    return m
 }
 
@@ -38,37 +38,61 @@ export class WatchLane implements Lane {
    // that is not resident reads as "no match"; the walks are what fault regions
    // in, exactly as findLeft/findRight fault idx packs in for a membership lane.
    private readonly planes = new Map<number, WatchPlane>()
+   // The resident regions that are FINAL: the snapshot they were loaded under
+   // covered them end to end (wc ≥ the region's end). Nothing can change such a
+   // region's bits again — a later sync evaluates from wc up, a new rule's floor
+   // is stamped at or above wc, and `srr store compact` leaves the series alone.
+   // A plane's own `n` proves nothing: loadWatchPlane takes it from total_art,
+   // and a position the manifest lists no object for reads as an all-zero plane
+   // of the full width while a lagging (warn-only) sync may still publish one.
+   private readonly final = new Set<number>()
    // Bumped by refreshed(): a region load that started against the previous
-   // snapshot must not overwrite what the refresh just installed.
+   // snapshot must not overwrite what the refresh installed — unless the region
+   // was final for that snapshot, when the load is as good as a fresh one.
    private gen = 0
+   // The store this lane reads, when it was built for one (a picker count, which
+   // must describe ONE store however long it runs and whatever the user switches
+   // to meanwhile); undefined = the active store at every read, like every other
+   // lane — nav rebuilds its lane on a store switch.
+   private readonly store: data.Store | undefined
    // maxAddIdx() for the snapshot this lane last saw; refreshed() is the only
    // place a feed's add_idx can move under an open lane.
-   private liveFrom = maxAddIdx()
+   private liveFrom: number
 
-   constructor(tokens: readonly string[], rule: string) {
+   constructor(tokens: readonly string[], rule: string, store?: data.Store) {
       this.tokens = tokens
       this.key = keyOf(tokens)
       this.rule = rule
+      this.store = store
+      this.liveFrom = maxAddIdx(this.feeds())
+   }
+
+   private feeds(): IDB["feeds"] {
+      return (this.store?.db ?? data.db).feeds
    }
 
    // A rule the store no longer lists covers nothing — an open lane whose rule
    // was removed goes empty rather than widening to every chron its stale bits
    // mark.
    private floor(): number {
-      const rules = data.watchRules()
+      const rules = data.watchRules(this.store)
       return Object.hasOwn(rules, this.rule) ? rules[this.rule] : Infinity
    }
 
    private end(): number {
-      return data.watchCovered()
+      return data.watchCovered(this.store)
    }
 
    private async plane(p: number): Promise<WatchPlane> {
       const resident = this.planes.get(p)
       if (resident) return resident
       const my = this.gen
-      const loaded = await data.loadWatchPlane(p)
-      if (my === this.gen) this.planes.set(p, loaded)
+      const final = this.end() >= (p + 1) * WATCH_PACK_SIZE
+      const loaded = await data.loadWatchPlane(p, this.store)
+      if (my === this.gen || final) {
+         this.planes.set(p, loaded)
+         if (final) this.final.add(p)
+      }
       return loaded
    }
 
@@ -77,7 +101,7 @@ export class WatchLane implements Lane {
    // status quo, as search does.
    private async live(chron: number): Promise<boolean> {
       if (chron >= this.liveFrom) return true
-      const feed = data.db.feeds[await data.getFeedId(chron)]
+      const feed = this.feeds()[await data.getFeedId(chron, this.store)]
       return !feed || chron >= (feed.add_idx ?? 0)
    }
 
@@ -90,7 +114,7 @@ export class WatchLane implements Lane {
       const plane = this.planes.get(Math.floor(chron / WATCH_PACK_SIZE))
       const bits = plane?.bits.get(this.rule)
       if (!plane || !bits || !bitAt(bits, chron - plane.base)) return false
-      return chron >= (data.db.feeds[feedId]?.add_idx ?? 0)
+      return chron >= (this.feeds()[feedId]?.add_idx ?? 0)
    }
 
    async atOrAbove(from: number): Promise<number> {
@@ -194,30 +218,21 @@ export class WatchLane implements Lane {
       if (end > this.floor()) await this.plane(Math.floor((end - 1) / WATCH_PACK_SIZE))
    }
 
-   // A refresh can grow the tail region and move wc, but a FINALIZED region — one
-   // strictly below the new tail position — is write-once (docs/MANIFEST-SPEC.md
-   // §4.8: `srr store compact` leaves the watch series untouched) ONLY ONCE its
-   // plane was already fully finalized when it was loaded (its stored `n` was
-   // already a full pack). A plane loaded while its region WAS still the growing
-   // tail carries a partial `n` — the region's real size at fetch time — and that
-   // recorded size (and therefore the bitmap length matches()/the walk read
-   // against) goes stale the moment the tail grows past it, even though the
-   // region's position has since dropped below the new tail. So a resident plane
-   // is kept only when it is strictly below the new tail AND was already a full
-   // pack when fetched; anything else — at-or-above the new tail, or a stale
-   // partial now finalized below it — is dropped. matches()/anchorChron would
-   // misread a dropped position as "no match" until something faults it back in,
-   // so the new tail and every dropped position — a stale former-tail included,
-   // never just the new tail — are reloaded together in the one pass below.
+   // A refresh can grow the tail region, move wc, and publish bits for any region
+   // coverage had not reached. A resident region is kept only when it is FINAL
+   // (see `final`); everything else — the tail, a former tail loaded with a
+   // partial n, a region below the tail that a lagging sync had not described
+   // yet — is dropped. matches()/anchorChron would misread a dropped position as
+   // "no match" until something faulted it back in, so the new tail and every
+   // dropped position are reloaded together in the one pass below.
    async refreshed(): Promise<void> {
       this.gen++
-      this.liveFrom = maxAddIdx()
+      this.liveFrom = maxAddIdx(this.feeds())
       const end = this.end()
       if (end <= this.floor()) return
-      const tail = Math.floor((end - 1) / WATCH_PACK_SIZE)
-      const reload = new Set([tail])
-      for (const [p, plane] of this.planes)
-         if (p >= tail || plane.n < WATCH_PACK_SIZE) {
+      const reload = new Set([Math.floor((end - 1) / WATCH_PACK_SIZE)])
+      for (const p of this.planes.keys())
+         if (!this.final.has(p)) {
             this.planes.delete(p)
             reload.add(p)
          }

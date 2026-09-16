@@ -45,7 +45,14 @@ const data = vi.hoisted(() => ({
    // The active store context nav reads for its per-store keys (mid) and the
    // article-base it hands fmt.extractPrefetchMedia. Home mid "0" ⇒ nav uses the
    // bare srr-seen/srr-saved keys the tests below assert on directly.
-   activeStore: () => ({ mid: "0", base: new URL("http://localhost/") }),
+   // The real Store carries its snapshot: data.db IS the active store's db.
+   activeStore: () => ({
+      mid: "0",
+      base: new URL("http://localhost/"),
+      get db() {
+         return data.db
+      },
+   }),
    // The keyword-watchlist accessors (nav lanes P3); "no rules" unless a case says otherwise.
    watchRules: vi.fn<() => Record<string, number>>(() => ({})),
    watchCovered: vi.fn<() => number>(() => 0),
@@ -121,7 +128,14 @@ function setupIndex(entries: Array<{ feedId: number; fetchedAt?: number }>) {
 // afterEach, since the mock lives for the whole file.
 const realActiveStore = data.activeStore
 const asMid = (mid: string) => {
-   data.activeStore = () => ({ mid, base: new URL("http://localhost/") }) as ReturnType<typeof realActiveStore>
+   data.activeStore = () =>
+      ({
+         mid,
+         base: new URL("http://localhost/"),
+         get db() {
+            return data.db
+         },
+      }) as ReturnType<typeof realActiveStore>
 }
 
 beforeEach(() => {
@@ -3853,6 +3867,61 @@ describe("watch lane (w:<rule>)", () => {
       setupWatch()
       expect(await nav.watchLaneCount("hot")).toBe(3)
       expect(await nav.watchLaneCount("gone")).toBe(0)
+   })
+
+   it("a count in flight across a store switch counts the store it started on, end to end", async () => {
+      // Store A: hot hits 3 + 1 = 4. Store B: 0 + 5. Both two full regions.
+      const W = 50000
+      const region = (p: number, set: number[]) => {
+         const bytes = new Uint8Array(W / 8)
+         for (const i of set) bytes[i >> 3] |= 1 << (i & 7)
+         return parseWatchPlane(
+            { v: 1, base: p * W, n: W, bits: { hot: btoa(String.fromCharCode(...bytes)) } },
+            p * W,
+            W,
+         )
+      }
+      const feeds = { 1: makeFeed({ id: 1, total_art: 2 * W }) }
+      type S = { mid: string; base: URL; db: IDB }
+      const mk = (mid: string): S => ({
+         mid,
+         base: new URL("http://localhost/"),
+         db: { total_art: 2 * W, feeds, wf: { hot: 0 }, wc: 2 * W } as unknown as IDB,
+      })
+      const A = mk("0")
+      const B = mk("s7")
+      const planes = new Map([
+         [A, [region(0, [1, 2, 3]), region(1, [4])]],
+         [B, [region(0, []), region(1, [7, 8, 9, 10, 11])]],
+      ])
+      let active = A
+      let release!: () => void
+      const gate = new Promise<void>((r) => (release = r))
+      const priorDb = data.db
+      data.activeStore = () => active as unknown as ReturnType<typeof realActiveStore>
+      data.db = A.db
+      data.watchRules.mockImplementation(((s: S = active) => s.db.wf) as () => Record<string, number>)
+      data.watchCovered.mockImplementation(((s: S = active) => s.db.wc) as () => number)
+      data.loadWatchPlane.mockImplementation(((p: number, s: S = active) => {
+         const plane = planes.get(s)![p]
+         return s === A && p === 0 ? gate.then(() => plane) : Promise.resolve(plane)
+      }) as (p: number) => Promise<import("./watch-plane").WatchPlane>)
+      try {
+         const inflight = nav.watchLaneCount("hot") // the picker fills store A's badge
+         active = B // the user taps store B in the picker's switcher
+         data.db = B.db
+         release()
+         expect(await inflight).toBe(4)
+         active = A // …and back to A: the memoized count is A's alone
+         data.db = A.db
+         expect(await nav.watchLaneCount("hot")).toBe(4)
+      } finally {
+         data.activeStore = realActiveStore
+         data.db = priorDb
+         data.watchRules.mockReset()
+         data.watchCovered.mockReset()
+         data.loadWatchPlane.mockReset()
+      }
    })
 
    it("a #pos!w: deep link lands on that hit", async () => {
