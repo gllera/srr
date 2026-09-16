@@ -33,7 +33,7 @@ import {
    unreadCounts,
    type FrontierScope,
 } from "./seen"
-import { batch, onChange, untracked } from "./signals"
+import { arrayEqual, batch, onChange, untracked } from "./signals"
 
 // nav is the FACADE over the four modules split out of it (finding ENG3):
 // ./seen (frontier persistence, the explicit gestures, the unread tallies),
@@ -118,6 +118,10 @@ let lane: Lane = new MembersLane([], new Map(), env)
 
 function setLane(tokens: readonly string[], opts: { keepKnownEmpty?: boolean } = {}): void {
    lane = makeLane(tokens, env, opts)
+   // The cached → / ← probes name the previous lane's neighbours. A pick that
+   // keeps the article on screen lands nothing (app.ts selectTokens), so this is
+   // the one place that can drop them before the next step.
+   next.left = next.right = undefined
    publishLane()
 }
 
@@ -478,10 +482,39 @@ export interface Landing {
    replace?: boolean
 }
 
-async function resolve(target: number, o: Landing = {}): Promise<IShowFeed> {
-   const { replace = false, record = true } = o
+// A landing whose store changed under it. A command's awaits (an article load,
+// an idx walk) can straddle a store switch that runs OUTSIDE the navigation
+// mutex — data.applyMountTable's fallback when a sync merge unmounts the store
+// being read — and committing then would make the old store's chron the new
+// store's cursor and raise the new store's frontier to it, which sync pushes to
+// every device. Nothing commits; app.ts's guard() drops it silently.
+class StaleLandingError extends Error {
+   constructor() {
+      super("the store changed while this landing was in flight")
+      this.name = "StaleLandingError"
+   }
+}
+export function isStaleLanding(e: unknown): boolean {
+   return e instanceof StaleLandingError
+}
+
+// The internal half of a Landing: the store it belongs to, stamped when the
+// COMMAND starts (after fromHash's/switchFilter's own switch) and carried into
+// every nested landing call, so a first()/last() fallback reached after the
+// switch cannot re-stamp itself with the new store.
+type Stamped = Landing & { at?: string }
+function stamped<T extends Stamped>(o: T): T & { at: string } {
+   return { ...o, at: o.at ?? data.activeStore().mid }
+}
+function assertStore(at: string | undefined): void {
+   if (at !== undefined && at !== data.activeStore().mid) throw new StaleLandingError()
+}
+
+async function resolve(target: number, o: Stamped = {}): Promise<IShowFeed> {
+   const { replace = false, record = true, at = data.activeStore().mid } = o
    // Load first; commit pos only on success so a Retry replays the same chron.
    const article = await data.loadArticle(target)
+   assertStore(at)
    let seen: Record<string, number> | undefined = undefined
    // One landing is ONE flush: the cursor and the seen write recordSeen makes
    // reach the model together, so no effect sees the new article with the old
@@ -560,16 +593,21 @@ export function bumpFrontierEpoch(): void {
 // The reader's no-article state. `notStarted` picks which unread-only message the
 // empty state shows: true = a never-opened feed/tag (has unread, no resume point →
 // "start from the list"); false = caught-up (nothing unread) or a plain no-match.
-function resolveNoMatch(o: Landing & { notStarted?: boolean } = {}): IShowFeed {
+function resolveNoMatch(o: Stamped & { notStarted?: boolean } = {}): IShowFeed {
    const { replace = false, notStarted = false } = o
-   model.cursor.set({ chron: -1, feedId: -1 })
-   // Same cleanup as resolve(): the cached neighbor probes, the saved ghost, and
-   // any in-flight media prefetch belong to the PREVIOUS filter's article and are
-   // now stale.
-   clearSavedGhost()
-   next.left = next.right = undefined
-   abortPrefetch()
-   updateHash(replace)
+   assertStore(o.at)
+   // Batched like resolve(): the flush — and any error an effect throws — comes
+   // after the cleanup and the hash write, not between them.
+   batch(() => {
+      model.cursor.set({ chron: -1, feedId: -1 })
+      // Same cleanup as resolve(): the cached neighbor probes, the saved ghost, and
+      // any in-flight media prefetch belong to the PREVIOUS filter's article and are
+      // now stale.
+      clearSavedGhost()
+      next.left = next.right = undefined
+      abortPrefetch()
+      updateHash(replace)
+   })
    return {
       article: { f: 0, a: 0, p: 0, t: "(no matching articles)", l: "", c: "" },
       has_left: false,
@@ -628,6 +666,7 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
    const { mid, tokens } = parseHashMount(parseHashTokens(hash))
    if (mid !== data.activeStore().mid) data.setActive(mid)
    setLane(tokens)
+   const at = data.activeStore().mid
 
    if (data.db.total_art === 0) throw new Error("no articles")
 
@@ -656,9 +695,9 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
    // Unread-only + a fully-read feed/tag (or [ALL] fully caught up): a reload
    // onto it shows the "All caught up" placeholder, the same as switching to it —
    // no unread to restore. (A feed/tag with unread proceeds to honor the #pos.)
-   if (await noUnreadLeft()) return resolveNoMatch({ replace: true })
-   if (!(await isValidSeen(target))) return last({ replace: true, record: false })
-   return resolve(target, { replace: true, record: false })
+   if (await noUnreadLeft()) return resolveNoMatch({ replace: true, at })
+   if (!(await isValidSeen(target))) return lastIn({ replace: true, record: false, at })
+   return resolve(target, { replace: true, record: false, at })
 }
 
 // One directional navigation step. The post-navigation neighbor lookup is
@@ -669,10 +708,12 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
 // The slot-identity checks keep a lookup superseded by a newer navigation
 // from prefetching or clearing on its behalf.
 async function step(dir: "left" | "right"): Promise<IShowFeed> {
+   const at = data.activeStore().mid
    const lookup = () => (dir === "left" ? neighborOlder(cursorChron()) : neighborNewer(cursorChron()))
    const target = await (next[dir] ?? lookup())
+   assertStore(at)
    if (target === -1) throw new Error(`no ${dir} match`)
-   const result = await resolve(target)
+   const result = await resolve(target, { at })
    const mine = (next[dir] = lookup())
    mine
       .then((t) => {
@@ -692,19 +733,25 @@ export function right(): Promise<IShowFeed> {
    return step("right")
 }
 
-export async function first(o: Landing = {}): Promise<IShowFeed> {
-   const { record = true } = o
+export function first(o: Landing = {}): Promise<IShowFeed> {
+   return firstIn(o)
+}
+async function firstIn(o: Stamped): Promise<IShowFeed> {
+   const { record = true, at } = stamped(o)
    // The lane's own start: ★ Saved's queue front, a membership's first article at
    // or after its smallest bound (else its newest), a query's oldest hit.
    const target = await lane.oldest()
-   return target === -1 ? resolveNoMatch() : resolve(target, { record })
+   return target === -1 ? resolveNoMatch({ at }) : resolve(target, { record, at })
 }
 
-export async function last(o: Landing = {}): Promise<IShowFeed> {
-   const { replace = false, record = true } = o
+export function last(o: Landing = {}): Promise<IShowFeed> {
+   return lastIn(o)
+}
+async function lastIn(o: Stamped): Promise<IShowFeed> {
+   const { replace = false, record = true, at } = stamped(o)
    const found = await lane.newest()
-   if (found === -1) return resolveNoMatch({ replace })
-   return resolve(found, { replace, record })
+   if (found === -1) return resolveNoMatch({ replace, at })
+   return resolve(found, { replace, record, at })
 }
 
 async function isValidSeen(idx: number): Promise<boolean> {
@@ -744,18 +791,25 @@ async function noUnreadLeft(): Promise<boolean> {
 export async function switchFilter(token: string): Promise<IShowFeed> {
    token = resolveMountToken(token)
    setLane(token === "" ? [] : [token], { keepKnownEmpty: true })
+   const at = data.activeStore().mid
    // A token that named nothing resolved to [ALL]: land on its newest, not on the
    // [ALL] lane's own entry (a stale token is not a pick of [ALL]).
-   if (token !== "" && lane.tokens.length === 0) return last({ record: false })
-   await lane.prepare()
-   return actOnEntry(await lane.entry())
+   if (token !== "" && lane.tokens.length === 0) return lastIn({ record: false, at })
+   // The entry is THIS lane's. A filter applied while prepare() is awaited (route()'s
+   // list path runs outside the mutex) replaces the lane, and its entry is not what
+   // this pick asked for. A same-token rebuild (reapplyLane) is still this pick.
+   const mine = lane
+   await mine.prepare()
+   const entry = await mine.entry()
+   if (!arrayEqual(lane.tokens, mine.tokens)) throw new StaleLandingError()
+   return actOnEntry(entry, at)
 }
 
 // Act on a lane's entry decision. A landing is a RESUME (record: false); `land: -1`
 // is "nothing to land on" and takes the plain placeholder, as first()/last() do.
-async function actOnEntry(e: LaneEntry): Promise<IShowFeed> {
-   if ("land" in e) return e.land === -1 ? resolveNoMatch() : resolve(e.land, { record: false })
-   const o = resolveNoMatch({ notStarted: e.notStarted })
+async function actOnEntry(e: LaneEntry, at: string): Promise<IShowFeed> {
+   if ("land" in e) return e.land === -1 ? resolveNoMatch({ at }) : resolve(e.land, { record: false, at })
+   const o = resolveNoMatch({ notStarted: e.notStarted, at })
    if (e.notStarted) {
       o.has_right = e.hasRight
       o.right_count = e.rightCount ?? -1
@@ -768,15 +822,19 @@ async function actOnEntry(e: LaneEntry): Promise<IShowFeed> {
 // `replace` is for a landing that FOLLOWS a navigation the caller already
 // pushed — the split view's lane-change follow-up, which would otherwise cost a
 // second history entry and make browser-back a visual no-op on the first press.
-export async function goTo(idx: number, o: Landing = {}): Promise<IShowFeed> {
-   const { record = true, replace = false } = o
-   if (idx < 0 || idx >= data.db.total_art) return last({ replace, record })
+export function goTo(idx: number, o: Landing = {}): Promise<IShowFeed> {
+   return goToIn(idx, o)
+}
+async function goToIn(idx: number, o: Stamped): Promise<IShowFeed> {
+   const s = stamped(o)
+   const { record = true, replace = false, at } = s
+   if (idx < 0 || idx >= data.db.total_art) return lastIn(s)
    // A lane with no value order (★ Saved) cannot snap: land on the exact member a
    // row tap or deep link names (its matches() ignores the feed, hence -1), else
    // fall back to the front of the lane for a stale link.
-   if (!lane.chronOrdered) return lane.matches(-1, idx) ? resolve(idx, { replace, record }) : first({ record: false })
+   if (!lane.chronOrdered) return lane.matches(-1, idx) ? resolve(idx, s) : firstIn({ record: false, at })
    const found = await lane.atOrAbove(idx)
-   return found === -1 ? last({ replace, record }) : resolve(found, { replace, record })
+   return found === -1 ? lastIn(s) : resolve(found, { replace, record, at })
 }
 
 // The mini-player's "go to the episode" (PlayerDeps.openArticle): land on the
@@ -791,17 +849,19 @@ export async function goTo(idx: number, o: Landing = {}): Promise<IShowFeed> {
 // (fromHash's rule): recording a forward jump would raise every member's
 // frontier over articles never shown.
 export async function goToArticle(chron: number): Promise<IShowFeed> {
+   const at = data.activeStore().mid
    if (chron >= 0 && chron < data.db.total_art) {
       let addressable = await isValidSeen(chron)
       if (!addressable) {
+         assertStore(at) // the fallback below rewrites the lane
          setLane([])
          addressable = await isValidSeen(chron)
       }
-      if (addressable) return resolve(chron, { record: false })
+      if (addressable) return resolve(chron, { record: false, at })
    }
    // Out of range, expired below add_idx, or a deleted feed: the exact article
    // is unaddressable — keep goTo's clamp (nearest live match, else last).
-   return goTo(chron, { record: false })
+   return goToIn(chron, { record: false, at })
 }
 
 // Move the navigation cursor to an exact, already-known-matching chronIdx — the
@@ -812,9 +872,11 @@ export async function goToArticle(chron: number): Promise<IShowFeed> {
 // the list cursor isn't reading the article — pos just tracks the highlight so
 // opening it (tap) or re-anchoring the list later stays consistent.
 export function select(chron: number, feedId: number): void {
-   model.cursor.set({ chron, feedId })
    next.left = next.right = undefined
    abortPrefetch()
+   // Last: the write runs every effect over the cursor, and a throwing one
+   // rethrows from here (signals semantic 7).
+   model.cursor.set({ chron, feedId })
 }
 
 export function getFilterEntries(): string[] {
@@ -951,7 +1013,10 @@ export async function cycleToken(dir: number): Promise<string> {
 }
 
 export async function cycleFilter(dir: number): Promise<IShowFeed> {
-   return switchFilter(await cycleToken(dir))
+   const at = data.activeStore().mid
+   const token = await cycleToken(dir)
+   assertStore(at) // a token of the store the cycle started in
+   return switchFilter(token)
 }
 
 function updateHash(replace = false) {

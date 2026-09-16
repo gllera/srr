@@ -4108,6 +4108,57 @@ describe("model mirror — seen and saved", () => {
    })
 })
 
+// The cursor's owner finishes its bookkeeping before the write that publishes the
+// cursor: that write runs every effect over it, and a throwing one rethrows from
+// the write (signals semantic 7), skipping whatever came after.
+describe("the cursor writers publish last", () => {
+   const throwOnCursor = () => {
+      let armed = false
+      const stop = effect(() => {
+         model.cursor()
+         if (armed) throw new Error("paint")
+      })
+      return {
+         arm: () => void (armed = true),
+         stop: () => {
+            armed = false
+            stop()
+         },
+      }
+   }
+
+   it("select drops the neighbour probes even when an effect over the cursor throws", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      await nav.goTo(0)
+      await nav.right() // on 1; the → probe caches 2
+      const t = throwOnCursor()
+      try {
+         t.arm()
+         expect(() => nav.select(0, 1)).toThrow("paint")
+      } finally {
+         t.stop()
+      }
+      await nav.right()
+      expect(nav.currentChron()).toBe(1) // stepped from 0, not onto the cached 2
+   })
+
+   it("a placeholder landing writes its hash and drops the probes even when an effect over the cursor throws", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      await nav.goTo(0)
+      await nav.right() // on 1; the → probe caches 2
+      vi.mocked(history.pushState).mockClear()
+      const t = throwOnCursor()
+      try {
+         t.arm()
+         await expect(nav.switchFilter(nav.SAVED_TOKEN)).rejects.toThrow("paint") // nothing saved: the placeholder
+      } finally {
+         t.stop()
+      }
+      expect(vi.mocked(history.pushState).mock.calls.at(-1)?.[2]).toBe("#" + nav.tokensSuffix())
+      await expect(nav.right()).rejects.toThrow("no right match") // not the cached 2
+   })
+})
+
 describe("model mirror — cursor, lane, unread-only, frontier epoch", () => {
    afterEach(() => nav.setUnreadOnly(false))
 
@@ -4224,5 +4275,266 @@ describe("a profile merge republishes nav's own state (S14)", () => {
       expect(nav.isUnreadOnly()).toBe(true)
       expect(model.seen()).toEqual({ "feed:1": 1 }) // pruned, then published
       expect(model.saved()).toEqual([1])
+   })
+})
+// A lane change invalidates the cached → / ← probes: they name the previous
+// lane's neighbours. Under split a pick that keeps the article on screen does not
+// land (app.ts selectTokens), so nothing else would drop them before the next step.
+describe("a lane change drops the cached neighbour probes", () => {
+   it("→ after a pick that keeps the article steps within the new lane", async () => {
+      // chrons: 0:f1 1:f1 2:f2 3:f1
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 2 }, { feedId: 1 }])
+      await nav.goTo(0)
+      await nav.right() // on 1; the → probe caches [ALL]'s next: 2 (feed 2)
+      nav.applyFilter(["1"])
+      expect(await nav.listAnchor()).toBe(1) // still a member: the pane stays
+      await nav.right()
+      expect(nav.currentChron()).toBe(3)
+   })
+
+   it("→ after a watch-lane pick that keeps the article steps onto the next hit", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      const bytes = new Uint8Array(1)
+      for (const i of [1, 3]) bytes[i >> 3] |= 1 << (i & 7) // "hot" marks chrons 1 and 3
+      const plane = parseWatchPlane(
+         {
+            v: 1,
+            base: 0,
+            n: 5,
+            bits: { hot: btoa(String.fromCharCode(...bytes)) },
+         },
+         0,
+         5,
+      )
+      data.watchRules.mockReturnValue({ hot: 0 })
+      data.watchCovered.mockReturnValue(5)
+      data.loadWatchPlane.mockResolvedValue(plane)
+      try {
+         await nav.goTo(0)
+         await nav.right() // on 1; the → probe caches [ALL]'s next: 2
+         nav.applyFilter(["w:hot"])
+         expect(await nav.listAnchor()).toBe(1)
+         await nav.right()
+         expect(nav.currentChron()).toBe(3)
+      } finally {
+         data.watchRules.mockReturnValue({})
+         data.watchCovered.mockReturnValue(0)
+      }
+   })
+})
+
+// A landing awaits its article; the active store can change underneath it (a
+// sync merge unmounting the store it was reading falls back to home outside the
+// navigation mutex). Committing then would write the OLD store's chron as the
+// new store's cursor and raise the new store's frontier to it — which sync then
+// pushes to every device. The landing is stale: nothing commits.
+describe("a landing in flight across a store switch", () => {
+   afterEach(() => {
+      data.activeStore = realActiveStore
+      model.activeMid.set("0")
+   })
+
+   // Store s7 active on chron 0, then `step` starts with its article load gated.
+   async function inFlight(step: () => Promise<unknown>) {
+      asMid("s7")
+      model.activeMid.set("s7")
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      await nav.goTo(0, { record: false })
+      let release!: () => void
+      const gate = new Promise<void>((r) => (release = r))
+      const load = data.loadArticle.getMockImplementation()!
+      data.loadArticle.mockImplementation(async (i: number) => {
+         await gate
+         return load(i)
+      })
+      const settled = step().then(
+         () => null,
+         (e: unknown) => e ?? "rejected",
+      )
+      await Promise.resolve()
+      vi.mocked(history.pushState).mockClear()
+      vi.mocked(history.replaceState).mockClear()
+      return { settled, release }
+   }
+   // What data.applyMountTable's fallback + menus' showHomeList do meanwhile.
+   const switchHome = () => {
+      asMid("0")
+      model.activeMid.set("0")
+      nav.applyFilter([])
+   }
+
+   it("a step commits nothing into the store switched to, and rejects as a stale landing", async () => {
+      const { settled, release } = await inFlight(() => nav.right())
+      switchHome()
+      release()
+      expect(nav.isStaleLanding(await settled)).toBe(true)
+      expect(model.cursor()).toEqual({ chron: -1, feedId: -1 })
+      expect(localStorage.getItem("srr-seen")).toBeNull()
+      expect(history.pushState).not.toHaveBeenCalled()
+      expect(history.replaceState).not.toHaveBeenCalled()
+   })
+
+   it.each([
+      ["goTo", () => nav.goTo(2)],
+      ["fromHash", () => nav.fromHash("2!@s7:")], // a hash naming the store already active
+      ["goToArticle", () => nav.goToArticle(2)],
+      ["first", () => nav.first()],
+      ["last", () => nav.last()],
+   ])("%s commits nothing into the store switched to either", async (_name, step) => {
+      const { settled, release } = await inFlight(step)
+      switchHome()
+      release()
+      expect(nav.isStaleLanding(await settled)).toBe(true)
+      expect(model.cursor()).toEqual({ chron: -1, feedId: -1 })
+      expect(localStorage.getItem("srr-seen")).toBeNull()
+   })
+
+   it("a landing that stays in its store commits as usual", async () => {
+      const { settled, release } = await inFlight(() => nav.right())
+      release()
+      expect(await settled).toBeNull()
+      expect(nav.currentChron()).toBe(1)
+   })
+
+   it("a step whose neighbour lookup straddles the switch is stale, not a dead end", async () => {
+      asMid("s7")
+      model.activeMid.set("s7")
+      setupIndex([{ feedId: 1 }, { feedId: 1 }])
+      await nav.goTo(1, { record: false }) // the newest: → finds nothing in s7
+      const settled = nav.right().then(
+         () => null,
+         (e: unknown) => e,
+      )
+      switchHome() // before the lookup settles
+      expect(nav.isStaleLanding(await settled)).toBe(true)
+   })
+
+   it("goToArticle leaves the switched-to store's lane alone", async () => {
+      asMid("s7")
+      model.activeMid.set("s7")
+      setupIndex([{ feedId: 1 }, { feedId: 2 }])
+      nav.applyFilter(["2"]) // chron 0 (feed 1) is not addressable here: the [ALL] fallback
+      const settled = nav.goToArticle(0).then(
+         () => null,
+         (e: unknown) => e,
+      )
+      asMid("0")
+      model.activeMid.set("0")
+      nav.applyFilter(["1"]) // home, on a lane of its own
+      expect(nav.isStaleLanding(await settled)).toBe(true)
+      expect(nav.filterTokens()).toEqual(["1"])
+   })
+
+   it("a cycle whose token came from the store switched away from lands nothing", async () => {
+      asMid("s7")
+      model.activeMid.set("s7")
+      setupIndex([{ feedId: 1 }, { feedId: 1 }])
+      const settled = nav.cycleFilter(1).then(
+         () => null,
+         (e: unknown) => e,
+      )
+      switchHome() // while the cycle weighs its lanes
+      expect(nav.isStaleLanding(await settled)).toBe(true)
+      expect(model.cursor().chron).toBe(-1)
+   })
+
+   it("a placeholder landing that straddles the switch writes no hash and no cursor", async () => {
+      asMid("s7")
+      model.activeMid.set("s7")
+      setupIndex([{ feedId: 1 }])
+      await nav.goTo(0, { record: false })
+      vi.mocked(history.pushState).mockClear()
+      vi.mocked(history.replaceState).mockClear()
+      const settled = nav.switchFilter(nav.SAVED_TOKEN).then(
+         () => null,
+         (e: unknown) => e,
+      ) // nothing saved: its entry is the placeholder
+      asMid("0")
+      model.activeMid.set("0")
+      nav.applyFilter([nav.SAVED_TOKEN]) // home's ★ Saved is empty too: the entry stays the placeholder
+      expect(nav.isStaleLanding(await settled)).toBe(true)
+      expect(history.pushState).not.toHaveBeenCalled()
+      expect(history.replaceState).not.toHaveBeenCalled()
+   })
+
+   it("a fallback reached after the switch still belongs to the command's store", async () => {
+      asMid("s7")
+      model.activeMid.set("s7")
+      setupIndex([{ feedId: 1 }, { feedId: 2 }])
+      nav.applyFilter(["1"])
+      const settled = nav.goTo(1).then(
+         () => null,
+         (e: unknown) => e,
+      ) // nothing of feed 1 at or above 1: goTo falls back to last() after its walk
+      switchHome()
+      expect(nav.isStaleLanding(await settled)).toBe(true)
+      expect(model.cursor().chron).toBe(-1)
+   })
+
+   it("first, last and goTo honour a store stamp an outer command passed in", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }])
+      const outer = { at: "s7" } as nav.Landing // what goTo/fromHash/goToArticle forward after their own awaits
+      for (const land of [nav.first, nav.last, (o: nav.Landing) => nav.goTo(1, o)]) {
+         const err = await land(outer).then(
+            () => null,
+            (e: unknown) => e,
+         )
+         expect(nav.isStaleLanding(err)).toBe(true)
+      }
+      expect(model.cursor().chron).toBe(-1)
+   })
+
+   it("isStaleLanding is false for any other error", () => {
+      expect(nav.isStaleLanding(new Error("no right match"))).toBe(false)
+      expect(nav.isStaleLanding(undefined)).toBe(false)
+   })
+})
+
+// The same rule for the lane: switchFilter lands the ENTRY of the lane it set, and
+// a lane change that runs while its prepare() is awaited (route()'s list path — a
+// browser-back to a list hash — applies its filter outside the mutex) makes that
+// entry some other lane's. Nothing commits; guard() drops it silently.
+describe("a lane switch overtaken by another lane change", () => {
+   it("lands nothing, and leaves the lane it was overtaken by", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }])
+      await nav.goTo(1, { record: false })
+      let release!: () => void
+      const gate = new Promise<void>((r) => (release = r))
+      searchMod.search.mockImplementation(async function* () {
+         await gate
+         yield [{ chron: 2 }]
+      })
+      try {
+         const settled = nav.switchFilter("q:x").then(
+            () => null,
+            (e: unknown) => e ?? "rejected",
+         )
+         await Promise.resolve()
+         nav.applyFilter(["1"]) // route()'s list path, mid-prepare
+         vi.mocked(history.pushState).mockClear()
+         vi.mocked(history.replaceState).mockClear()
+         release()
+         expect(nav.isStaleLanding(await settled)).toBe(true)
+         expect(model.cursor()).toEqual({ chron: 1, feedId: 2 })
+         expect(nav.getCurrentFilterKey()).toBe("1")
+         expect(history.pushState).not.toHaveBeenCalled()
+         expect(history.replaceState).not.toHaveBeenCalled()
+      } finally {
+         searchMod.search.mockReset()
+      }
+   })
+
+   it("an [ALL] switch overtaken by a multi-token filter lands nothing either", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }])
+      nav.applyFilter(["1"])
+      const settled = nav.switchFilter("").then(
+         () => null,
+         (e: unknown) => e ?? "rejected",
+      )
+      // Synchronously after the switch set its lane, before its prepare() resumes.
+      // Both lanes' getCurrentFilterKey() is "" — only the token lists differ.
+      nav.applyFilter(["1", "2"])
+      expect(nav.isStaleLanding(await settled)).toBe(true)
+      expect(nav.filterKey()).toBe("1 2")
    })
 })

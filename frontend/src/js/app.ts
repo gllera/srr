@@ -254,7 +254,9 @@ async function guard(fn: () => Promise<IShowFeed>) {
          effects?.markChromePainted()
       }
    } catch (e) {
-      if (token === busyToken) showError(e, () => guard(fn))
+      // A landing the active store switched under committed nothing (nav refuses
+      // it): nothing failed that a retry could fix, and the switch routes itself.
+      if (token === busyToken && !nav.isStaleLanding(e)) showError(e, () => guard(fn))
    } finally {
       if (token === busyToken) document.body.classList.remove("srr-loading", "srr-loading-reader")
       // endRendering flushes the deferred paints; whatever one of them throws,

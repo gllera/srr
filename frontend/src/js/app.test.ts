@@ -43,6 +43,8 @@ const nav = vi.hoisted(() => {
       WATCH_PREFIX: "w:",
       isWatchKey: vi.fn((k: string) => k.startsWith("w:")),
       pruneSeen: vi.fn(),
+      // nav.resolve() throws this when the active store moved across its awaits.
+      isStaleLanding: vi.fn((e: unknown) => e instanceof Error && e.message === "stale landing"),
       fromHash: vi.fn(async () => sf()),
       applyFilter: vi.fn((tokens: string[]) => M?.laneTokens.set([...tokens])),
       tokensSuffix: vi.fn(() => ""),
@@ -142,7 +144,9 @@ const nav = vi.hoisted(() => {
       right: vi.fn(async () => sf()),
       first: vi.fn(async () => sf()),
       last: vi.fn(async () => sf()),
-      listAnchor: vi.fn(async () => -1),
+      // nav's contract: the live article while it still matches the lane, else the
+      // lane's own anchor (-1 = newest). The mock's lanes match every article.
+      listAnchor: vi.fn(async () => M?.cursor().chron ?? -1),
       // The split view's resting-pane placeholder (the restingPane effect): a paint,
       // not a navigation, so the mock is a plain placeholder IShowFeed.
       restingState: vi.fn(async () => ({ ...sf(), placeholder: true, notStarted: true, has_right: true })),
@@ -506,6 +510,7 @@ beforeEach(() => {
    seeded.unreadOnly = false
    M = undefined
    data.init.mockResolvedValue(undefined)
+   nav.listAnchor.mockImplementation(async () => M?.cursor().chron ?? -1)
    nav.fromHash.mockResolvedValue(showFeed())
    // vi.clearAllMocks clears calls but NOT mockReturnValue — pin the picker's
    // open-state explicitly so a test that flips it can't leak into the next.
@@ -704,7 +709,7 @@ describe("split view (body.srr-split)", () => {
       seedCursor(-1)
       nav.isSearchFilter.mockReturnValue(false)
       nav.tagUnreadFromCounts.mockReturnValue(0)
-      nav.listAnchor.mockResolvedValue(-1)
+      nav.listAnchor.mockImplementation(async () => M?.cursor().chron ?? -1)
       data.db.feeds = {} as unknown as IDB["feeds"]
    })
 
@@ -4466,5 +4471,24 @@ describe("saved-article asset pinning", () => {
       } finally {
          Object.defineProperty(navigator, "serviceWorker", { value: undefined, configurable: true })
       }
+   })
+})
+
+describe("guard() — a landing the store switched under", () => {
+   it("is dropped silently: no error popup, no retry", async () => {
+      await boot()
+      const popup = document.querySelector(".srr-popup") as HTMLElement
+      nav.left.mockRejectedValueOnce(new Error("stale landing"))
+      const prev = document.querySelector(".srr-prev") as HTMLButtonElement
+      prev.disabled = false
+      prev.click()
+      await flush()
+      expect(nav.left).toHaveBeenCalledTimes(1)
+      expect(popup.classList.contains("srr-open")).toBe(false)
+      nav.left.mockRejectedValueOnce(new Error("pack 404")) // any other failure still reports
+      prev.disabled = false
+      prev.click()
+      await flush()
+      expect(popup.classList.contains("srr-open")).toBe(true)
    })
 })
