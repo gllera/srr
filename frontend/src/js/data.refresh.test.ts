@@ -106,3 +106,168 @@ describe("data.refresh — legacy root still reacts to fetched_at/total_art", ()
       expect(await data.refresh()).toBe("updated")
    })
 })
+
+// data.setActive publishes model.activeMid, and that write runs every effect over
+// it: a throwing one rethrows from the write (signals semantic 7). A mount-table
+// change that falls back to home must have done its own work by then.
+describe("data.applyMountTable — the active-store fallback publishes last", () => {
+   it("still boots the new mounts and bumps mountsRev when an effect over the active store throws", async () => {
+      await put("/db.gz", { v: 3, m: 1, t: 100 })
+      await put("/manifest/1.gz", emptyManifest(1, 100))
+      const data = await mountInit()
+      const model = await import("./model")
+      const { effect } = await import("./signals")
+      const { mountId, normalizeStoreUrl } = await import("./mounts")
+      const peer = async (name: string) => {
+         const url = normalizeStoreUrl(new URL(`${name}/`, data.activeStore().base).href)!
+         await put(new URL("db.gz", url).pathname, { v: 3, m: 1, t: 100 })
+         await put(new URL("manifest/1.gz", url).pathname, emptyManifest(1, 100))
+         return {
+            id: mountId(url),
+            url,
+            label: "",
+            ord: 1,
+            role: "peer" as const,
+            cred: false,
+            added: 1,
+            ts: 1,
+            del: false,
+         }
+      }
+      const home = data.mountRecords().find((r) => r.id === "0")!
+      const a = await peer("a")
+      const b = await peer("b")
+      await data.applyMountTable([home, a])
+      expect(data.setActive(a.id)).toBe(true)
+      const rev = model.mountsRev()
+
+      let armed = false
+      const stop = effect(() => {
+         model.activeMid()
+         if (armed) throw new Error("paint")
+      })
+      try {
+         armed = true
+         // Unmounting the active peer falls back to home — the throwing publish.
+         await expect(data.applyMountTable([home, { ...a, del: true, ts: 2 }, b])).rejects.toThrow("paint")
+      } finally {
+         armed = false
+         stop()
+      }
+      expect(data.activeStore().mid).toBe("0")
+      await vi.waitFor(() => {
+         expect(data.mountStatus(b.id).state).toBe("ok")
+         expect(data.mountStore(b.id)).toBeDefined()
+         expect(model.mountsRev()).toBe(rev + 1)
+      })
+   })
+})
+
+// A mount whose boot has installed db + names but whose delta chain / latest idx
+// is still in flight is NOT a usable store: counting against it throws. It reads
+// "booting" until the boot finishes, cannot be made active meanwhile (a picker
+// row tap, a #!@<mid> route), and the background peer poll leaves it alone rather
+// than run a second applyDb on the same store under the first.
+describe("a peer still booting", () => {
+   const DELTA = '{"f":0,"a":100,"p":90,"t":"One","c":"one"}\n{"f":0,"a":100,"p":91,"t":"Two","c":"two"}\n'
+   const deltaManifest = {
+      v: 3,
+      m: 2,
+      fetched_at: 100,
+      total_art: 2,
+      na: 2,
+      pack_off: 0,
+      names: { data: { b: 1 }, idx: {}, meta: {}, deltas: { s: "data", r: [1] }, next: { data: 2 } },
+      feeds: { 0: { title: "Delta", url: "http://f/a.xml", total_art: 2, add_idx: 0 } },
+   }
+   const gzipText = async (text: string) =>
+      new Uint8Array(
+         await new Response(
+            new Response(new TextEncoder().encode(text)).body!.pipeThrough(new CompressionStream("gzip")),
+         ).arrayBuffer(),
+      )
+   const peerRecord = async (data: typeof import("./data")) => {
+      const { mountId, normalizeStoreUrl } = await import("./mounts")
+      const url = normalizeStoreUrl(new URL("peer/", data.activeStore().base).href)!
+      const rec = {
+         id: mountId(url),
+         url,
+         label: "",
+         ord: 1,
+         role: "peer" as const,
+         cred: false,
+         added: 1,
+         ts: 1,
+         del: false,
+      }
+      return { rec, home: data.mountRecords().find((r) => r.id === "0")! }
+   }
+
+   async function halfBooted() {
+      await put("/db.gz", { v: 3, m: 1, t: 100 })
+      await put("/manifest/1.gz", emptyManifest(1, 100))
+      await put("/peer/db.gz", { v: 3, m: 2, t: 100 })
+      await put("/peer/manifest/2.gz", deltaManifest)
+      files.set("/peer/data/1.gz", await gzipText(DELTA))
+      const data = await mountInit()
+      let release!: () => void
+      const gate = new Promise<void>((r) => (release = r))
+      const plain = global.fetch
+      const fetchMock = vi.fn(async (input: URL | string, init?: RequestInit) => {
+         const url = input instanceof URL ? input : new URL(String(input))
+         if (url.pathname === "/peer/data/1.gz") await gate // the delta chain is slow
+         return plain(input, init)
+      })
+      global.fetch = fetchMock as unknown as typeof fetch
+      const { rec, home } = await peerRecord(data)
+      const booted = data.applyMountTable([home, rec])
+      await vi.waitFor(() => expect(data.mountStore(rec.id)?.db).toBeDefined()) // db + names in, the chain not
+      return { data, mid: rec.id, release, booted, fetchMock }
+   }
+
+   it("reads booting and cannot become active until its boot finished", async () => {
+      const { data, mid, release, booted } = await halfBooted()
+      expect(data.mountStatus(mid).state).toBe("booting")
+      expect(data.setActive(mid)).toBe(false)
+      expect(data.activeStore().mid).toBe("0")
+      release()
+      expect(await booted).toEqual([mid])
+      expect(data.mountStatus(mid).state).toBe("ok")
+      expect(data.setActive(mid)).toBe(true)
+   })
+
+   it("is left alone by the background peer poll while it boots", async () => {
+      const { data, mid, release, booted, fetchMock } = await halfBooted()
+      fetchMock.mockClear()
+      await data.refreshPeers()
+      const peerFetches = fetchMock.mock.calls.filter(([u]) => String(u).includes("/peer/"))
+      expect(peerFetches).toEqual([])
+      release()
+      await booted
+      expect(data.mountStatus(mid).state).toBe("ok")
+   })
+
+   it("an errored peer keeps its error chip while a retry boots it", async () => {
+      await put("/db.gz", { v: 3, m: 1, t: 100 })
+      await put("/manifest/1.gz", emptyManifest(1, 100))
+      const data = await mountInit()
+      const { rec, home } = await peerRecord(data)
+      expect(await data.applyMountTable([home, rec])).toEqual([]) // /peer/db.gz is absent: the boot fails
+      expect(data.mountStatus(rec.id).state).toBe("error")
+      await put("/peer/db.gz", { v: 3, m: 1, t: 100 })
+      await put("/peer/manifest/1.gz", emptyManifest(1, 100))
+      let release!: () => void
+      const gate = new Promise<void>((r) => (release = r))
+      const plain = global.fetch
+      global.fetch = vi.fn(async (input: URL | string, init?: RequestInit) => {
+         await gate
+         return plain(input, init)
+      }) as unknown as typeof fetch
+      const retry = data.refreshPeers()
+      await Promise.resolve()
+      expect(data.mountStatus(rec.id).state).toBe("error") // no chip flicker mid-retry
+      release()
+      await retry
+      expect(data.mountStatus(rec.id).state).toBe("ok")
+   })
+})

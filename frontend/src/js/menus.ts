@@ -43,9 +43,12 @@ export interface MenuDeps {
    // (a real article's chrome is the readerChrome effect's). A navigation, so
    // app.ts owns it (S17).
    rerunPlaceholder: () => void
-   // Land on the home store's [ALL] list — after the ACTIVE store was unmounted.
-   // A navigation, so app.ts owns it.
-   showHomeList: () => void
+   // Run a mount-table adoption as ONE app command: `adopt` applies the table and
+   // answers whether the ACTIVE store was unmounted, in which case app.ts lands on
+   // the home store's [ALL] list. A navigation, so app.ts owns it — and holds
+   // rendering across both, so no surface rebuilds under the unmounted store's
+   // lane in between.
+   rehome: (adopt: () => boolean) => void
 }
 
 let d: MenuDeps
@@ -204,12 +207,27 @@ function settingsMenuItems(): MenuItem[] {
 // the pickerRows effect (data bumps mountsRev). The surfaces keep their lane —
 // unless the ACTIVE store was unmounted: data then falls back to home before its
 // first await, but the lane, the list and the hash still name the store that is
-// gone.
+// gone, so the adoption runs inside app.ts's rehome command.
+//
+// The roots are posted as soon as data has applied the table (synchronously, so
+// a new peer's fetches are routed from its first pack on) and again once the
+// boots settle, success or not. A rejected adoption — the fallback's publish
+// threw — is reported like any other failure, never left unhandled.
 export function afterMountChange(recs: MountRecord[]): void {
-   const was = data.activeStore().mid
-   const adopted = data.applyMountTable(recs)
-   if (data.activeStore().mid !== was) d.showHomeList()
-   void adopted.then(() => postMounts())
+   let adopted: Promise<string[]> = Promise.resolve([])
+   d.rehome(() => {
+      const was = data.activeStore().mid
+      adopted = data.applyMountTable(recs)
+      return data.activeStore().mid !== was
+   })
+   postMounts()
+   void adopted.then(
+      () => postMounts(),
+      (e: unknown) => {
+         postMounts()
+         d.showError(e)
+      },
+   )
 }
 
 // Open the Stores dialog (§3): mount by URL, unmount a peer, or forget its

@@ -646,6 +646,68 @@ describe("layout inputs mirror into the model", () => {
       expect(list.show).toHaveBeenCalledTimes(1)
       expect(list.reconcile.mock.invocationCallOrder[0]).toBeGreaterThan(list.show.mock.invocationCallOrder[0])
    })
+
+   it("unmounting the active store from the Stores dialog builds the home list once, never under the gone store's lane", async () => {
+      let active = "0"
+      const activeStore = data.activeStore
+      data.activeStore = () => ({ mid: active, base: new URL("http://localhost/") })
+      data.setActive.mockImplementationOnce((m: string) => {
+         active = m
+         M?.activeMid.set(m)
+         return true
+      })
+      try {
+         await boot("#!@s7:5")
+         expect(M!.activeMid()).toBe("s7")
+         nav.applyFilter.mockClear()
+         list.show.mockClear()
+         list.reconcile.mockClear()
+         data.applyMountTable.mockImplementationOnce(async () => {
+            active = "0"
+            M!.activeMid.set("0") // setActive(home) publishes before the first await
+         })
+         // A dialog click: outside any flush, so the publish runs its effects at once.
+         ;(await import("./menus")).afterMountChange([])
+         await flush()
+         expect(nav.applyFilter).toHaveBeenCalledWith([])
+         expect(list.show).toHaveBeenCalledTimes(1)
+         const filtered = nav.applyFilter.mock.invocationCallOrder[0]
+         for (const at of list.reconcile.mock.invocationCallOrder) expect(at).toBeGreaterThan(filtered)
+      } finally {
+         data.activeStore = activeStore
+      }
+   })
+
+   it("a mount change that keeps the active store leaves its lane and list alone", async () => {
+      await boot("#!news")
+      nav.applyFilter.mockClear()
+      list.show.mockClear()
+      ;(await import("./menus")).afterMountChange([]) // e.g. a peer mounted beside it
+      await flush()
+      expect(nav.applyFilter).not.toHaveBeenCalled()
+      expect(list.show).not.toHaveBeenCalled()
+   })
+
+   it("unmounting the active store by a merge routes to the home list, dropping its lane", async () => {
+      let active = "s7"
+      const activeStore = data.activeStore
+      data.activeStore = () => ({ mid: active, base: new URL("http://localhost/") })
+      try {
+         await boot("#!@s7:5")
+         nav.applyFilter.mockClear()
+         list.show.mockClear()
+         data.applyMountTable.mockImplementationOnce(async () => {
+            active = "0" // data falls back to home before its first await
+         })
+         M!.profileMountsRev.update((n) => n + 1) // a sync merge dropped s7
+         await flush()
+         expect(nav.applyFilter).toHaveBeenCalledWith([])
+         expect(list.show).toHaveBeenCalledTimes(1)
+         expect(history.replaceState).toHaveBeenLastCalledWith(null, "", "#")
+      } finally {
+         data.activeStore = activeStore
+      }
+   })
 })
 
 describe("route() — surface selection from the hash", () => {
@@ -1634,6 +1696,59 @@ describe("split view (body.srr-split)", () => {
          vi.unstubAllGlobals()
          if (probe) nav.probeCurrent.mockImplementation(probe)
       }
+   })
+
+   // chronIdx is only unique within a mount: the article a hidden reader still
+   // holds belongs to the store it was painted from, never to the one switched to.
+   // nav clears the cursor on a store switch (mocked here, so setActive does it).
+   const switchStoreClearingCursor = (mid: string) => {
+      data.setActive.mockImplementationOnce((m: string) => {
+         M?.activeMid.set(m)
+         seedCursor(-1)
+         return true
+      })
+      pickerHooks()!.onSwitchMount(mid)
+   }
+
+   it("a crossing after a narrow store switch re-seats no cursor from the store left behind", async () => {
+      stubBreakpoint(false)
+      try {
+         await boot()
+         nav.fromHash.mockImplementationOnce(async () => {
+            seedCursor(2)
+            return showFeed()
+         })
+         hashTo("#2")
+         await flush()
+         M!.focus.set("list")
+         switchStoreClearingCursor("s7")
+         await flush()
+         nav.select.mockClear()
+         crossSplit(true)
+         await flush()
+         expect(nav.select).not.toHaveBeenCalled()
+         expect(seeded.cursor.chron).toBe(-1)
+      } finally {
+         crossSplit(false)
+         vi.unstubAllGlobals()
+      }
+   })
+
+   it("a store switch beside a live pane leaves it resting, even once the list claims the cursor", async () => {
+      await boot()
+      await setSplit(true)
+      nav.fromHash.mockImplementationOnce(async () => {
+         seedCursor(2)
+         return showFeed()
+      })
+      hashTo("#2")
+      await flush()
+      M!.focus.set("list") // the list holds the keyboard; the article stays live in the pane
+      switchStoreClearingCursor("s7")
+      seedCursor(9) // the new store's list seeds its anchored row
+      await flush()
+      expect((await import("./layout")).layout().readerLive).toBe(false)
+      expect(reader().classList.contains("srr-reader-empty")).toBe(true) // the resting panel, not store "0"'s article
    })
 })
 

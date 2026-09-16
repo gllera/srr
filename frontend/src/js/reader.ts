@@ -23,6 +23,7 @@ import { restartAnimation } from "./motion"
 import { mountLabel } from "./mounts"
 import * as nav from "./nav"
 import * as player from "./player"
+import { onChange } from "./signals"
 import { wireTTS } from "./tts"
 
 // The real reader's nodes in article-view's shape. index.html declares these; the
@@ -207,6 +208,20 @@ let mountedMid = ""
 // pair — nav.select needs both, and data.getFeedId(chron) would be a second
 // source of truth for something render() already has in hand.
 let mountedFeed = -1
+
+// A store switch leaves this surface holding an article of the store it was
+// painted from. chronIdx is only unique within a mount, so it is not painted
+// for the NEW store: a narrow reader hidden under the list would otherwise
+// hand its chron to a later crossing's cursor re-seat, and a split pane would
+// count as live the moment the new store's list seeded the cursor. The DOM stays
+// as it is — a resting paint or the next landing replaces it — and mountedMid
+// still keys the media harvest to the store the content came from.
+onChange(
+   () => model.activeMid(),
+   (mid) => {
+      if (mid !== mountedMid) model.readerPainted.set(false)
+   },
+)
 // State a restore has QUEUED but not yet applied (currentTime is only settable
 // once duration is known). Without this a second render of the same article
 // before the metadata lands — a re-route, a post-refresh re-probe — would
@@ -445,7 +460,8 @@ function renderEmptyReader(o: IShowFeed, resting = false) {
 
 // Has an article been PAINTED into this surface and not replaced since?
 // model.readerPainted — set by render()'s article branch, cleared by every
-// placeholder path — not model.cursor, which the LIST also moves.
+// placeholder path and by a store switch — not model.cursor, which the LIST
+// also moves.
 // The flag makes the answer true only where a render actually happened:
 // index.html ships `.srr-reader` empty, with neither an article in it nor
 // `.srr-reader-empty` on it. Whether the host is MOUNTED is not this function's

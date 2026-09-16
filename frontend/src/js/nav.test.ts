@@ -2196,6 +2196,27 @@ describe("prefetch abort", () => {
       expect(prefetched.getAttribute("src")).toBe("")
    })
 
+   it("aborts the prior prefetch when the active store switches", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      data.loadArticle.mockImplementation(async (idx: number) =>
+         makeArticle({ c: `<img src="http://example.com/${idx}.jpg">` }),
+      )
+      await nav.fromHash("0")
+      await nav.right()
+      await flushIdle()
+      const prefetched = images[0]
+      expect(prefetched.getAttribute("src")).not.toBe("")
+
+      asMid("s7")
+      try {
+         model.activeMid.set("s7")
+         expect(prefetched.getAttribute("src")).toBe("")
+      } finally {
+         data.activeStore = realActiveStore
+         model.activeMid.set("0")
+      }
+   })
+
    it("aborts the prior prefetch when a filter switch resolves to a placeholder", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
       data.db.feeds[9] = makeFeed({ id: 9, total_art: 0 }) // a pickable empty feed → placeholder
@@ -3942,6 +3963,33 @@ describe("store switch", () => {
       asMid("s7")
       model.activeMid.set("s7") // data.setActive's write
       expect(model.cursor()).toEqual({ chron: -1, feedId: -1 })
+   })
+
+   it("drops the previous store's neighbour probes: the next step looks up afresh", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      await nav.goTo(0)
+      await nav.right() // on 1; the → probe caches 2
+      asMid("s7")
+      model.activeMid.set("s7")
+      await nav.right()
+      expect(nav.currentChron()).toBe(0) // stepped from the cleared cursor, not onto the cached 2
+   })
+
+   it("drops the saved ghost: the previous store's un-saved article steers nothing here", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      nav.toggleSaved(4) // queue: 4 → 1 → 3
+      nav.toggleSaved(1)
+      nav.toggleSaved(3)
+      await nav.switchFilter(nav.SAVED_TOKEN)
+      await nav.right() // on the middle save (1)
+      nav.toggleSaved(1) // the ghost: former older 4, newer 3
+      asMid("s7") // nothing is saved in s7
+      model.activeMid.set("s7")
+      nav.select(1, 1) // the same number, now naming s7's article
+      const p = await nav.probeCurrent()
+      expect(p!.has_left).toBe(false)
+      expect(p!.has_right).toBe(false)
+      expect(p!.right_count).toBe(0)
    })
 })
 

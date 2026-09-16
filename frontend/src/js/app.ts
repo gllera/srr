@@ -969,7 +969,18 @@ async function init() {
       showSnackbar,
       hideSnackbar,
       rerunPlaceholder,
-      showHomeList: () => route(""),
+      // A mount-table adoption that unmounted the active store falls back to
+      // home inside `adopt` and publishes the switch at once; the hold keeps the
+      // list from rebuilding under the gone store's lane before route("") resets
+      // it (route takes its own hold synchronously, before this one ends).
+      rehome: (adopt) => {
+         const hold = beginRendering()
+         try {
+            if (adopt()) void route("")
+         } finally {
+            endRendering(hold)
+         }
+      },
    })
 
    // The filter picker overlay: a pick closes it and routes per surface — from

@@ -178,9 +178,13 @@ let active: Store = home
 // Per-mount boot/refresh status for the UI's mount card + error chip (§8.3).
 // A failed mount degrades to a per-mount error state — it never blanks the
 // reader (MS4). The chip variant is derived from `kind` + navigator.onLine.
+// "booting" covers a mount's FIRST boot: applyDb installs db + names before its
+// delta chain and latest idx pack land, so `store.db` alone does not make the
+// store usable (a count against it throws). A retry of an errored mount keeps
+// its error chip until it succeeds.
 export type MountKind = "" | "offline" | "toonew" | "error"
 export interface MountStatus {
-   state: "ok" | "error"
+   state: "ok" | "booting" | "error"
    kind: MountKind
    error: string // human chip text ("" when ok)
 }
@@ -266,7 +270,8 @@ export function mountRecords(): MountRecord[] {
 // Re-point the active lane. Keeps the `db` mirror coherent (nav/list/picker read
 // data.db). Returns false when the mid names no mounted, successfully-booted
 // store (the caller stays on the current lane). A peer in an error state has no
-// usable db, so it cannot become active.
+// usable db, and one still booting has only part of one, so neither can become
+// active.
 export function setActive(mid: string): boolean {
    const s = stores.get(mid)
    if (!s || !s.db || mountStatus(mid).state !== "ok") return false
@@ -303,6 +308,7 @@ function classifyError(e: unknown): { kind: MountKind; error: string } {
 // that only to decide the all-failed global-popup case). A store that is not
 // `active` never touches the `db` mirror (applyDb guards on `store === active`).
 async function bootStore(s: Store): Promise<void> {
+   if (!statuses.has(s.mid)) statuses.set(s.mid, { state: "booting", kind: "", error: "" })
    try {
       await applyDb(s, await s.dbLoad)
       statuses.set(s.mid, { state: "ok", kind: "", error: "" })
@@ -642,10 +648,9 @@ export async function applyMountTable(recs: MountRecord[]): Promise<string[]> {
          backoffs.delete(mid)
       }
    }
-   // If the active lane was unmounted, fall back to home.
-   if (!stores.has(active.mid)) setActive(home.mid)
-
-   // Create + boot newly-added mounts.
+   // Create + boot newly-added mounts. The boot chain — the mountsRev bump
+   // included — is started before the fallback below, so a throwing effect over
+   // the active store cannot skip it.
    const fresh: Store[] = []
    for (const m of activeMounts(mountTable)) {
       if (!stores.has(m.id)) {
@@ -654,9 +659,15 @@ export async function applyMountTable(recs: MountRecord[]): Promise<string[]> {
          fresh.push(s)
       }
    }
-   await Promise.allSettled(fresh.map((s) => bootStore(s)))
-   model.mountsRev.update((n) => n + 1)
-   return fresh.filter((s) => mountStatus(s.mid).state === "ok").map((s) => s.mid)
+   const booted = Promise.allSettled(fresh.map((s) => bootStore(s))).then(() => {
+      model.mountsRev.update((n) => n + 1)
+      return fresh.filter((s) => mountStatus(s.mid).state === "ok").map((s) => s.mid)
+   })
+   // If the active lane was unmounted, fall back to home — still before the first
+   // await (menus.afterMountChange reads the new active store synchronously). A
+   // throw here rejects this call; the boot above runs on regardless.
+   if (!stores.has(active.mid)) setActive(home.mid)
+   return booted
 }
 
 // tailCovered is the pack↔delta seam: chrons below it are served by the pack
@@ -792,6 +803,9 @@ export async function refreshPeers(): Promise<boolean> {
          .map(async (s) => {
             const b = backoffs.get(s.mid)
             if (b && now < b.nextAt) return // still in backoff
+            // Its first boot is still running (applyMountTable starts it outside
+            // any mutex): a second applyDb on the same store would interleave.
+            if (mountStatus(s.mid).state === "booting") return
             try {
                const needsBoot = !s.db || mountStatus(s.mid).state === "error"
                if (needsBoot) {

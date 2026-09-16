@@ -1222,6 +1222,17 @@ describe("mount switcher (§6.3)", () => {
       expect(peerRow.querySelector(".srr-mount-chip")?.textContent).toBe("Unreachable")
    })
 
+   it("shows a loading chip for a mount still booting instead of a rollup", async () => {
+      data.mountedStores.mockReturnValue([home, peer])
+      data.mountStatus.mockImplementation((mid: string) =>
+         mid === "s3f9a1c22" ? { state: "booting", kind: "", error: "" } : { state: "ok", kind: "", error: "" },
+      )
+      const picker = await mount()
+      picker.render()
+      const peerRow = $(".srr-picker").querySelector('[data-mount="s3f9a1c22"]') as HTMLElement
+      expect(peerRow.querySelector(".srr-mount-chip")?.textContent).toBe("Loading…")
+   })
+
    it("clicking a mount row calls onSwitchMount with its mid", async () => {
       data.mountedStores.mockReturnValue([home, peer])
       const picker = await mount()

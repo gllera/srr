@@ -644,6 +644,7 @@ function renderFilterList(): void {
 // the status→text mapping — the Stores dialog (menus.ts) wears the same words.
 export function mountChip(status: data.MountStatus): string {
    if (status.state === "ok") return ""
+   if (status.state === "booting") return "Loading…"
    if (status.kind === "toonew") return "Too new"
    if (status.kind === "offline") return navigator.onLine === false ? "Offline" : "Unreachable"
    return "Error"
