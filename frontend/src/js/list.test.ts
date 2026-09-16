@@ -2456,4 +2456,152 @@ describe("list", () => {
       expect(list.followCursor()).toBeNull() // joins the rebuild in flight
       await build
    })
+
+   // A row, a page or a cursor claim applies the device state and the cursor as
+   // they are when it lands, not as they were when its build or fetch started.
+   describe("rows and cursor claims use the state current when they apply", () => {
+      const tick = () => new Promise((r) => setTimeout(r, 0))
+      const unread = () =>
+         $rows()
+            .filter((a) => a.classList.contains("srr-row-unread"))
+            .map((a) => a.dataset.chron)
+      // loadMeta held for the chrons `held` names; everything else answers at once.
+      const gateMeta = (held: (chron: number) => boolean) => {
+         let release!: () => void
+         const gate = new Promise<void>((r) => (release = r))
+         data.loadMeta.mockImplementation(async (chron: number) => {
+            if (held(chron)) await gate
+            const a = data._arts.get(chron)!
+            return { f: a.f, w: a.p || a.a, t: a.t }
+         })
+         return () => {
+            release()
+            data.loadMeta.mockImplementation(async (chron: number) => {
+               const a = data._arts.get(chron)!
+               return { f: a.f, w: a.p || a.a, t: a.t }
+            })
+         }
+      }
+
+      // The fast path centres the anchor; in ★ Saved a row un-saved from the
+      // reader must already be gone, or its removal (listRows' refresh, later)
+      // shifts the centred row by its height.
+      it("the show() fast path drops ★ Saved rows un-saved elsewhere before centring the anchor", async () => {
+         setIndex(8)
+         nav.filter.saved = true
+         nav._setSaved([2, 3, 4, 5, 6])
+         await list.render()
+         expect($chrons()).toContain(5)
+         nav._setPos(4)
+         nav._setSaved([2, 3, 4, 6]) // 5 un-saved from the reader, above the anchor
+         const fiveAtScroll: boolean[] = []
+         vi.mocked(window.scrollTo).mockImplementation(() => void fiveAtScroll.push($chrons().includes(5)))
+         await list.show()
+         expect(fiveAtScroll).toEqual([false])
+      })
+
+      // A fill paints the read state as of the fill, not as of the build.
+      it("a row filled after a mid-fill seen write paints the new read state", async () => {
+         setIndex(4)
+         const release = gateMeta((c) => c === 0)
+         const p = list.render()
+         await tick()
+         nav._setSeen({ "feed:1": 3 }) // read everything while row 0's card is in flight
+         list.refresh()
+         release()
+         await p
+         expect(unread()).toEqual([])
+      })
+
+      it("a page appended after a mid-fetch seen write paints the new read state", async () => {
+         setIndex(40)
+         await list.render() // 39..10
+         const release = gateMeta((c) => c < 10)
+         const page = list.loadMore()
+         await tick()
+         nav._setSeen({ "feed:1": 39 })
+         release()
+         await page
+         expect($chrons()).toContain(0)
+         expect(unread().filter((c) => Number(c) < 10)).toEqual([]) // the page, not the rows already on screen
+      })
+
+      it("a page prepended after a mid-fetch seen write paints the new read state", async () => {
+         setIndex(100)
+         nav._setAnchor(50)
+         await list.render() // a window around 50, newer rows still to page in
+         const top = Math.max(...$chrons())
+         const release = gateMeta((c) => c > top)
+         const page = list.loadNewer()
+         await tick()
+         nav._setSeen({ "feed:1": 99 })
+         release()
+         await page
+         expect(Math.max(...$chrons())).toBeGreaterThan(top)
+         expect(unread().filter((c) => Number(c) > top)).toEqual([]) // the page, not the rows already on screen
+      })
+
+      it("a search row filled after a mid-fill seen write paints the new read state", async () => {
+         setIndex(3)
+         nav._setSearch("title")
+         const release = gateMeta((c) => c === 0)
+         const p = list.render()
+         await tick()
+         nav._setSeen({ "feed:1": 2 })
+         list.refresh()
+         release()
+         await p
+         expect(unread()).toEqual([])
+      })
+
+      // A rebuild that started before a landing must not claim the cursor
+      // the landing just wrote — the reader would show one article while the
+      // cursor, the star and the arrows describe the list's seed.
+      it("a rebuild does not claim the cursor once a landing moved it mid-build", async () => {
+         setIndex(8)
+         nav._setListAnchor(2) // the lane's resume row: a claim candidate
+         let release!: () => void
+         const gate = new Promise<void>((r) => (release = r))
+         const feedLeft = nav.feedLeft.getMockImplementation()!
+         nav.feedLeft.mockImplementationOnce(async (from: number) => {
+            await gate
+            return feedLeft(from)
+         })
+         nav.select.mockClear()
+         const p = list.render()
+         await tick()
+         nav._setPos(6) // a landing committed while the build was walking
+         release()
+         await p
+         expect(nav.select).not.toHaveBeenCalled()
+         expect(nav.currentChron()).toBe(6)
+      })
+
+      it("a search rebuild does not claim the cursor once a landing moved it mid-build", async () => {
+         setIndex(8)
+         nav._setSearch("title")
+         let release!: () => void
+         const gate = new Promise<void>((r) => (release = r))
+         const feedLeft = nav.feedLeft.getMockImplementation()!
+         nav.feedLeft.mockImplementationOnce(async (from: number) => {
+            await gate
+            return feedLeft(from)
+         })
+         nav.select.mockClear()
+         const p = list.render()
+         await tick()
+         nav._setPos(3)
+         release()
+         await p
+         expect(nav.select).not.toHaveBeenCalled()
+      })
+
+      it("a rebuild with no landing mid-build still claims its resume row", async () => {
+         setIndex(8)
+         nav._setListAnchor(2)
+         nav.select.mockClear()
+         await list.render()
+         expect(nav.select).toHaveBeenCalledWith(2, 1)
+      })
+   })
 })

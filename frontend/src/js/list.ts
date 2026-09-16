@@ -1008,6 +1008,18 @@ function mayClaimCursor(): boolean {
    return !isSplit() || !readerHoldsCursor()
 }
 
+// Seat the cursor on this build's seed, when the build may. Not once a landing
+// moved the cursor since the build started (render() records it in builtFor):
+// that landing is about to render ITS article, and a claim here would leave the
+// reader showing it while the cursor — the star, the arrows, the highlight —
+// named the seed. Re-checked after the feed-id await for the same reason.
+async function claimCursor(my: object, seed: number): Promise<void> {
+   const claimable = () => my === tok && nav.currentChron() === builtFor && seed !== builtFor && mayClaimCursor()
+   if (!claimable()) return
+   const feedId = await data.getFeedId(seed)
+   if (claimable()) nav.select(seed, feedId)
+}
+
 // The global ends of the chron axis. Both shortcuts hold only where display
 // order IS chronIdx order (feed/tag/[ALL]/search): ★ Saved walks by save-index,
 // so a saved chron 0 can sit mid-queue and only that walk's own exhaustion (a
@@ -1096,8 +1108,8 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    // still establishes the cursor on the row in view (moveSelection) and a fresh
    // [ALL] boot shows no selection.
    // getFeedId is resident — feedLeft just walked the seed's idx pack — no fetch.
-   if (anchoredMid && seed !== nav.currentChron() && mayClaimCursor()) {
-      nav.select(seed, await data.getFeedId(seed))
+   if (anchoredMid) {
+      await claimCursor(my, seed)
       if (my !== tok) return
    }
 
@@ -1189,7 +1201,7 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
       if (my !== tok) return
       const card = await data.loadMeta(chronsDesc[k])
       if (my !== tok) return
-      fillRow(rows[k], card, seen)
+      fillRow(rows[k], card, seenNow()) // the read state as of this fill, not of the build
       pendingFill.push(rows[k])
       if (typeof requestAnimationFrame !== "function") flushFill()
       else if (!fillFrame) fillFrame = requestAnimationFrame(flushFill)
@@ -1281,7 +1293,7 @@ async function renderSearch(my: object, onInteractive?: () => void): Promise<voi
    // rowEl paints .srr-row-current on it. Under split the reader's open article
    // keeps the cursor instead (mayClaimCursor) — a query is typed WHILE reading,
    // and the arrows must keep stepping from what is on screen.
-   if (seed !== nav.currentChron() && mayClaimCursor()) nav.select(seed, await data.getFeedId(seed))
+   await claimCursor(my, seed)
    if (my !== tok) return
 
    const older = await walk(my, seed, BATCH, "older")
@@ -1316,7 +1328,7 @@ async function renderSearch(my: object, onInteractive?: () => void): Promise<voi
          if (my !== tok) return
          const card = await data.loadMeta(older.chrons[k])
          if (my !== tok) return
-         fillRow(rows[k], card, seen)
+         fillRow(rows[k], card, seenNow())
          pinHeights([rows[k]])
       })
    }
@@ -1350,10 +1362,13 @@ export function invalidate(): void {
 // anchor immediately instead of land-once.
 // The fast path re-derives nothing itself: the listRows effect refreshes a list
 // whose mount, seen map or saved set moved, when this command's rendering hold
-// ends.
+// ends. The one exception is geometry: in ★ Saved that refresh DROPS rows
+// un-saved from the reader, and a dropped row above the anchor would shift it
+// by its height after the centring scroll — so those rows go first.
 export async function show(anchorNow = false, onInteractive?: () => void): Promise<void> {
    const pos = nav.currentChron()
    if (builtKey === membershipKey() && rowsEl && pos >= 0 && findRow(pos)) {
+      if (nav.isSavedFilter()) dropUnsavedRows(savedNow())
       scrollChronToView(pos)
       notifyScroll()
       onInteractive?.() // reuse path is already interactive
@@ -1419,9 +1434,7 @@ export function refresh(): void {
    if (!rowsEl) return
    const seen = seenNow()
    const savedSet = savedNow()
-   const savedView = nav.isSavedFilter()
    const current = nav.currentChron()
-   let removedAny = false
    rowsEl.querySelectorAll<HTMLElement>("a.srr-row").forEach((a) => {
       const chron = Number(a.dataset.chron)
       a.classList.toggle("srr-row-unread", nav.isRowUnread(chron, Number(a.dataset.feed), seen))
@@ -1432,18 +1445,25 @@ export function refresh(): void {
       // element child — an O(1) read where the descendant query ran ~90 times per
       // refresh(), and refresh() runs on every reader-pane step under split.
       a.lastElementChild?.setAttribute("aria-pressed", String(saved))
-      // In the Saved view, an article un-saved from the reader is gone from the
-      // feed — drop its row on the way back.
-      if (savedView && !saved) {
-         a.remove()
-         removedAny = true
-      }
    })
-   if (savedView && removedAny) {
-      relabelDividers() // drop any day divider orphaned by the removed rows (#11)
-      if (rowsEl && !rowsEl.querySelector("a.srr-row")) showEmptyState() // (#1)
-   }
+   if (nav.isSavedFilter()) dropUnsavedRows(savedSet)
    syncRovingTab() // the live current highlight (or a saved-view removal) may have moved the cursor
+}
+
+// In the Saved view, an article un-saved from the reader is gone from the feed —
+// drop its row on the way back. Its own step because show()'s fast path must run
+// it BEFORE centring the anchor (a removal above the anchor moves it).
+function dropUnsavedRows(savedSet: Set<number>): void {
+   if (!rowsEl) return
+   let removedAny = false
+   rowsEl.querySelectorAll<HTMLElement>("a.srr-row").forEach((a) => {
+      if (savedSet.has(Number(a.dataset.chron))) return
+      a.remove()
+      removedAny = true
+   })
+   if (!removedAny) return
+   relabelDividers() // drop any day divider orphaned by the removed rows (#11)
+   if (rowsEl && !rowsEl.querySelector("a.srr-row")) showEmptyState() // (#1)
 }
 
 // Force a rebuild regardless of builtKey — used after an unseen-only toggle or a
@@ -1582,10 +1602,12 @@ async function fetchOlder(my: object): Promise<void> {
          exhaustedBottom = true
          return
       }
-      const seen = seenNow()
-      const savedSet = savedNow()
       const arts = await Promise.all(chrons.map((c) => data.loadMeta(c)))
       if (my !== tok || !rowsEl) return
+      // Read AFTER the fetch: a seen/saved write that landed meanwhile is already
+      // in the rows it repainted, and this page must not undo it.
+      const seen = seenNow()
+      const savedSet = savedNow()
       // Commit the window cursor only after loadMeta resolves: a transient
       // rejection must not advance oldest/exhaustedBottom past a batch that never
       // rendered, which would permanently skip those rows on the next page.
@@ -1627,10 +1649,10 @@ async function fetchNewer(my: object): Promise<void> {
          exhaustedTop = true
          return
       }
-      const seen = seenNow()
-      const savedSet = savedNow()
       const arts = await Promise.all(chrons.map((c) => data.loadMeta(c)))
       if (my !== tok) return
+      const seen = seenNow() // after the fetch, as in fetchOlder
+      const savedSet = savedNow()
       // Commit the cursor only after loadMeta resolves (see fetchOlder).
       newest = chrons[chrons.length - 1]
       if (exhausted || atNewestEnd(newest)) exhaustedTop = true
