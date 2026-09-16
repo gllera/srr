@@ -15,6 +15,7 @@ import * as model from "./model"
 import * as nav from "./nav"
 import { forgetStoreState } from "./mounts"
 import { isPinned, listPins, pinFilter, unpinFilter } from "./pin"
+import { isSavedIn, publishedByToggle } from "./saved"
 import { onChange } from "./signals"
 
 // Offline-pin progress: show a transient "Downloading N / M…" note in the
@@ -182,8 +183,9 @@ export async function syncSavedAssets(chron: number, saved: boolean): Promise<vo
    // registry entry to release yet. Pinning after that would leave an un-saved
    // article's media in PINNED — a bucket enforceCacheBounds never touches and
    // only a matching unpin clears — with a registry entry that also makes those
-   // names read as "still needed" when some other scope is released.
-   if (!nav.isSaved(chron)) return
+   // names read as "still needed" when some other scope is released. Asked of
+   // the store the save was made in: the active one may have changed meanwhile.
+   if (!isSavedIn(store.mid, chron)) return
    const names = extractAssetKeys(article?.c ?? "")
    if (names.length === 0) return
    pinFilter(key, names, store.mid)
@@ -194,15 +196,18 @@ export async function syncSavedAssets(chron: number, saved: boolean): Promise<vo
 // FMT2a as an effect over model.saved (state-store P5): a chron that joined the
 // set gets its assets pinned, one that left gets them released. Every save and
 // un-save — the reader's star, a row's star, a row swipe — is a write saved.ts
-// publishes, so this one subscription replaces the hook they all used to call. A
-// STORE SWITCH or a PROFILE MERGE replaces the whole set at once; both
-// re-baseline without syncing, because neither is a save made on this device —
-// exactly the scope the old hook had.
+// publishes, so this one subscription replaces the hook they all used to call.
+// Only a TOGGLE is a save made on this device (saved.publishedByToggle()); a
+// store switch, a profile merge, another tab's write and the boot publish
+// replace the whole set and only re-baseline — exactly the scope the old hook
+// had. Gating on the publish, not on activeMid/profileRev moving in the same
+// run, is what holds when one merge publishes twice in two flush passes (it
+// also switched stores): the pair between them belong to two stores.
 export function initSavedAssets(): () => void {
    return onChange(
-      () => [model.activeMid(), model.profileRev(), model.saved()] as const,
-      ([m, r, nextArr], [prevMid, prevMerges, beforeArr]) => {
-         if (m !== prevMid || r !== prevMerges) return
+      () => model.saved(),
+      (nextArr, beforeArr) => {
+         if (!publishedByToggle()) return
          const next = new Set(nextArr)
          const before = new Set(beforeArr)
          // Failures are silent: a save must never fail on account of an optional cache write.

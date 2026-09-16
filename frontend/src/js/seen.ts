@@ -77,10 +77,15 @@ function publishMap(seen: Record<string, number>): void {
    model.seen.set({ ...seen })
 }
 
+// Another tab wrote this store's map while this one was hidden (the storage
+// listener below): the model is behind localStorage until the next publish.
+let staleFromOtherTab = false
+
 // Publish the ACTIVE store's seen map as stored — for a write that bypassed
 // persistSeen (a profile merge wrote localStorage itself) and for the first
 // publish after boot. The only other writer of model.seen is publishMap.
 export function publishSeen(): void {
+   staleFromOtherTab = false
    model.seen.set(readSeen())
 }
 
@@ -99,9 +104,19 @@ onChange(
 
 // Another tab wrote this store's seen map (the event fires in every OTHER tab;
 // a null key is a clear()): republish, so this tab's rows, badge and pill follow
-// — the list reads the model, never localStorage.
+// — the list reads the model, never localStorage. A HIDDEN tab only notes it:
+// every republish re-runs the unread tally, the chrome probe and the row pass,
+// once per article the other tab steps through, for a surface nobody sees. It
+// catches up once, on becoming visible (staleFromOtherTab, cleared by every
+// publish). Nothing is lost meanwhile — this tab's own writes read localStorage
+// fresh and publish the whole map.
 window.addEventListener("storage", (e) => {
-   if (e.key === null || e.key === seenK()) publishSeen()
+   if (e.key !== null && e.key !== seenK()) return
+   if (document.hidden) staleFromOtherTab = true
+   else publishSeen()
+})
+document.addEventListener("visibilitychange", () => {
+   if (!document.hidden && staleFromOtherTab) publishSeen()
 })
 
 // The parsed seen map (feed key → last-viewed chronIdx) under its list-surface

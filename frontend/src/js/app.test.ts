@@ -270,6 +270,7 @@ vi.mock("./dropdown", async (importOriginal) => ({ ...(await importOriginal<obje
 const sync = vi.hoisted(() => ({
    init: vi.fn(),
    syncNow: vi.fn(async () => {}),
+   pushSoon: vi.fn(), // saved.ts (real here) calls it on a toggle
 }))
 vi.mock("./sync", () => sync)
 
@@ -4606,6 +4607,9 @@ describe("service-worker update notice", () => {
 })
 
 describe("saved-article asset pinning", () => {
+   // The wiring: app.ts registers pin-ui's effect over model.saved, and a save
+   // made through saved.ts (the real module in this registry — only ./nav is
+   // mocked) is pinned. The pinning rules themselves live in pin-ui.test.ts.
    const withSW = async (run: (sw: { postMessage: ReturnType<typeof vi.fn> }) => Promise<void>) => {
       const fakeSW = { postMessage: vi.fn() }
       Object.defineProperty(navigator, "serviceWorker", {
@@ -4618,106 +4622,47 @@ describe("saved-article asset pinning", () => {
          Object.defineProperty(navigator, "serviceWorker", { value: undefined, configurable: true })
       }
    }
-   // The live saved set the pin path re-reads after its await. A real set (not a
-   // constant) is what lets a test un-save mid-flight the way a double-tapped
-   // star does.
-   const savedSet = new Set<number>()
-   beforeEach(() => {
-      savedSet.clear()
-      nav.isSaved.mockImplementation((chron: number) => savedSet.has(chron))
-   })
+   const toggle = async (chron: number) =>
+      (await import("./saved")).toggleSaved(chron, { savedMode: false, pos: -1, onQueueChange: () => {} })
 
    const KEYS = ["assets/ab/0123456789abcdef.jpg", "assets/cd/fedcba9876543210.mp4"]
 
-   it("pins the article's assets on save and records the scope", async () => {
+   it("pins the article's assets on a save made here and records the scope", async () => {
       await withSW(async (sw) => {
          data.loadArticle.mockResolvedValue({ f: 1, a: 0, p: 0, c: "<p>x</p>" })
          vi.mocked(extractAssetKeys).mockReturnValue(KEYS)
          await boot()
-         savedSet.add(77)
-         M!.saved.set([...M!.saved(), 77])
+         await toggle(77)
          await flush()
          expect(sw.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "pin", names: KEYS }))
          expect(listPins().get("~saved:77")?.names).toEqual(KEYS)
       })
    })
 
-   // The un-save path is synchronous, so a star tapped twice over a COLD pack
-   // runs it to completion inside the save's await — before there is any
-   // registry entry to release. Pinning anyway would leave an un-saved article's
-   // media in the eviction-exempt PINNED bucket with a registry entry nothing
-   // ever clears, and would also make those names read as "still needed" when
-   // another scope is released.
-   it("pins nothing when the star is un-tapped while the pack is still loading", async () => {
-      await withSW(async (sw) => {
-         let land: (article: unknown) => void = () => {}
-         data.loadArticle.mockReturnValue(new Promise((r) => (land = r)))
-         vi.mocked(extractAssetKeys).mockReturnValue(KEYS)
-         await boot()
-
-         savedSet.add(77)
-         M!.saved.set([...M!.saved(), 77]) // the save: parked on the data pack
-         savedSet.delete(77)
-         M!.saved.set(M!.saved().filter((c) => c !== 77)) // the un-save: synchronous, lands first
-         await flush()
-         land({ f: 1, a: 0, p: 0, c: "<p>x</p>" }) // now the pack arrives
-         await flush()
-
-         expect(sw.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "pin" }))
-         expect(listPins().has("~saved:77")).toBe(false)
-      })
-   })
-
    it("releases them on un-save — but only what nothing else still shows", async () => {
       await withSW(async (sw) => {
          // Another saved article shares the image; only the video is unique.
+         localStorage.setItem("srr-saved", JSON.stringify([77, 88]))
          pinFilter("~saved:77", KEYS)
          pinFilter("~saved:88", [KEYS[0]])
          await boot()
-         // Establish 77 as already-saved (the pin registry above stands in for
-         // what an earlier real save already pinned) before un-saving it, so the
-         // model.saved diff has a join to reverse.
-         M!.saved.set([77])
-         await flush()
-         M!.saved.set(M!.saved().filter((c) => c !== 77))
+         ;(await import("./saved")).publishSaved() // the boot publish (nav, which does it in app, is mocked)
+         await toggle(77)
          await flush()
          expect(sw.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "unpin", names: [KEYS[1]] }))
          expect(listPins().has("~saved:77")).toBe(false)
       })
    })
 
-   it("says nothing for an article with no self-hosted media", async () => {
+   it("pins nothing for a publish that is not a save made here", async () => {
       await withSW(async (sw) => {
-         data.loadArticle.mockResolvedValue({ f: 1, a: 0, p: 0, c: "<p>text only</p>" })
-         vi.mocked(extractAssetKeys).mockReturnValue([])
-         await boot()
-         savedSet.add(77)
-         M!.saved.set([...M!.saved(), 77])
-         await flush()
-         expect(sw.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "pin" }))
-         expect(listPins().size).toBe(0)
-      })
-   })
-
-   it("is a silent no-op with no SW controller (dev / insecure context)", async () => {
-      Object.defineProperty(navigator, "serviceWorker", {
-         value: { controller: null, getRegistrations: () => Promise.resolve([]), addEventListener: () => {} },
-         configurable: true,
-      })
-      try {
          data.loadArticle.mockResolvedValue({ f: 1, a: 0, p: 0, c: "<p>x</p>" })
          vi.mocked(extractAssetKeys).mockReturnValue(KEYS)
          await boot()
-         savedSet.add(77)
-         M!.saved.set([...M!.saved(), 77])
+         M!.saved.set([...M!.saved(), 77]) // a republish (merge, other tab) as the model sees it
          await flush()
-         // Nothing to pin into, so nothing is claimed in the registry either —
-         // a phantom entry would show "Remove offline copy" over bytes that
-         // were never saved.
-         expect(listPins().size).toBe(0)
-      } finally {
-         Object.defineProperty(navigator, "serviceWorker", { value: undefined, configurable: true })
-      }
+         expect(sw.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "pin" }))
+      })
    })
 })
 

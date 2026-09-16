@@ -4415,6 +4415,14 @@ describe("a profile merge republishes nav's own state (S14)", () => {
       expect(model.seen()).toEqual({ "feed:1": 1 }) // pruned, then published
       expect(model.saved()).toEqual([1])
    })
+
+   it("keeps the mode when the preference is absent from storage — a sync pull carries no prefs", () => {
+      setupIndex([{ feedId: 1 }])
+      nav.setUnreadOnly(true)
+      localStorage.removeItem("srr-unread-only") // a refused write, another tab's clear()
+      model.profileRev.update((n) => n + 1)
+      expect(nav.isUnreadOnly()).toBe(true)
+   })
 })
 // A lane change invalidates the cached → / ← probes: they name the previous
 // lane's neighbours. Under split a pick that keeps the article on screen does not

@@ -1045,12 +1045,13 @@ export function publishHash(): void {
 // A backup restore may carry the unread-only preference, which profile.ts wrote
 // to localStorage itself (S14). Adopt it — only when it differs, since flipping
 // the mode re-applies the lane. A sync pull never touches prefs, so this is a
-// no-op for it.
+// no-op for it — and an ABSENT key (lsGet reads "") carries no preference either:
+// a refused write or another tab's clear() must not switch the mode off.
 onChange(
    () => model.profileRev(),
    () => {
       const stored = lsGet(UNREAD_ONLY_KEY)
-      if (stored !== null && (stored === "1") !== unreadOnly) setUnreadOnly(stored === "1")
+      if (stored !== "" && (stored === "1") !== unreadOnly) setUnreadOnly(stored === "1")
    },
 )
 

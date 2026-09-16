@@ -43,10 +43,26 @@ export function savedOrder(): number[] {
    return [...readSavedSet()]
 }
 
+// Whether the latest publish of model.saved was a toggle — a save or un-save
+// made on this device, the only kind pin-ui pins. Every other publish (the boot
+// publish, a store switch, a profile merge, another tab's write) replaces the
+// set wholesale, and the pin effect re-baselines over it.
+let lastByToggle = false
+export function publishedByToggle(): boolean {
+   return lastByToggle
+}
+
 // Publish the ACTIVE store's saved order as stored (a merge wrote localStorage
 // itself; the first publish after boot). toggleSaved is the other writer.
 export function publishSaved(): void {
+   lastByToggle = false
    model.saved.set(savedOrder())
+}
+
+// One store's saved membership by id — the question a caller holding a store
+// asks after an await, when the active store may have moved on.
+export function isSavedIn(mid: string, chron: number): boolean {
+   return readIdSet(savedKey(mid)).has(chron)
 }
 
 // The saved atom names the ACTIVE store's set as stored; a store switch and a
@@ -158,6 +174,7 @@ export function toggleSaved(
    ctx.onQueueChange()
    // Last: the flush this write triggers runs every effect over the saved set,
    // and nothing above may depend on all of them succeeding.
+   lastByToggle = true
    model.saved.set([...set])
    return nowSaved
 }
