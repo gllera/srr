@@ -1150,6 +1150,17 @@ describe("list", () => {
          await Promise.resolve()
          expect($rows()[0]).not.toBe(before)
       })
+
+      it("joins a rebuild already in flight for the same cursor instead of starting a second", async () => {
+         setIndex(4)
+         await list.render()
+         nav._setAnchor(2)
+         nav.listAnchor.mockClear()
+         const build = list.rerender() // the listSurface effect's rebuild…
+         list.followCursor() // …and, in the same flush, listRows' follow
+         expect(nav.listAnchor).toHaveBeenCalledTimes(1)
+         await build
+      })
    })
 
    // The listSurface effect's entry point (state-store P5). A built window is FOR

@@ -124,6 +124,7 @@ let loadingBottom = false // an older-load is in flight (re-entry guard for fetc
 let pumping = false // a downward viewport-fill loop is running (re-entry guard for pump)
 let growing = false // an onStoreGrown reopen/rebuild is in flight (re-entry guard)
 let builtKey: string | null = null // membershipKey() the current DOM was built for
+let builtFor = -1 // the cursor chron the current (or in-flight) build anchored on
 let observer: IntersectionObserver | null = null
 // Set by a genuine user scroll gesture (wheel/touch/key) during a render, so the
 // post-fill anchor re-assert never yanks the page out from under the reader.
@@ -1037,6 +1038,7 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    loadingTop = loadingBottom = false
    pumping = false
    builtKey = membershipKey()
+   builtFor = nav.currentChron()
    rowsEl = null
    // A rebuild lays a fresh window: whatever the pill was pointing at is gone
    // with the old rows, and no reopened runway is in flight any more.
@@ -1333,10 +1335,12 @@ export function invalidate(): void {
 // falls through to a bounded rebuild. `anchorNow` (returning from the reader)
 // only matters on that rebuild path: it makes render() commit the centered
 // anchor immediately instead of land-once.
+// The fast path re-derives nothing itself: the listRows effect refreshes a list
+// whose mount, seen map or saved set moved, when this command's rendering hold
+// ends.
 export async function show(anchorNow = false, onInteractive?: () => void): Promise<void> {
    const pos = nav.currentChron()
    if (builtKey === membershipKey() && rowsEl && pos >= 0 && findRow(pos)) {
-      refresh()
       scrollChronToView(pos)
       notifyScroll()
       onInteractive?.() // reuse path is already interactive
@@ -1372,8 +1376,12 @@ export function followCursor(): void {
    // NOT followed by a render lands here on the fast path over a stale row set
    // whose observer invalidate() just tore down, leaving the pane on screen with
    // infinite scroll permanently dead. The breakpoint crossing is exactly that
-   // sequence: onSplitChange invalidates, then route() reaches this through
-   // guard()'s render path.
+   // sequence: relayoutPane invalidates, then calls this directly.
+   // A rebuild for this very membership and cursor is already in flight —
+   // render() clears the rows synchronously and anchors on the cursor itself —
+   // typically the listSurface effect's, in this same flush. A second show()
+   // would only supersede it.
+   if (!rowsEl && builtKey === membershipKey() && builtFor === chron) return
    const row = builtKey === membershipKey() ? findRow(chron) : null
    if (!row) {
       // Report a failed rebuild instead of swallowing it. Under split this

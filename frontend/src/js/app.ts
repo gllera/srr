@@ -33,7 +33,7 @@ import { ensureSchema } from "./schema"
 import { elementScroller, windowScroller } from "./scroller"
 import * as searchUI from "./search-ui"
 import { initSplit, isSplit, onSplitChange } from "./split"
-import { effect, onChange, untracked } from "./signals"
+import { effect, onChange } from "./signals"
 import { lsSet } from "./storage"
 import * as sync from "./sync"
 
@@ -148,38 +148,6 @@ const RESUME: nav.Landing = { record: false, replace: true }
 function showList() {
    model.focus.set("list")
    picker.close()
-}
-
-// D4 — the split view's RESTING pane, derived rather than remembered. It paints
-// where showList's split branch used to: the split layout, the LIST holding
-// focus, and no live article in the pane — never over a navigational
-// placeholder (single-surface, or reader-focused under split), and never while a
-// guarded landing is in flight (model.rendering), which would paint over the
-// article about to arrive. Its inputs are the lane's identity and the store, NOT
-// the cursor: the list moves that cursor on every row step, and the resting
-// panel does not follow the highlight. A probe that lands after the layout moved
-// on — an article opened, the breakpoint dropped, a newer run started — drops.
-let restingGen = 0
-function initRestingPane(): void {
-   effect(() => {
-      const l = layout()
-      model.laneTokens()
-      model.unreadOnly()
-      model.frontierEpoch()
-      model.activeMid()
-      model.snapshot()
-      const my = ++restingGen
-      if (model.rendering() || !l.split || l.focus !== "list" || l.readerLive) return
-      void nav
-         .restingState()
-         .catch(() => null)
-         .then((o) => {
-            if (!o || my !== restingGen) return
-            const now = untracked(layout)
-            if (untracked(model.rendering) || !now.split || now.focus !== "list" || now.readerLive) return
-            reader.renderResting(o)
-         })
-   })
 }
 
 // The ONE door to "put this article on the reader surface", shared by the row
@@ -831,33 +799,35 @@ async function init() {
       list.setScroller(model.split() ? elementScroller(el.listView) : windowScroller())
       gestures?.resetScroll()
    })
+   // Crossing INTO split the PANE owns the cursor: it keeps its article across
+   // the crossing, while below the breakpoint the list legitimately claimed the
+   // cursor (a search rebuild seats it on the newest hit). Re-seat it on the
+   // mounted article in the crossing's OWN flush — this effect is created before
+   // the derived-paint table, and effects run in creation order — so the chrome
+   // and the list rows see one cursor, once.
+   onChange(
+      () => model.split(),
+      (on) => {
+         if (!on) return
+         const mounted = reader.mountedArticle()
+         if (mounted && nav.currentChron() !== mounted.chron) nav.select(mounted.chron, mounted.feedId)
+      },
+   )
    // Who owns the shared cursor when the list rebuilds (list.mayClaimCursor).
    list.setCursorOwner(() => layout().readerLive)
    // The pane's width + visibility (pane.ts), including the rail's toggle
    // button, which pane.ts wires and keeps labelled. Every committed change ends
    // in the shared re-layout tail above.
    initPane({ onSettle: relayoutPane })
-   // A breakpoint crossing. The classes, both hosts' visibility, the scroller and
-   // the resting pane are effects over model.split and have already re-derived by
-   // the time this runs (split.ts writes the model before notifying). What is
-   // left is command work:
-   //  - Crossing INTO split the PANE owns the cursor, because it keeps its
-   //    article across the crossing; below the breakpoint the list legitimately
-   //    claimed it (a search rebuild seats it on the newest hit). Re-seat it on
-   //    the mounted article first, so everything below reads one cursor.
-   //  - A live pane re-derives its chrome: a pill that went stale while the
-   //    narrow list held focus is otherwise carried across (plan L16).
-   //  - The shared re-layout tail (relayoutPane) rebuilds what the new layout
-   //    needs without re-routing — a re-route would re-render the article.
+   // A breakpoint crossing. The classes, both hosts, the scroller, the resting
+   // pane and the cursor re-seat (above) have all re-derived by the time this
+   // runs — split.ts writes the model before notifying. What is left is command
+   // work: close an open picker (a crossing is a surface-changing gesture, like
+   // Escape or a filter pick) and the shared re-layout tail, which rebuilds what
+   // the new layout needs without re-routing (a re-route would re-render the
+   // article).
    onSplitChange(() => {
-      // A breakpoint crossing is a surface-changing gesture like Escape or a
-      // filter pick, both of which close the picker too — an open overlay
-      // should not silently survive the crossing.
       picker.close()
-      if (layout().split) {
-         const mounted = reader.mountedArticle()
-         if (mounted && nav.currentChron() !== mounted.chron) nav.select(mounted.chron, mounted.feedId)
-      }
       relayoutPane()
    })
    // Tell the SW its mounted roots BEFORE data.init() (the PWA0 fix, §5.1): the
@@ -1216,6 +1186,12 @@ async function init() {
    pinUI.initSavedAssets()
    // Derived rendering (effects.ts): registered once, after every surface is
    // wired and before the first route() paints.
+   // Rendering is held from the table's registration until the first route
+   // takes its own hold, so every deferred paint — the resting pane, the list
+   // title, the list's rows and membership — primes over the state the first
+   // surface leaves, never over nav's pre-route lane. route() takes its hold
+   // synchronously, before its first await, so the release below leaves no gap.
+   const bootHold = beginRendering()
    effects = registerEffects({
       unreadTotal: unreadTotalOfActiveStore,
       setListTitle: () => setTitle(listTitle()),
@@ -1224,8 +1200,9 @@ async function init() {
       probeChrome: nav.probeCurrent,
       applyChrome: reader.applyChrome,
       paintSaveButton: reader.paintSaveButton,
-      isSaved: nav.isSaved,
       paintFeedLabel: reader.paintFeedLabel,
+      restingState: nav.restingState,
+      renderResting: reader.renderResting,
       reconcileList: list.reconcile,
       afterListBuild: searchUI.syncSearchBar,
       onListError: (e) => showError(e, () => void renderListSurface()),
@@ -1251,12 +1228,13 @@ async function init() {
       try {
          hash = localStorage.getItem(HASH_KEY)?.substring(1) || ""
       } catch {}
-   await route(hash)
-   // After the first route, not before: route() is what applies the boot lane,
-   // and an [ALL] boot writes laneTokens [] over [] — no change, so a resting
-   // effect registered earlier would keep a probe answered against nav's
-   // pre-route filter (plan L15).
-   initRestingPane()
+   let routed: Promise<void>
+   try {
+      routed = route(hash)
+   } finally {
+      endRendering(bootHold)
+   }
+   await routed
    // RDR16 — offer back an episode a reload interrupted. After route() so the
    // active store is settled and the first surface has painted; PAUSED, never
    // auto-resumed (browsers block it, and audio starting by itself on a cold

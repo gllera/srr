@@ -26,8 +26,9 @@ function fakes() {
       probeChrome: vi.fn(async (): Promise<IShowFeed | null> => PROBED),
       applyChrome: vi.fn(),
       paintSaveButton: vi.fn(),
-      isSaved: vi.fn((chron: number) => chron === 3),
       paintFeedLabel: vi.fn(),
+      restingState: vi.fn(async (): Promise<IShowFeed | null> => null),
+      renderResting: vi.fn(),
       reconcileList: vi.fn<(mounted: boolean) => Promise<void> | null>(() => null),
       afterListBuild: vi.fn(),
       onListError: vi.fn(),
@@ -166,6 +167,39 @@ describe("readerChrome (D3)", () => {
       expect(s.probeChrome).not.toHaveBeenCalled()
    })
 
+   it("a write that lands while the landing's probes are awaited still gets its probe", async () => {
+      const s = fakes()
+      const fx = effects.registerEffects(s)
+      model.rendering.set(true) // guard() holds it across fn() + render
+      signals.batch(() => {
+         model.split.set(true)
+         model.readerPainted.set(true)
+         model.cursor.set({ chron: 5, feedId: 1 }) // resolve()'s commit…
+         model.seen.set({ "feed:1": 5 })
+      })
+      model.seen.set({ "feed:1": 5, "feed:2": 9 }) // …a sync merge while showFeed awaits
+      fx.markChromePainted() // reader.render painted the counts from BEFORE the merge
+      model.rendering.set(false)
+      await tick()
+      expect(s.probeChrome).toHaveBeenCalledTimes(1)
+   })
+
+   it("a failed probe applies nothing, and the next input change probes again", async () => {
+      const s = fakes()
+      effects.registerEffects(s)
+      goLive()
+      await tick()
+      s.applyChrome.mockClear()
+      s.probeChrome.mockRejectedValueOnce(new Error("offline"))
+      model.seen.set({ "feed:1": 5 })
+      await tick()
+      expect(s.applyChrome).not.toHaveBeenCalled() // the previous probe's result is not re-applied
+      model.seen.set({ "feed:1": 6 })
+      await tick()
+      expect(s.probeChrome).toHaveBeenCalledTimes(3)
+      expect(s.applyChrome).toHaveBeenCalledTimes(1)
+   })
+
    it("does not probe while the reader is not live", async () => {
       const s = fakes()
       effects.registerEffects(s)
@@ -192,17 +226,17 @@ describe("readerChrome (D3)", () => {
       expect(s.applyChrome).toHaveBeenLastCalledWith(PROBED, false)
    })
 
-   it("skips a redundant probe when layout() moves but chromeKey() lands back on what was just painted", async () => {
+   it("a layout move that leaves the chrome inputs alone starts no probe", async () => {
       const s = fakes()
       effects.registerEffects(s)
       goLive()
       await tick()
       expect(s.probeChrome).toHaveBeenCalledTimes(1) // the initial probe+apply, which stamps paintedKey
       s.probeChrome.mockClear()
-      // A pane hide/show moves layout()'s identity (the resource's deps function
-      // reads layout().readerLive, which subscribes to the WHOLE computed) without
-      // touching readerLive's value or any of chromeKey()'s nine tracked fields —
-      // exactly the shape the paintedKey/arrayEqual dedup exists to absorb.
+      // A pane hide/show moves layout()'s identity without touching readerLive or
+      // any chrome input: the resource's keyEquals absorbs it. (The paintedKey
+      // dedup itself is pinned by "starts nothing for the inputs a render just
+      // painted".)
       model.paneHidden.set(true)
       await tick()
       expect(s.probeChrome).not.toHaveBeenCalled()
@@ -233,10 +267,10 @@ describe("saveButton", () => {
          model.readerPainted.set(true)
          model.cursor.set({ chron: 3, feedId: 1 })
       })
-      expect(s.paintSaveButton).toHaveBeenLastCalledWith(true, true)
-      s.isSaved.mockReturnValue(false)
-      model.saved.set([1]) // a genuine change — [] to [] would no-op under arrayEqual
       expect(s.paintSaveButton).toHaveBeenLastCalledWith(true, false)
+      model.saved.set([3]) // the article on screen was saved
+      expect(s.paintSaveButton).toHaveBeenLastCalledWith(true, true)
+      model.saved.set([1]) // …and un-saved again
       model.readerPainted.set(false) // a placeholder replaced the article
       expect(s.paintSaveButton).toHaveBeenLastCalledWith(false, false)
    })
@@ -253,6 +287,73 @@ describe("feedLabel", () => {
       expect(s.paintFeedLabel).toHaveBeenCalledTimes(4)
       model.cursor.set({ chron: 9, feedId: 2 })
       expect(s.paintFeedLabel).toHaveBeenCalledTimes(4)
+   })
+})
+
+describe("restingPane (D4)", () => {
+   const PANEL = { ...PROBED, placeholder: true } as IShowFeed
+   const splitList = () =>
+      signals.batch(() => {
+         model.split.set(true)
+         model.focus.set("list")
+      })
+
+   it("paints the panel for a split pane with no live article, and not otherwise", async () => {
+      const s = fakes()
+      s.restingState.mockResolvedValue(PANEL)
+      effects.registerEffects(s)
+      await tick()
+      expect(s.restingState).not.toHaveBeenCalled() // narrow: there is no pane
+      splitList()
+      await tick()
+      expect(s.renderResting).toHaveBeenCalledExactlyOnceWith(PANEL)
+   })
+
+   it("repaints when what the panel counts moves — not on a cursor step, a pane toggle or an idle command", async () => {
+      const s = fakes()
+      s.restingState.mockResolvedValue(PANEL)
+      effects.registerEffects(s)
+      splitList()
+      await tick()
+      s.restingState.mockClear()
+      model.cursor.set({ chron: 4, feedId: 1 }) // the list's row step
+      model.paneHidden.set(true)
+      model.rendering.set(true)
+      model.rendering.set(false)
+      await tick()
+      expect(s.restingState).not.toHaveBeenCalled()
+      model.laneTokens.set(["news"])
+      await tick()
+      expect(s.restingState).toHaveBeenCalledTimes(1)
+   })
+
+   it("drops a probe that lands after an article opened", async () => {
+      const lands: Array<(o: IShowFeed) => void> = []
+      const s = fakes()
+      s.restingState.mockImplementation(() => new Promise<IShowFeed>((r) => lands.push(r)))
+      effects.registerEffects(s)
+      splitList()
+      signals.batch(() => {
+         model.readerPainted.set(true)
+         model.cursor.set({ chron: 2, feedId: 1 })
+      })
+      lands[0](PANEL)
+      await tick()
+      expect(s.renderResting).not.toHaveBeenCalled()
+   })
+
+   it("waits out the boot hold and paints once over the state the first route left", async () => {
+      const s = fakes()
+      s.restingState.mockResolvedValue(PANEL)
+      model.rendering.set(true) // app.ts's boot hold
+      effects.registerEffects(s)
+      splitList()
+      model.laneTokens.set(["news"]) // route()'s lane write
+      await tick()
+      expect(s.restingState).not.toHaveBeenCalled()
+      model.rendering.set(false)
+      await tick()
+      expect(s.restingState).toHaveBeenCalledTimes(1)
    })
 })
 
@@ -328,6 +429,57 @@ describe("listRows", () => {
       expect(s.followListCursor).toHaveBeenCalledTimes(1)
       expect(s.refreshListRows).not.toHaveBeenCalled()
    })
+
+   // Discriminates deferred()'s rewrite (D4/task-9): registration itself now
+   // happens under app.ts's boot hold, so this effect's very first run sees
+   // model.rendering() already true and must freeze its PRE-hold baseline
+   // (cursor -1, not live) rather than treat the held state as unprimed. A
+   // version that reverted to signals.ts's plain diffedForEffects (whose skip
+   // bails before ever touching `last`) would hand this body `prev: null` on
+   // release, read that as "nothing moved", and call refreshListRows instead —
+   // silently leaving the split pane unbuilt for a #pos deep link that lands
+   // entirely inside a held boot (see split.e2e.test.ts's "builds the list pane
+   // beside a #pos deep link", the regression this pins at the unit level).
+   // model.split is set BEFORE the hold, mirroring app.ts's real order
+   // (initSplit() resolves the breakpoint before registerEffects' boot hold
+   // begins) — task 10's split-consistency check (prev[1] === split) means a
+   // hold that also flips split reads as a crossing, not a #pos landing, and
+   // takes the refreshListRows branch, which relayoutPane's own follow covers.
+   it("keeps its PRE-hold baseline across a boot hold, so a landing that starts and ends held still reads as moved", () => {
+      const s = fakes()
+      model.split.set(true) // resolved before the boot hold, as app.ts's init() does
+      model.rendering.set(true) // app.ts's boot hold, held before the table registers
+      effects.registerEffects(s)
+      signals.batch(() => {
+         model.readerPainted.set(true)
+         model.cursor.set({ chron: 1, feedId: 1 })
+      }) // the #pos landing's own writes — still inside the same hold
+      model.rendering.set(false) // the boot hold releases once the landing settles
+      expect(s.followListCursor).toHaveBeenCalledTimes(1)
+      expect(s.refreshListRows).not.toHaveBeenCalled()
+   })
+
+   it("a cursor the list itself moved repaints nothing (selectRow already did)", () => {
+      const s = fakes()
+      effects.registerEffects(s)
+      s.refreshListRows.mockClear()
+      model.cursor.set({ chron: 4, feedId: 1 }) // list focus, no live reader
+      expect(s.refreshListRows).not.toHaveBeenCalled()
+      expect(s.followListCursor).not.toHaveBeenCalled()
+   })
+
+   it("a crossing into split refreshes the rows and leaves the follow to the re-layout tail", () => {
+      const s = fakes()
+      effects.registerEffects(s)
+      signals.batch(() => {
+         model.readerPainted.set(true)
+         model.cursor.set({ chron: 2, feedId: 1 })
+      })
+      s.refreshListRows.mockClear()
+      model.split.set(true) // readerLive turns true on the crossing itself
+      expect(s.followListCursor).not.toHaveBeenCalled()
+      expect(s.refreshListRows).toHaveBeenCalledTimes(1)
+   })
 })
 
 describe("listGrowth", () => {
@@ -397,6 +549,7 @@ describe("one landing, one run each", () => {
       expect(s.listGrown).not.toHaveBeenCalled()
       expect(s.setListTitle).not.toHaveBeenCalled()
       expect(s.paintFeedLabel).not.toHaveBeenCalled()
+      expect(s.restingState).not.toHaveBeenCalled()
       expect(s.refreshSettingsStatus).not.toHaveBeenCalled()
       expect(s.applyUnreadTotal).not.toHaveBeenCalled() // the tally came back equal
    })

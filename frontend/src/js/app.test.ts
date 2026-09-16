@@ -454,6 +454,22 @@ const publishStore = (grown: boolean) => {
 // imported into (boot() resets modules), hence the dynamic import.
 const setSplit = async (on: boolean) => (await import("./model")).split.set(on)
 
+// A REAL breakpoint crossing, through split.ts's own matchMedia listener: the
+// model write AND the onSplitChange listeners run, where setSplit writes the
+// model alone. Call stubBreakpoint() BEFORE boot() so initSplit subscribes to
+// the stub, and vi.unstubAllGlobals() in the case's finally.
+let crossing: ((e: { matches: boolean }) => void) | null = null
+const stubBreakpoint = (matches: boolean) =>
+   vi.stubGlobal("matchMedia", (q: string) =>
+      q === "(min-width: 1000px)"
+         ? {
+              matches,
+              addEventListener: (_: string, fn: (e: { matches: boolean }) => void) => (crossing = fn),
+           }
+         : { matches: false, addEventListener: () => {} },
+   )
+const crossSplit = (on: boolean) => crossing!({ matches: on })
+
 // The layout record reads the cursor from the MODEL (layout.ts readerLive), and
 // nav is mocked here — so nothing writes model.cursor on its own. Every case that
 // moves the mocked cursor moves the model's in the same breath, through the
@@ -670,6 +686,18 @@ describe("split view (body.srr-split)", () => {
       // The LIST still owns the surface: a resting paint is not a navigation,
       // so it must not pull focus into the reader region.
       expect(document.activeElement).not.toBe(reader().querySelector(".srr-content"))
+   })
+
+   it("paints the resting panel at the list's first paint, not after its fill", async () => {
+      let finish!: () => void
+      list.show.mockImplementationOnce(async (_anchorNow?: boolean, onInteractive?: () => void) => {
+         onInteractive?.()
+         await new Promise<void>((r) => (finish = r))
+      })
+      await boot() // jsdom has no matchMedia: initSplit seeds model.split from the class beforeEach stamped
+      expect(nav.restingState).toHaveBeenCalled()
+      finish()
+      await flush()
    })
 
    // Every caller that re-derives the reader's chrome does so BECAUSE the pane
@@ -1493,6 +1521,51 @@ describe("split view (body.srr-split)", () => {
       pickerHooks()!.onSelect("@s7:5")
       await flush()
       expect(nav.last).toHaveBeenCalledTimes(1) // listAnchor answered -1: the lane's newest
+   })
+
+   it("a real crossing into split re-seats the cursor before any paint reads it, and re-lays out the pane", async () => {
+      stubBreakpoint(true)
+      const probedAt: number[] = []
+      const probe = nav.probeCurrent.getMockImplementation()
+      try {
+         await boot()
+         nav.fromHash.mockImplementationOnce(async () => {
+            seedCursor(2)
+            return showFeed()
+         })
+         hashTo("#2")
+         await flush()
+         crossSplit(false)
+         M!.focus.set("list") // the narrow LIST holds focus…
+         seedCursor(9) // …and has claimed the cursor (a search rebuild seats it on its newest hit)
+         await flush()
+         nav.probeCurrent.mockImplementation(async () => {
+            probedAt.push(seeded.cursor.chron)
+            return showFeed()
+         })
+         nav.select.mockClear()
+         list.followCursor.mockClear()
+         list.show.mockClear()
+         picker.close.mockClear()
+         crossSplit(true)
+         await flush()
+         expect(nav.select).toHaveBeenCalledWith(2, expect.any(Number)) // the pane keeps its article
+         expect(probedAt).not.toContain(9) // no chrome probe for the list's row
+         expect(list.followCursor).not.toHaveBeenCalled() // the crossing's rebuild is relayoutPane's…
+         expect(list.show).toHaveBeenCalledTimes(1) // …which rebuilds the list pane once
+         expect(picker.close).toHaveBeenCalled()
+      } finally {
+         // Leave model.split narrow again before the stub comes off: this test's
+         // app.ts instance and its effects outlive the case (vi.resetModules()
+         // only clears the import cache, it doesn't dispose subscriptions), so a
+         // stale model.split left true would have the describe's own afterEach
+         // (seedCursor(-1), a plain model write) re-trigger this instance's
+         // initLayout effect and re-stamp body.srr-split — every other suite in
+         // this file depends on narrow mode once this describe is done.
+         crossSplit(false)
+         vi.unstubAllGlobals()
+         if (probe) nav.probeCurrent.mockImplementation(probe)
+      }
    })
 })
 
@@ -3072,6 +3145,7 @@ describe("the frontier menu — right-click / long-press on the reader's next pi
       seedUnreadOnly(true)
       nav.applyFilter.mockClear()
       nav.probeCurrent.mockClear()
+      list.reconcile.mockClear()
       rightClick(".srr-next")
       menuItems()!
          .find((i) => i.label === "Mark all read")!
@@ -3103,16 +3177,12 @@ describe("the frontier menu — right-click / long-press on the reader's next pi
       nav.isSearchFilter.mockReturnValue(false)
       nav.filter.feeds = new Map([[1, 0]])
       seedUnreadOnly(false)
-      nav.applyFilter.mockClear()
       nav.probeCurrent.mockClear()
       rightClick(".srr-next")
       menuItems()!
          .find((i) => i.label === "Mark all read")!
          .action()
       expect(nav.markAllRead).toHaveBeenCalledTimes(1)
-      expect(nav.applyFilter).not.toHaveBeenCalled()
-      expect(list.rerender).not.toHaveBeenCalled()
-      expect(list.invalidate).not.toHaveBeenCalled()
       expect(nav.probeCurrent).toHaveBeenCalledTimes(1)
    })
 
