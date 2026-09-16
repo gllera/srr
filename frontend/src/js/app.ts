@@ -37,11 +37,12 @@ import { effect, onChange } from "./signals"
 import { lsSet } from "./storage"
 import * as sync from "./sync"
 
-// Which surface has the KEYBOARD is model.focus, written only by showList /
-// showReader below. Every visibility question reads layout.ts's record; the
-// record's focus field is read at exactly the sites docs/ARCHITECTURE.md lists
-// under "The layout record". (The filter picker is an overlay, not a surface:
-// picker.isOpen() gates input while it is up.)
+// Which surface has the KEYBOARD is model.focus, written by showList /
+// showReader below, and once directly by init() to seed the reader-boot
+// chrome before the layout's first paint. Every visibility question reads
+// layout.ts's record; the record's focus field is read at exactly the sites
+// docs/ARCHITECTURE.md lists under "The layout record". (The filter picker
+// is an overlay, not a surface: picker.isOpen() gates input while it is up.)
 // Set once gestures are wired; the list calls it after a programmatic scroll so
 // the toolbar-hide baseline stays in sync (declared up here so list.setup, wired
 // before setupGestures runs, can close over it).
@@ -480,6 +481,33 @@ function commitListHash(push: boolean): void {
    persistHash(h)
 }
 
+// Does this hash route to the READER surface? A numeric position does (a deep
+// link or a restored reading position); anything else — empty, or `!tokens` —
+// is the list at that filter.
+function routesToReader(hash: string): boolean {
+   const pos = nav.hashPos(hash)
+   return pos !== "" && nav.isPosInt(pos)
+}
+
+// The hash the first route() takes. Foreign hashes (OAuth implicit-flow tokens
+// an auth provider in front of the app injected — Cloudflare Access
+// JWT-in-fragment, OIDC, …) are dropped so the page lands on the user's last
+// position instead of the latest article; SRR hashes are `[integer][!tokens]`
+// or `!tokens`. An empty hash restores the stored one.
+function bootHash(): string {
+   let hash = location.hash.substring(1)
+   const posPart = nav.hashPos(hash)
+   if (posPart && !nav.isPosInt(posPart)) {
+      history.replaceState(null, "", location.pathname + location.search)
+      hash = ""
+   }
+   if (!hash)
+      try {
+         hash = localStorage.getItem(HASH_KEY)?.substring(1) || ""
+      } catch {}
+   return hash
+}
+
 // Hash → surface. A numeric position routes to the reader (deep-link or restored
 // reading position); anything else (empty, or just `!tokens`) is the list at
 // that filter.
@@ -493,8 +521,7 @@ async function route(hash: string) {
    // A URL-driven filter change (hashchange / back-forward) also supersedes any
    // pending debounced query — see selectFilter.
    searchUI.clearSearchDebounce()
-   const posStr = nav.hashPos(hash)
-   if (posStr !== "" && nav.isPosInt(posStr)) {
+   if (routesToReader(hash)) {
       await guard(() => nav.fromHash(hash))
       // Split view: deliberately no list call here — model.cursor moved inside
       // guard(), and the listRows effect (effects.ts) calls followListCursor at
@@ -786,6 +813,12 @@ async function init() {
    // throws, and outside the try below on purpose: a migration failure is warned
    // internally, not a boot error the popup should offer to reload past.
    ensureSchema()
+   // Read once the stored shape is settled (the HASH_KEY restore is one of its
+   // readers) and before the layout's first paint: a hash that routes to the
+   // reader boots with the READER holding focus, so a phone restoring a reading
+   // position never flashes the list's chrome while the article loads.
+   const hash = bootHash()
+   if (routesToReader(hash)) model.focus.set("reader")
    // Split view (two-pane desktop): learn the breakpoint, then register the
    // layout record's DOM writer at once — before data.init() — so the first
    // paint already carries body.srr-split. layout.ts is the only writer of the
@@ -1214,20 +1247,6 @@ async function init() {
       onPaintError: (e) => showError(e),
    })
 
-   let hash = location.hash.substring(1)
-   // Reject foreign hashes (e.g., OAuth implicit-flow tokens injected by an
-   // auth provider in front of the app — Cloudflare Access JWT-in-fragment,
-   // OIDC, etc.) so the page lands on the user's last position instead of
-   // the latest article. SRR hashes are `[integer][!tokens]` or `!tokens`.
-   const posPart = nav.hashPos(hash)
-   if (posPart && !nav.isPosInt(posPart)) {
-      history.replaceState(null, "", location.pathname + location.search)
-      hash = ""
-   }
-   if (!hash)
-      try {
-         hash = localStorage.getItem(HASH_KEY)?.substring(1) || ""
-      } catch {}
    let routed: Promise<void>
    try {
       routed = route(hash)

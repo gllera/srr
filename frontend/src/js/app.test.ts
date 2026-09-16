@@ -575,6 +575,25 @@ describe("layout inputs mirror into the model", () => {
       expect(document.querySelector(".srr-list")!.hasAttribute("hidden")).toBe(false)
       expect(document.querySelector(".srr-reader")!.hasAttribute("hidden")).toBe(true)
    })
+
+   it("boots a reading position with the reader's chrome, never flashing the list's", async () => {
+      let release!: () => void
+      data.init.mockImplementationOnce(() => new Promise<void>((r) => (release = r)))
+      await boot("#2") // init() is parked on data.init: nothing has routed yet
+      expect(document.body.classList.contains("srr-view-list")).toBe(false)
+      expect((document.querySelector(".srr-list") as HTMLElement).hidden).toBe(true)
+      release()
+      await flush()
+   })
+
+   it("boots a list hash with the list's chrome", async () => {
+      let release!: () => void
+      data.init.mockImplementationOnce(() => new Promise<void>((r) => (release = r)))
+      await boot("#!news")
+      expect(document.body.classList.contains("srr-view-list")).toBe(true)
+      release()
+      await flush()
+   })
 })
 
 describe("route() — surface selection from the hash", () => {
