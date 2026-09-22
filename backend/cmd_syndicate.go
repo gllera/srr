@@ -193,7 +193,7 @@ func (o *SyndicateFetchCmd) Run() error {
 }
 
 // findOutFeed resolves a syndication entry by name (pointer into core.Out).
-// Defense-in-depth like syncOneOutFeed's validOutName re-check: a stored name
+// Defense-in-depth like planOutFeed's validOutName re-check: a stored name
 // is deserialized straight from db.gz, and push/fetch resolve outFileKey from
 // it — a hand-edited "../../db" must not traverse out of out/ on local/SFTP.
 func findOutFeed(db *DB, name string) (*OutFeed, error) {

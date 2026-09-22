@@ -150,7 +150,7 @@ func TestSyncOutFeedsReturnsErrorOnWriteFailure(t *testing.T) {
 }
 
 // TestSyncOutFeedsUnsafeNameSkipped verifies the defense-in-depth guard in
-// syncOneOutFeed: an Out entry whose Name bypasses the command gate (e.g. from
+// planOutFeed: an Out entry whose Name bypasses the command gate (e.g. from
 // a hand-edited/corrupted db.gz) is skipped with a warning and no file is
 // written, while a valid-named entry in the same Out slice is still written.
 func TestSyncOutFeedsUnsafeNameSkipped(t *testing.T) {

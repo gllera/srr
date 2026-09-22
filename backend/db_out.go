@@ -44,10 +44,25 @@ func (o *DB) SyncOutFeeds(ctx context.Context) error {
 		return nil
 	}
 
-	failed := 0
+	// Resolve every output's selection first, then fill all of them with ONE
+	// walk over the union of their tail windows: walkArticles reads and decodes
+	// the tail data pack per call, so N managed outputs used to read it N times
+	// per dirty cycle. The per-output fallback, serialization and write follow.
+	var plans []*outPlan
 	for _, of := range managed {
-		if err := o.syncOneOutFeed(ctx, of, cdn); err != nil {
-			slog.Warn("sync out feed", "name", of.Name, "error", err)
+		if p := o.planOutFeed(of); p != nil {
+			plans = append(plans, p)
+		}
+	}
+	if err := o.collectOutMatches(ctx, plans); err != nil {
+		// One walk serves every output, so its failure is every output's.
+		slog.Warn("sync out feeds", "error", err)
+		return fmt.Errorf("%d of %d syndication output(s) failed: %w", len(plans), len(managed), err)
+	}
+	failed := 0
+	for _, p := range plans {
+		if err := o.writeOutFeed(ctx, p, cdn); err != nil {
+			slog.Warn("sync out feed", "name", p.of.Name, "error", err)
 			failed++
 		}
 	}
@@ -99,8 +114,20 @@ func (o *DB) managedOut() []OutFeed {
 	return m
 }
 
-// syncOneOutFeed collects and writes one syndication output file.
-func (o *DB) syncOneOutFeed(ctx context.Context, of OutFeed, cdn string) error {
+// outPlan is one managed output's resolved selection: what to include, how
+// many to emit, and the tail window [from, TotalArticles) its first pass scans.
+// matches fills oldest→newest from the shared walk (collectOutMatches).
+type outPlan struct {
+	of      OutFeed
+	include map[int]bool
+	limit   int
+	from    int
+	matches []ArticleData
+}
+
+// planOutFeed resolves one managed output's selection, or nil when the entry
+// is skipped: an unsafe name, or a selector that matches no feed.
+func (o *DB) planOutFeed(of OutFeed) *outPlan {
 	// Defense-in-depth: reject unsafe names that bypassed the command gate
 	// (e.g. a hand-edited or corrupted db.gz). The command gate uses validOutName
 	// too, but a name stored in core.Out is deserialized directly and could
@@ -136,45 +163,56 @@ func (o *DB) syncOneOutFeed(ctx context.Context, of OutFeed, cdn string) error {
 		limit = outDefaultLimit
 	}
 
-	// Collect the newest-limit matching articles by walking a tail of the
-	// store. We walk a window K = limit * scanMultiple (capped to
+	// The first pass walks a tail window K = limit * scanMultiple (capped to
 	// TotalArticles) to avoid a full store scan in the common case while still
 	// filling the window even if only a fraction of articles match the filter.
 	const scanMultiple = 10
 	total := o.core.TotalArticles
 	k := min(limit*scanMultiple, total)
-	from := total - k
+	return &outPlan{of: of, include: include, limit: limit, from: total - k}
+}
 
-	// Collect all matches in the tail (oldest→newest via walkArticles), then
-	// take the last `limit` to get the newest-first window. Besides the
-	// tag/feed-id selector the callback skips expired articles — chron < the
-	// feed's AddIdx (retention bumped past them and deleted their assets, so
-	// emitting one would syndicate 404s). The Feeds lookup is nil-safe for a
-	// deleted feed (already excluded by the selector anyway).
-	var matches []ArticleData
-	collect := func(chron int, ad *ArticleData) error {
-		if !include[ad.FeedID] {
-			return nil
-		}
+// collectOutMatches fills every plan's matches with one walk over the union of
+// their tail windows. Each plan takes exactly the chrons its own window covers,
+// in walk order (oldest→newest), so its list is what a walk of its own window
+// would have produced. Besides the selector the walk skips expired articles —
+// chron < the feed's AddIdx (retention bumped past them and deleted their
+// assets, so emitting one would syndicate 404s). The Feeds lookup is nil-safe
+// for a deleted feed (already excluded by every selector anyway).
+func (o *DB) collectOutMatches(ctx context.Context, plans []*outPlan) error {
+	if len(plans) == 0 {
+		return nil
+	}
+	total := o.core.TotalArticles
+	from := total
+	for _, p := range plans {
+		from = min(from, p.from)
+	}
+	return o.walkArticles(ctx, from, total, func(chron int, ad *ArticleData) error {
 		if ch := o.core.Feeds[ad.FeedID]; ch != nil && chron < ch.AddIdx {
 			return nil
 		}
-		cp := *ad
-		matches = append(matches, cp)
+		for _, p := range plans {
+			if chron >= p.from && p.include[ad.FeedID] {
+				p.matches = append(p.matches, *ad)
+			}
+		}
 		return nil
-	}
-	if err := o.walkArticles(ctx, from, total, collect); err != nil {
-		return fmt.Errorf("walk articles for %q: %w", of.Name, err)
-	}
+	})
+}
+
+// writeOutFeed turns one plan's matches into its syndication output file.
+func (o *DB) writeOutFeed(ctx context.Context, p *outPlan, cdn string) error {
+	of, matches, limit := p.of, p.matches, p.limit
 
 	// The tail window didn't fill the limit — a sparse output. Resolve the rest
 	// from the IDX series rather than re-scanning the whole data series: a
 	// sparse output would otherwise re-read every data pack in the store on
 	// essentially every dirty cycle, forever (the largest unbounded read
 	// amplification left in the writer).
-	if len(matches) < limit && from > 0 {
+	if len(matches) < limit && p.from > 0 {
 		var err error
-		if matches, err = o.resolveOutWindow(ctx, include, limit); err != nil {
+		if matches, err = o.resolveOutWindow(ctx, p.include, limit); err != nil {
 			return fmt.Errorf("resolve window for %q: %w", of.Name, err)
 		}
 	}
