@@ -66,7 +66,7 @@ const nav = vi.hoisted(() => {
    let anchor = -1
    // list.ts's refresh() now reads model.seen/model.saved directly (they're what
    // seen.ts/saved.ts publish on every real write) instead of re-parsing
-   // localStorage via getSeenMap/getSavedSet — so this mock's `seen`/`saved`
+   // localStorage per row — so this mock's `seen`/`saved`
    // must mirror into whichever `./model` instance the test currently has
    // (rebound per test via `_setModel`, since vi.resetModules() gives every
    // test a fresh model registry). Every mutator below calls syncModel().
@@ -161,7 +161,6 @@ const nav = vi.hoisted(() => {
          return true
       }),
       isSaved: vi.fn((chron: number) => saved.has(chron)),
-      getSavedSet: vi.fn(() => new Set(saved)),
       toggleSaved: vi.fn((chron: number) => {
          if (saved.has(chron)) {
             saved.delete(chron)

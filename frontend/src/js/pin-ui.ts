@@ -15,7 +15,7 @@ import * as model from "./model"
 import * as nav from "./nav"
 import { forgetStoreState } from "./mounts"
 import { isPinned, listPins, pinFilter, unpinFilter } from "./pin"
-import { isSavedIn, publishedByToggle } from "./saved"
+import { isSavedIn } from "./saved"
 import { onChange } from "./signals"
 
 // Offline-pin progress: show a transient "Downloading N / M…" note in the
@@ -165,7 +165,7 @@ function savedPinKey(chron: number): string {
    return nav.SAVED_TOKEN + ":" + chron
 }
 
-export async function syncSavedAssets(chron: number, saved: boolean): Promise<void> {
+async function syncSavedAssets(chron: number, saved: boolean): Promise<void> {
    const controller = navigator.serviceWorker?.controller
    if (!controller) return // dev / harness / insecure context — the SW is inert
    const store = data.activeStore()
@@ -193,26 +193,20 @@ export async function syncSavedAssets(chron: number, saved: boolean): Promise<vo
    requestPersistentStorage()
 }
 
-// FMT2a as an effect over model.saved (state-store P5): a chron that joined the
-// set gets its assets pinned, one that left gets them released. Every save and
-// un-save — the reader's star, a row's star, a row swipe — is a write saved.ts
-// publishes, so this one subscription replaces the hook they all used to call.
-// Only a TOGGLE is a save made on this device (saved.publishedByToggle()); a
-// store switch, a profile merge, another tab's write and the boot publish
-// replace the whole set and only re-baseline — exactly the scope the old hook
-// had. Gating on the publish, not on activeMid/profileRev moving in the same
-// run, is what holds when one merge publishes twice in two flush passes (it
-// also switched stores): the pair between them belong to two stores.
+// FMT2a as a response to the ★ toggle (model.savedToggle, written only by
+// saved.toggleSaved): the chron that joined the set gets its assets pinned, one
+// that left gets them released. Every save and un-save — the reader's star, a
+// row's star, a row swipe — is that one write, so this one subscription
+// replaces the hook they all used to call. It is a response to a WRITE, not a
+// projection of the set: a store switch, a profile merge, another tab's write
+// and the boot publish replace the whole set and pin nothing — and since they
+// never touch this atom, there is no set diff to suppress.
 export function initSavedAssets(): () => void {
    return onChange(
-      () => model.saved(),
-      (nextArr, beforeArr) => {
-         if (!publishedByToggle()) return
-         const next = new Set(nextArr)
-         const before = new Set(beforeArr)
+      () => model.savedToggle(),
+      (t) => {
          // Failures are silent: a save must never fail on account of an optional cache write.
-         for (const chron of next) if (!before.has(chron)) void syncSavedAssets(chron, true).catch(() => {})
-         for (const chron of before) if (!next.has(chron)) void syncSavedAssets(chron, false).catch(() => {})
+         if (t) void syncSavedAssets(t.chron, t.on).catch(() => {})
       },
    )
 }

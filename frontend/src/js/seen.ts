@@ -240,38 +240,57 @@ export function recordSeen(feedId: number, pos: number, scope: FrontierScope): R
    if (scope.peek) return
    const ch = data.db.feeds[feedId]
    if (!ch) return
+   // Opening an article marks every OLDER article in the navigation list as
+   // seen: for the article's own feed AND each other feed in the active
+   // filter (the list you're reading), raise its seen frontier to pos so
+   // all of its articles at-or-below pos read as seen — the chronological
+   // "everything before here is caught up" the reader expects. A one-way
+   // raise for EVERY feed, the current one included: stepping back to an
+   // older article re-reads it without un-marking anything — read progress
+   // only rewinds through the explicit markUnreadFrom gesture. (The own feed
+   // is raised outside the loop because a deep-linked article's feed can
+   // sit outside the filter membership.) Search and saved both returned
+   // above, so this only fires for feed/tag/[ALL] navigation — the
+   // contiguous read-throughs where a "previous = seen" frontier across
+   // feeds is meaningful.
+   let moved: Record<string, number | undefined> = {}
+   return writeSeen(
+      (seen) => {
+         moved = {}
+         const raise = (id: number) => writeFrontier(seen, moved, id, (prev) => prev === undefined || prev < pos, pos)
+         raise(feedId)
+         for (const id of scope.members) if (id !== feedId) raise(id)
+         return Object.keys(moved)
+      },
+      () => snapshotRaise(moved, pos),
+   )?.seen
+}
+
+// The one frame every frontier write shares: read the map, let `mutate` move
+// what it moves and name the keys it touched, then — only when something moved
+// — persist those keys, run `afterPersist` (the undo snapshot), queue the sync
+// push and publish the map. Storage that throws anywhere answers null with
+// nothing published (the in-memory map is dropped with it); a mutation that
+// moved nothing answers the map read, unpublished, for a caller that reuses it.
+function writeSeen(
+   mutate: (seen: Record<string, number>) => string[],
+   afterPersist?: () => void,
+): { seen: Record<string, number>; written: boolean } | null {
    let seen: Record<string, number>
    let touched: string[]
    try {
       seen = readSeen()
-      // Opening an article marks every OLDER article in the navigation list as
-      // seen: for the article's own feed AND each other feed in the active
-      // filter (the list you're reading), raise its seen frontier to pos so
-      // all of its articles at-or-below pos read as seen — the chronological
-      // "everything before here is caught up" the reader expects. A one-way
-      // raise for EVERY feed, the current one included: stepping back to an
-      // older article re-reads it without un-marking anything — read progress
-      // only rewinds through the explicit markUnreadFrom gesture. (The own feed
-      // is raised outside the loop because a deep-linked article's feed can
-      // sit outside the filter membership.) Search and saved both returned
-      // above, so this only fires for feed/tag/[ALL] navigation — the
-      // contiguous read-throughs where a "previous = seen" frontier across
-      // feeds is meaningful.
-      const moved: Record<string, number | undefined> = {}
-      const raise = (id: number) => writeFrontier(seen, moved, id, (prev) => prev === undefined || prev < pos, pos)
-      raise(feedId)
-      for (const id of scope.members) if (id !== feedId) raise(id)
-      touched = Object.keys(moved)
+      touched = mutate(seen)
       if (touched.length > 0) {
          persistSeen(seen, touched)
-         snapshotRaise(moved, pos)
+         afterPersist?.()
          sync.pushSoon()
       }
    } catch {
-      return undefined
+      return null
    }
    if (touched.length > 0) publishMap(seen)
-   return seen
+   return { seen, written: touched.length > 0 }
 }
 
 // RDR1/RDR2 — reversibility for the frontier RAISES.
@@ -398,24 +417,18 @@ export function undoFrontierMove(u: FrontierUndo): boolean {
    if (!u || u.mid !== data.activeStore().mid) return false
    lastRaise = null
    raiseOffered = false
-   let seen: Record<string, number>
-   try {
-      seen = readSeen()
-      const touched: string[] = []
-      for (const [key, prev] of Object.entries(u.prev)) {
-         const want = prev ?? -1
-         if (seen[key] === want) continue
-         seen[key] = want
-         touched.push(key)
-      }
-      if (touched.length === 0) return false
-      persistSeen(seen, touched)
-      sync.pushSoon()
-   } catch {
-      return false
-   }
-   publishMap(seen)
-   return true
+   return (
+      writeSeen((seen) => {
+         const touched: string[] = []
+         for (const [key, prev] of Object.entries(u.prev)) {
+            const want = prev ?? -1
+            if (seen[key] === want) continue
+            seen[key] = want
+            touched.push(key)
+         }
+         return touched
+      })?.written ?? false
+   )
 }
 
 // Drop the pending offer outright. Any newer raise replaces it anyway, so this
@@ -478,21 +491,19 @@ function moveFrontier(
    scope: FrontierScope,
 ): boolean {
    if (scope.peek) return false
-   let seen: Record<string, number>
-   try {
-      seen = readSeen()
-      const moved: Record<string, number | undefined> = {}
-      for (const feedId of scope.members) writeFrontier(seen, moved, feedId, shouldMove, value)
-      const touched = Object.keys(moved)
-      if (touched.length === 0) return false
-      persistSeen(seen, touched)
-      if (undoable) snapshotRaise(moved, value)
-      sync.pushSoon()
-   } catch {
-      return false
-   }
-   publishMap(seen)
-   return true
+   let moved: Record<string, number | undefined> = {}
+   return (
+      writeSeen(
+         (seen) => {
+            moved = {}
+            for (const feedId of scope.members) writeFrontier(seen, moved, feedId, shouldMove, value)
+            return Object.keys(moved)
+         },
+         () => {
+            if (undoable) snapshotRaise(moved, value)
+         },
+      )?.written ?? false
+   )
 }
 
 // Mark the whole current feed/tag/[ALL] selection read: raise every filter

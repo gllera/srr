@@ -13,9 +13,7 @@
 import * as data from "../data"
 import { WATCH_PACK_SIZE } from "../format.gen"
 import { bitAt, nextSet, popcountRange, prevSet, type WatchPlane } from "../watch-plane"
-import { keyOf, labelFor, type Lane, type LaneEntry } from "./lane"
-
-const NO_FEEDS: ReadonlyMap<number, number> = new Map()
+import { PeekLane } from "./lane"
 
 // The highest add_idx any feed carries. At or above it no article is expired,
 // so live() needs no idx lookup there.
@@ -25,15 +23,10 @@ function maxAddIdx(feeds: IDB["feeds"]): number {
    return m
 }
 
-export class WatchLane implements Lane {
+export class WatchLane extends PeekLane {
    readonly kind = "watch" as const
-   readonly tokens: readonly string[]
-   readonly key: string
    readonly rule: string
-   readonly peek = true
-   readonly dividers = false // strata over a sparse subset read as noise
    readonly chronOrdered = true
-   readonly members = NO_FEEDS
    // Regions this lane has loaded, so matches() can answer synchronously. A region
    // that is not resident reads as "no match"; the walks are what fault regions
    // in, exactly as findLeft/findRight fault idx packs in for a membership lane.
@@ -60,8 +53,7 @@ export class WatchLane implements Lane {
    private liveFrom: number
 
    constructor(tokens: readonly string[], rule: string, store?: data.Store) {
-      this.tokens = tokens
-      this.key = keyOf(tokens)
+      super(tokens)
       this.rule = rule
       this.store = store
       this.liveFrom = maxAddIdx(this.feeds())
@@ -105,10 +97,6 @@ export class WatchLane implements Lane {
       return !feed || chron >= (feed.add_idx ?? 0)
    }
 
-   label(): string {
-      return labelFor(this.key)
-   }
-
    matches(feedId: number, chron: number): boolean {
       if (chron < this.floor() || chron >= this.end()) return false
       const plane = this.planes.get(Math.floor(chron / WATCH_PACK_SIZE))
@@ -117,19 +105,24 @@ export class WatchLane implements Lane {
       return chron >= (this.feeds()[feedId]?.add_idx ?? 0)
    }
 
-   async atOrAbove(from: number): Promise<number> {
-      const end = this.end()
-      for (let c = Math.max(from, this.floor(), 0); c < end; ) {
+   // The set bits of [from, end) in chron order, faulting each region in as the
+   // walk reaches it — the one forward walk behind atOrAbove and expiredIn.
+   private async *setBits(from: number, end: number): AsyncGenerator<number> {
+      for (let c = from; c < end; ) {
          const p = Math.floor(c / WATCH_PACK_SIZE)
          const plane = await this.plane(p)
          const bits = plane.bits.get(this.rule)
          if (bits) {
             const stop = Math.min(end, plane.base + WATCH_PACK_SIZE) - plane.base
             for (let i = nextSet(bits, c - plane.base, stop); i !== -1; i = nextSet(bits, i + 1, stop))
-               if (await this.live(plane.base + i)) return plane.base + i
+               yield plane.base + i
          }
          c = (p + 1) * WATCH_PACK_SIZE
       }
+   }
+
+   async atOrAbove(from: number): Promise<number> {
+      for await (const c of this.setBits(Math.max(from, this.floor(), 0), this.end())) if (await this.live(c)) return c
       return -1
    }
 
@@ -149,25 +142,14 @@ export class WatchLane implements Lane {
       return -1
    }
 
-   older(chron: number): Promise<number> {
-      return this.atOrBelow(chron - 1)
-   }
-
-   newer(chron: number): Promise<number> {
-      return this.atOrAbove(chron + 1)
-   }
-
    oldest(): Promise<number> {
       return this.atOrAbove(0)
    }
 
-   newest(): Promise<number> {
+   // Its own coverage end, not the store's: a lane pinned to a store (a picker
+   // count) must never read the active store's total.
+   override newest(): Promise<number> {
       return this.atOrBelow(this.end() - 1)
-   }
-
-   // Newest-first, like search: a scan of recent hits, not a backlog to consume.
-   anchor(): Promise<number> {
-      return Promise.resolve(-1)
    }
 
    // Set bits in (floor, wc) ∩ [wf, wc). The whole-coverage badge (floor -1) is
@@ -194,26 +176,12 @@ export class WatchLane implements Lane {
 
    private async expiredIn(lo: number, hi: number): Promise<number> {
       let n = 0
-      for (let c = lo; c < hi; ) {
-         const p = Math.floor(c / WATCH_PACK_SIZE)
-         const plane = await this.plane(p)
-         const bits = plane.bits.get(this.rule)
-         if (bits) {
-            const stop = Math.min(hi, plane.base + WATCH_PACK_SIZE) - plane.base
-            for (let i = nextSet(bits, c - plane.base, stop); i !== -1; i = nextSet(bits, i + 1, stop))
-               if (!(await this.live(plane.base + i))) n++
-         }
-         c = (p + 1) * WATCH_PACK_SIZE
-      }
+      for await (const c of this.setBits(lo, hi)) if (!(await this.live(c))) n++
       return n
    }
 
-   async entry(): Promise<LaneEntry> {
-      return { land: await this.newest(), record: false }
-   }
-
    // matches() must hold for the tail region, where a switch and a deep link land.
-   async prepare(): Promise<void> {
+   override async prepare(): Promise<void> {
       const end = this.end()
       if (end > this.floor()) await this.plane(Math.floor((end - 1) / WATCH_PACK_SIZE))
    }
@@ -225,7 +193,7 @@ export class WatchLane implements Lane {
    // yet — is dropped. matches()/anchorChron would misread a dropped position as
    // "no match" until something faulted it back in, so the new tail and every
    // dropped position are reloaded together in the one pass below.
-   async refreshed(): Promise<void> {
+   override async refreshed(): Promise<void> {
       this.gen++
       this.liveFrom = maxAddIdx(this.feeds())
       const end = this.end()
@@ -239,22 +207,10 @@ export class WatchLane implements Lane {
       await Promise.all([...reload].map((p) => this.plane(p)))
    }
 
-   landed(): void {
-      // A peek lane remembers nothing about a landing.
-   }
-
-   applyUnseen(): void {
-      // A peek lane has no bounds to raise.
-   }
-
-   entryAnchor(): number {
-      return -1
-   }
-
    // matches() is only correct for a RESIDENT region. prepare() faults in the
    // tail alone (the switch/deep-link common case), so a restored #pos or a
    // shared link into an older region needs its own region faulted in before
-   // validResume's synchronous matches() check can answer it — this is that
+   // admits()'s synchronous matches() check can answer it — this is that
    // fault, keyed to the one chron the caller is validating.
    async ensureRegion(chron: number): Promise<void> {
       if (chron >= this.floor() && chron < this.end()) await this.plane(Math.floor(chron / WATCH_PACK_SIZE))

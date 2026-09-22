@@ -122,18 +122,18 @@ describe("split", () => {
       printing = true
       fire!({ matches: false })
       expect(document.body.classList.contains("srr-split")).toBe(false)
-      expect(model.printOverride()).toBe(true)
+      expect(model.printSplit()).toBe(false)
 
       fire!({ matches: false }) // repeats — no undo happened yet
       expect(document.body.classList.contains("srr-split")).toBe(false)
-      expect(model.printOverride()).toBe(true) // still engaged, not flipped off
+      expect(model.printSplit()).toBe(false) // still engaged, not flipped off
 
       model.focus.set("reader") // an unrelated layout write, mid-print
       expect(document.body.classList.contains("srr-split")).toBe(false) // still holds
 
-      fire!({ matches: true }) // the eventual real undo
+      fire!({ matches: true }) // the eventual real undo, print media still matching
       expect(document.body.classList.contains("srr-split")).toBe(true)
-      expect(model.printOverride()).toBe(false)
+      expect(model.printSplit()).toBe(true) // still printing: the value follows the media
    })
 
    // Chrome's REAL order, measured with a headless print-to-PDF: beforeprint, the
@@ -151,7 +151,7 @@ describe("split", () => {
       printing = false
       window.dispatchEvent(new Event("afterprint"))
       expect(document.body.classList.contains("srr-split")).toBe(true)
-      expect(model.printOverride()).toBe(false)
+      expect(model.printSplit()).toBe(null)
       fire!({ matches: true }) // the late undo: nothing moved on screen
       expect(document.body.classList.contains("srr-split")).toBe(true)
       expect(seen).toEqual([]) // no crossing reached the app
@@ -170,7 +170,7 @@ describe("split", () => {
       printing = false
       fire!({ matches: true })
       expect(document.body.classList.contains("srr-split")).toBe(true)
-      expect(model.printOverride()).toBe(false)
+      expect(model.printSplit()).toBe(null)
       expect(seen).toEqual([])
    })
 

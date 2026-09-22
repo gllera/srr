@@ -38,11 +38,10 @@ beforeEach(() => {
 describe("SearchLane — shape", () => {
    it("an unscoped query is feed-agnostic and keyed by its token", () => {
       const l = make(["q:rust"])
-      expect([l.kind, l.key, l.query, l.label(), l.peek, l.dividers, l.chronOrdered]).toEqual([
+      expect([l.kind, l.key, l.query, l.peek, l.dividers, l.chronOrdered]).toEqual([
          "search",
          "q:rust",
          "rust",
-         "Search: rust",
          true,
          false,
          true,
@@ -75,7 +74,6 @@ describe("SearchLane — the snapshot", () => {
       expect([await l.older(4), await l.newer(4)]).toEqual([1, 5])
       expect([await l.oldest(), await l.newest(), await l.anchor()]).toEqual([1, 5, -1])
       expect(searchCard(4)).toEqual(card4)
-      expect(l.card?.(4)).toEqual(card4)
       expect(searchTruncated()).toBe(false)
    })
 
@@ -153,7 +151,7 @@ describe("SearchLane — the snapshot", () => {
    it("counts hits strictly after the floor, and lands a switch on the newest", async () => {
       const l = make(["q:rust"])
       expect([await l.ahead(-1), await l.ahead(1), await l.ahead(5)]).toEqual([3, 2, 0])
-      expect(await l.entry()).toEqual({ land: 5, record: false })
+      expect(await l.entry()).toEqual({ land: 5 })
    })
 
    it("a refresh reloads the snapshot and reconciles the scope", async () => {

@@ -48,13 +48,28 @@ const mockData = vi.hoisted(() => {
          return { meta: { keys, tail }, ssum: mp > 0 ? { key: `meta/s${mp}.gz`, covers: mp } : null }
       },
       deltaArticles: () => data.deltaArts,
-      parseJsonl: <T>(buf: ArrayBuffer): T[] => {
+      parseJsonl: <T>(buf: ArrayBuffer | Uint8Array): T[] => {
          const text = new TextDecoder().decode(buf)
          const out: T[] = []
          for (const line of text.split("\n")) {
             if (line) out.push(JSON.parse(line) as T)
          }
          return out
+      },
+      // The real loadMetaPack over this mock's names and bytes (uncached here:
+      // search.ts's own shard slots are what these cases count fetches through).
+      loadMetaPack: async (n: number) => {
+         const meta = data.storeNames().meta
+         const key = meta.keys[n]
+         if (!key) throw new Error(`meta shard ${n}: the store names no object at position ${n}`)
+         const isLatest = n === meta.tail
+         const buf = await data.fetchPackBytes(key, isLatest)
+         if (isLatest) return data.parseJsonl<IMetaWire>(buf)
+         if (buf.byteLength < 4096) {
+            console.warn(`meta shard ${n}: truncated (${buf.byteLength} < 4096 bytes)`)
+            return []
+         }
+         return data.parseJsonl<IMetaWire>(new Uint8Array(buf, 4096))
       },
       // search.ts keys its per-store lazy state (summary/latest/shard/hit slots)
       // in a WeakMap by the Store activeStore() returns; the mock namespace has a

@@ -1,15 +1,8 @@
+import { cachedPromise, makeLRU, type LRU } from "./cache"
 import * as data from "./data"
 import { UNREAD_ONLY_KEY } from "./keys"
 import * as model from "./model"
-import {
-   firstUnreadProbe,
-   labelFor,
-   validResume,
-   WATCH_PREFIX,
-   type Lane,
-   type LaneEntry,
-   type LaneEnv,
-} from "./nav/lane"
+import { labelFor, WATCH_PREFIX, type Lane, type LaneEntry, type LaneEnv } from "./nav/lane"
 import { MembersLane } from "./nav/lane-members"
 import type { SearchLane } from "./nav/lane-search"
 import { WatchLane } from "./nav/lane-watch"
@@ -46,7 +39,7 @@ import { arrayEqual, batch, onChange, untracked } from "./signals"
 // stays here — the active lane and unreadOnly (the cursor lives in the model) —
 // reaches them as explicit
 // arguments (a FrontierScope, a toggle context, a token list), never by import.
-export { getSavedSet, publishSaved } from "./saved"
+export { publishSaved } from "./saved"
 export {
    clearFrontierUndo,
    frontierUndoSize,
@@ -87,20 +80,46 @@ function cursorChron(): number {
 function cursorFeed(): number {
    return untracked(() => model.cursor()).feedId
 }
-const next: { left?: Promise<number>; right?: Promise<number> } = {}
+
+// The cached → / ← probes step() starts after a landing — valid for exactly
+// that landing: this lane object, this cursor, this store, this entry anchor.
+// Any other state is a miss, so a landing, a lane change or a store switch needs
+// no clearing — nor does a landing that moves the unread-only entry anchor
+// (lane.landed on a read article) without a new lane, since the anchor is part
+// of what the lookups answer; only a membership change under an UNMOVED cursor
+// (a store refresh, the ★ queue moving) drops them by hand.
+interface NextProbes {
+   lane: Lane
+   chron: number
+   anchor: number
+   mid: string
+   left?: Promise<number>
+   right?: Promise<number>
+}
+let next: NextProbes | null = null
+function nextFor(dir: "left" | "right"): Promise<number> | undefined {
+   const n = next
+   return n &&
+      n.lane === lane &&
+      n.chron === cursorChron() &&
+      n.anchor === lane.entryAnchor() &&
+      n.mid === data.activeStore().mid
+      ? n[dir]
+      : undefined
+}
 
 // Unseen-only navigation: when on, the active filter skips articles already
 // seen (per the seen positions read at filter-apply time), so you glide past
 // feeds you're caught up on. A device-local preference, not part of the
-// shareable #pos!tokens hash. See setLane / a lane's applyUnseen and
-// dropdown.ts's chip.
-let unreadOnly = lsGet(UNREAD_ONLY_KEY) === "1"
-model.unreadOnly.set(unreadOnly)
+// shareable #pos!tokens hash, held in the model (model.unreadOnly, written only
+// here) and read UNTRACKED like the cursor. See setLane / a lane's applyUnseen
+// and dropdown.ts's chip.
+model.unreadOnly.set(lsGet(UNREAD_ONLY_KEY) === "1")
 
 // The active filter MODE. Every mode-dependent question is a method on it
 // (nav/lane.ts); nav owns only WHICH lane is active and the cursor over it.
 const env: LaneEnv = {
-   unreadOnly: () => unreadOnly,
+   unreadOnly: isUnreadOnly,
    searchKey: () => searchLane()?.searchKey ?? "",
 }
 // The lane's identity as the model sees it, published the moment a lane becomes
@@ -119,18 +138,13 @@ let lane: Lane = new MembersLane([], new Map(), env)
 
 function setLane(tokens: readonly string[], opts: { keepKnownEmpty?: boolean } = {}): void {
    lane = makeLane(tokens, env, opts)
-   // The cached → / ← probes name the previous lane's neighbours. A pick that
-   // keeps the article on screen lands nothing (app.ts selectTokens), so this is
-   // the one place that can drop them before the next step.
-   next.left = next.right = undefined
    publishLane()
 }
 
 export function isUnreadOnly(): boolean {
-   return unreadOnly
+   return untracked(() => model.unreadOnly())
 }
 export function setUnreadOnly(on: boolean) {
-   unreadOnly = on
    // Persist BOTH states explicitly ("1"/"0"): an absent key means "never
    // chosen", which app.ts treats as the unread-only default on first run — so a
    // user who turns it off must store "0", not clear the key, or it'd revert.
@@ -147,7 +161,7 @@ export function toggleSaved(chron: number): boolean {
       savedMode: lane.kind === "saved",
       pos: cursorChron(),
       onQueueChange: () => {
-         next.left = next.right = undefined
+         next = null
       },
    })
 }
@@ -334,22 +348,16 @@ export function laneChronOrdered(): boolean {
 // store: a count still walking regions when the user switches stores must not
 // finish on the other store's planes under this store's key. A failed count is
 // forgotten, so the next render retries. 0 for a rule the store no longer lists.
-const watchCounts = new WeakMap<object, Map<string, Promise<number>>>()
+const watchCounts = new WeakMap<object, LRU<Promise<number>, string>>()
 export function watchLaneCount(rule: string): Promise<number> {
    const store = data.activeStore()
    let memo = watchCounts.get(store.db)
-   if (!memo) watchCounts.set(store.db, (memo = new Map()))
-   const hit = memo.get(rule)
-   if (hit) return hit
-   const count = Object.hasOwn(data.watchRules(store), rule)
-      ? new WatchLane([WATCH_PREFIX + rule], rule, store).ahead(-1)
-      : Promise.resolve(0)
-   const slots = memo
-   slots.set(rule, count)
-   count.catch(() => {
-      if (slots.get(rule) === count) slots.delete(rule)
-   })
-   return count
+   if (!memo) watchCounts.set(store.db, (memo = makeLRU<Promise<number>, string>(Infinity)))
+   return cachedPromise(memo, rule, () =>
+      Object.hasOwn(data.watchRules(store), rule)
+         ? new WatchLane([WATCH_PREFIX + rule], rule, store).ahead(-1)
+         : Promise.resolve(0),
+   )
 }
 
 // After data.refresh() swapped the store snapshot: reconcile the filter and the
@@ -368,7 +376,7 @@ export async function onStoreRefreshed(): Promise<void> {
    // Cached neighbour probes are exactly what new content invalidates, and an
    // in-flight prefetch may target stale content: drop both, then let the lane
    // reconcile (bounds only rise; an active query reloads its snapshot).
-   next.left = next.right = undefined
+   next = null
    abortPrefetch()
    await lane.refreshed()
 }
@@ -388,7 +396,7 @@ export async function probeCurrent(): Promise<IShowFeed | null> {
 // search). Matches the exact conditions under which applyUnseen raises bounds,
 // so feedUnread and isValidSeen can branch on the same predicate.
 function unseenActive(): boolean {
-   return unreadOnly && !lane.peek
+   return isUnreadOnly() && !lane.peek
 }
 
 // The reader's pending readout: what the next pill displays. ★ Saved counts its
@@ -506,17 +514,21 @@ export function isStaleLanding(e: unknown): boolean {
 // The internal half of a Landing: the store it belongs to, stamped when the
 // COMMAND starts (after fromHash's/switchFilter's own switch) and carried into
 // every nested landing call, so a first()/last() fallback reached after the
-// switch cannot re-stamp itself with the new store.
+// switch cannot re-stamp itself with the new store. stamped() is the one minter,
+// at the public→internal boundary; every internal landing REQUIRES the stamp,
+// so a call that forgot to carry it is a type error rather than a silent
+// re-stamp with whatever store is active by then.
 type Stamped = Landing & { at?: string }
+type Committed = Landing & { at: string }
 function stamped<T extends Stamped>(o: T): T & { at: string } {
    return { ...o, at: o.at ?? data.activeStore().mid }
 }
-function assertStore(at: string | undefined): void {
-   if (at !== undefined && at !== data.activeStore().mid) throw new StaleLandingError()
+function assertStore(at: string): void {
+   if (at !== data.activeStore().mid) throw new StaleLandingError()
 }
 
-async function resolve(target: number, o: Stamped = {}): Promise<IShowFeed> {
-   const { replace = false, record = true, at = data.activeStore().mid } = o
+async function resolve(target: number, o: Committed): Promise<IShowFeed> {
+   const { replace = false, record = true, at } = o
    // Load first; commit pos only on success so a Retry replays the same chron.
    const article = await data.loadArticle(target)
    assertStore(at)
@@ -541,7 +553,6 @@ async function resolve(target: number, o: Stamped = {}): Promise<IShowFeed> {
       // lane hook: the ghost is saved.ts state that outlives a lane switch, so every
       // landing clears it, whatever lane it lands in.
       clearSavedGhost()
-      next.left = next.right = undefined
       // Arriving at the article being prefetched must NOT abort it: its in-flight
       // loads are exactly what the rendered content is about to attach to (same-URL
       // image loads coalesce within a document — aborting here restarted every
@@ -601,19 +612,17 @@ export function bumpFrontierEpoch(): void {
 // The reader's no-article state. `notStarted` picks which unread-only message the
 // empty state shows: true = a never-opened feed/tag (has unread, no resume point →
 // "start from the list"); false = caught-up (nothing unread) or a plain no-match.
-function resolveNoMatch(o: Stamped & { notStarted?: boolean } = {}): IShowFeed {
-   const { replace = false, notStarted = false } = o
-   assertStore(o.at)
+function resolveNoMatch(o: Committed & { notStarted?: boolean }): IShowFeed {
+   const { replace = false, notStarted = false, at } = o
+   assertStore(at)
    // Batched like resolve(): the flush — and any error an effect throws — comes
    // after the cleanup and the hash write, not between them.
    batch(() => {
       model.cursor.set({ chron: -1, feedId: -1 })
       model.landed.update((n) => n + 1)
-      // Same cleanup as resolve(): the cached neighbor probes, the saved ghost, and
-      // any in-flight media prefetch belong to the PREVIOUS filter's article and are
-      // now stale.
+      // Same cleanup as resolve(): the saved ghost and any in-flight media
+      // prefetch belong to the PREVIOUS filter's article and are now stale.
       clearSavedGhost()
-      next.left = next.right = undefined
       abortPrefetch()
       updateHash(replace)
    })
@@ -710,26 +719,27 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
 }
 
 // One directional navigation step. The post-navigation neighbor lookup is
-// speculative, so it is stored as an un-awaited promise: findLeft/findRight
-// may lazily fetch an idx pack, and that must neither delay the article
-// already on screen nor reject a navigation that succeeded (a failed lookup
-// just clears its slot; the next keypress retries on the critical path).
-// The slot-identity checks keep a lookup superseded by a newer navigation
-// from prefetching or clearing on its behalf.
+// speculative, so it is stored as an un-awaited promise keyed to the landing
+// (nextFor): findLeft/findRight may lazily fetch an idx pack, and that must
+// neither delay the article already on screen nor reject a navigation that
+// succeeded (a failed lookup just clears its slot; the next keypress retries on
+// the critical path). The slot-identity checks keep a lookup superseded by a
+// newer navigation from prefetching or clearing on its behalf.
 async function step(dir: "left" | "right"): Promise<IShowFeed> {
    const at = data.activeStore().mid
    const lookup = () => (dir === "left" ? neighborOlder(cursorChron()) : neighborNewer(cursorChron()))
-   const target = await (next[dir] ?? lookup())
+   const target = await (nextFor(dir) ?? lookup())
    assertStore(at)
    if (target === -1) throw new Error(`no ${dir} match`)
    const result = await resolve(target, { at })
-   const mine = (next[dir] = lookup())
+   const slot: NextProbes = (next = { lane, chron: target, anchor: lane.entryAnchor(), mid: at })
+   const mine = (slot[dir] = lookup())
    mine
       .then((t) => {
-         if (next[dir] === mine) schedulePrefetch(t)
+         if (slot[dir] === mine) schedulePrefetch(t)
       })
       .catch(() => {
-         if (next[dir] === mine) next[dir] = undefined
+         if (slot[dir] === mine) slot[dir] = undefined
       })
    return result
 }
@@ -763,8 +773,8 @@ async function lastIn(o: Stamped): Promise<IShowFeed> {
    return resolve(found, { replace, record, at })
 }
 
-async function isValidSeen(idx: number): Promise<boolean> {
-   return validResume(lane, idx, unreadOnly)
+function isValidSeen(idx: number): Promise<boolean> {
+   return lane.admits(idx)
 }
 
 // True when unread-only is on and the active feed/tag filter has no unread
@@ -774,13 +784,13 @@ async function isValidSeen(idx: number): Promise<boolean> {
 // of resuming onto an already-read article: in unread-only mode a caught-up lane
 // has nothing to show. Show-read mode (unseenActive false) returns false — you
 // browse the read articles there, so the resume onto one is correct.
-// The oldest-unread scan, once. `known` distinguishes a genuine -1 (the lane is
-// caught up) from a cold finalized-pack fetch that blipped — the callers must
-// never strand an open on the "All caught up" placeholder over a transient probe
-// failure, so an unknown answer resumes normally (showFeed degrades the neighbor
-// buttons on its own).
+// The lane's own oldest-unread scan, once. `known` distinguishes a genuine -1
+// (the lane is caught up) from a cold finalized-pack fetch that blipped — the
+// callers must never strand an open on the "All caught up" placeholder over a
+// transient probe failure, so an unknown answer resumes normally (showFeed
+// degrades the neighbor buttons on its own).
 async function noUnreadLeft(): Promise<boolean> {
-   const { chron, known } = await firstUnreadProbe(lane, unreadOnly)
+   const { chron, known } = await lane.firstUnread()
    return known && chron === -1
 }
 
@@ -797,13 +807,26 @@ async function noUnreadLeft(): Promise<boolean> {
 // is a resume, not a read, so it never advances the seen frontier — merely
 // visiting a lane cannot decrement its unread count. Reading forward (Right)
 // records normally from there.
-export async function switchFilter(token: string): Promise<IShowFeed> {
+export function switchFilter(token: string): Promise<IShowFeed> {
    token = resolveMountToken(token)
-   setLane(token === "" ? [] : [token], { keepKnownEmpty: true })
+   return enterLane(token === "" ? [] : [token])
+}
+
+// Re-enter the ACTIVE lane through its own entry decision: a reader placeholder
+// re-derived after its bounds or mode moved (app.ts rerunPlaceholder — a
+// frontier gesture, a Show-read flip). switchFilter's landing without its token
+// resolution, so a multi-token (URL-only) lane re-enters as itself instead of
+// through the key that collapses it to [ALL].
+export function reenterLane(): Promise<IShowFeed> {
+   return enterLane([...lane.tokens])
+}
+
+async function enterLane(tokens: readonly string[]): Promise<IShowFeed> {
+   setLane(tokens, { keepKnownEmpty: true })
    const at = data.activeStore().mid
    // A token that named nothing resolved to [ALL]: land on its newest, not on the
    // [ALL] lane's own entry (a stale token is not a pick of [ALL]).
-   if (token !== "" && lane.tokens.length === 0) return lastIn({ record: false, at })
+   if (tokens.length > 0 && lane.tokens.length === 0) return lastIn({ record: false, at })
    // The entry is THIS lane's. A filter applied while prepare() is awaited (route()'s
    // list path runs outside the mutex) replaces the lane, and its entry is not what
    // this pick asked for. A same-token rebuild (reapplyLane) is still this pick.
@@ -820,7 +843,8 @@ async function actOnEntry(e: LaneEntry, at: string): Promise<IShowFeed> {
    if ("land" in e) return e.land === -1 ? resolveNoMatch({ at }) : resolve(e.land, { record: false, at })
    const o = resolveNoMatch({ notStarted: e.notStarted, at })
    if (e.notStarted) {
-      o.has_right = e.hasRight
+      // Next is armed: the whole backlog is ahead of a lane never opened.
+      o.has_right = true
       o.right_count = e.rightCount ?? -1
       o.startFeed = e.startFeed
    }
@@ -881,7 +905,6 @@ export async function goToArticle(chron: number): Promise<IShowFeed> {
 // the list cursor isn't reading the article — pos just tracks the highlight so
 // opening it (tap) or re-anchoring the list later stays consistent.
 export function select(chron: number, feedId: number): void {
-   next.left = next.right = undefined
    abortPrefetch()
    // Last: the write runs every effect over the cursor, and a throwing one
    // rethrows from here (signals semantic 7).
@@ -994,7 +1017,7 @@ export function cycleOriginKey(): string {
 async function cyclableLanes(entries: string[]): Promise<Set<string>> {
    const keep = new Set(entries)
    keep.delete(SAVED_TOKEN)
-   if (!unreadOnly) return keep
+   if (!isUnreadOnly()) return keep
    const { tagged, untagged } = data.groupFeedsByTag()
    const counts = await unreadCounts([...untagged, ...[...tagged.values()].flat()])
    for (const ch of untagged) if ((counts.get(ch.id) ?? 0) === 0) keep.delete(String(ch.id))
@@ -1051,21 +1074,19 @@ onChange(
    () => model.profileRev(),
    () => {
       const stored = lsGet(UNREAD_ONLY_KEY)
-      if (stored !== "" && (stored === "1") !== unreadOnly) setUnreadOnly(stored === "1")
+      if (stored !== "" && (stored === "1") !== isUnreadOnly()) setUnreadOnly(stored === "1")
    },
 )
 
 // A store switch leaves nothing under the cursor. chronIdx is only unique within
 // a mount (S38), so the previous store's chron names an unrelated article here:
 // the ★, the arrows, the pill and the list anchor would all describe it. The
-// cached neighbour probes, the saved ghost and any in-flight prefetch belong to
-// that article too. A landing in the new store (fromHash, a peer lane pick) sets
-// its own cursor right after.
+// saved ghost and any in-flight prefetch belong to that article too. A landing
+// in the new store (fromHash, a peer lane pick) sets its own cursor right after.
 onChange(
    () => model.activeMid(),
    () => {
       model.cursor.set({ chron: -1, feedId: -1 })
-      next.left = next.right = undefined
       clearSavedGhost()
       abortPrefetch()
    },

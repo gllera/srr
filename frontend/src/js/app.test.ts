@@ -152,6 +152,8 @@ const nav = vi.hoisted(() => {
       // not a navigation, so the mock is a plain placeholder IShowFeed.
       restingState: vi.fn(async () => ({ ...sf(), placeholder: true, notStarted: true, has_right: true })),
       switchFilter: vi.fn(async () => sf()),
+      // The active lane re-entered through its own entry decision (rerunPlaceholder).
+      reenterLane: vi.fn(async () => sf()),
       seek: vi.fn(async () => 0),
       filterKey: vi.fn(() => ""),
       filter: { feeds: new Map<number, number>(), saved: false, search: false, active: false, tokens: [] as string[] },
@@ -3310,20 +3312,19 @@ describe("filter picker — the toolbar's filter button (both surfaces)", () => 
       hashTo("#2")
       await flush()
       seedCursor(-1) // reader shows a "Not started"/"caught up" placeholder
-      nav.getCurrentFilterKey.mockReturnValue("7")
       seedUnreadOnly(true)
       nav.setUnreadOnly.mockClear()
-      nav.switchFilter.mockClear()
+      nav.reenterLane.mockClear()
       nav.probeCurrent.mockClear()
       pickerHooks()!.onToggleShowRead()
       await flush()
       expect(nav.setUnreadOnly).toHaveBeenCalledWith(false)
-      // probeCurrent no-ops for pos < 0, so the surface must re-resolve via switchFilter
-      expect(nav.switchFilter).toHaveBeenCalledWith("7")
+      // probeCurrent no-ops for pos < 0, so the surface must re-enter the lane
+      expect(nav.reenterLane).toHaveBeenCalledTimes(1)
       expect(nav.probeCurrent).not.toHaveBeenCalled()
    })
 
-   it("onToggleShowRead over a MULTI-token reader placeholder does not teleport to [ALL]", async () => {
+   it("onToggleShowRead over a MULTI-token reader placeholder re-enters that lane, never [ALL]", async () => {
       await boot()
       nav.fromHash.mockResolvedValue({ ...showFeed(), placeholder: true }) // both of hashTo's routes
       hashTo("#2")
@@ -3334,10 +3335,12 @@ describe("filter picker — the toolbar's filter button (both surfaces)", () => 
       nav.getCurrentFilterKey.mockReturnValue("") // getCurrentFilterKey collapses multi-token to ""
       seedUnreadOnly(true)
       nav.switchFilter.mockClear()
+      nav.reenterLane.mockClear()
       pickerHooks()!.onToggleShowRead()
       await flush()
-      // switchFilter("") would re-filter to [ALL] and teleport the reader off
-      // feeds 5+9 — the multi-token placeholder must be left untouched instead.
+      // The lane re-enters AS ITSELF: a key-based switch ("") would re-filter to
+      // [ALL] and teleport the reader off feeds 5+9.
+      expect(nav.reenterLane).toHaveBeenCalledTimes(1)
       expect(nav.switchFilter).not.toHaveBeenCalled()
    })
 
@@ -3352,14 +3355,12 @@ describe("filter picker — the toolbar's filter button (both surfaces)", () => 
          hashTo("#2")
          await flush()
          seedCursor(9) // the list pane's rebuild seeded its anchor row
-         nav.getCurrentFilterKey.mockReturnValue("7")
          seedUnreadOnly(true)
-         nav.switchFilter.mockClear()
+         nav.reenterLane.mockClear()
          pickerHooks()!.onToggleShowRead()
          await flush()
-         expect(nav.switchFilter).toHaveBeenCalledWith("7")
+         expect(nav.reenterLane).toHaveBeenCalledTimes(1)
       } finally {
-         nav.getCurrentFilterKey.mockReturnValue("")
          document.body.classList.remove("srr-split") // initSplit reads it back on the next boot
       }
    })

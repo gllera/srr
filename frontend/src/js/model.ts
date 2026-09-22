@@ -36,6 +36,10 @@ export const activeMid = signal<string>(HOME_MID)
 // ── Device state (the VALUE after each write; localStorage stays the store) ────
 export const seen = signal<Readonly<Record<string, number>>>({}, shallowEqual)
 export const saved = signal<readonly number[]>([], arrayEqual) // insertion order, as srr-saved stores it
+// The last ★ toggle made on THIS device (saved.toggleSaved): the one kind of
+// saved-set write pin-ui pins. A publish that replaces the set wholesale (boot,
+// a store switch, a profile merge, another tab) never writes it.
+export const savedToggle = signal<{ chron: number; on: boolean } | null>(null)
 // Bumped only by a filter-scoped bulk frontier move (D1) — never by ordinary reading.
 export const frontierEpoch = signal(0)
 // Bumped by a profile merge that changed local state / moved the mount table (S14).
@@ -55,13 +59,14 @@ export const paneHidden = signal(false)
 export const readerPainted = signal(false)
 // A command that ends in a surface paint is in flight (D3, S16).
 export const rendering = signal(false)
-// split.ts's print-time override (Chrome re-evaluates the split breakpoint
-// against the page box while printing). True exactly while the raw class
-// split.ts toggled differs from the screen-truth model.split; cleared when
-// printing ends (afterprint, or any crossing delivered outside print media).
-// layout.ts's applyLayout skips srr-split while it is set, so a write to any of
-// the other four layout inputs mid-print cannot revert the raw toggle.
-export const printOverride = signal(false)
+// split.ts's print-time value for body.srr-split (Chrome re-evaluates the split
+// breakpoint against the page box while printing): the class follows this while
+// it is set, and the screen-truth model.split otherwise. null = not printing;
+// cleared when printing ends (afterprint, or any crossing delivered outside
+// print media). A VALUE rather than a flag, so layout.ts stays the one writer
+// of the class and a write to any other layout input mid-print re-stamps it
+// from here rather than from model.split.
+export const printSplit = signal<boolean | null>(null)
 
 // ── Status the settings footer reads ──────────────────────────────────────────
 export const syncStatus = signal<SyncStatus>({ on: false, okAt: 0, error: "" }, shallowEqual)

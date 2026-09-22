@@ -18,8 +18,8 @@
 import * as data from "./data"
 import { savedKey, savedTsKey } from "./keys"
 import * as model from "./model"
-import { onChange } from "./signals"
-import { readIdSet, stampTsMap, writeIdSet } from "./storage"
+import { batch, onChange } from "./signals"
+import { lsGet, readIdSet, stampTsMap, writeIdSet } from "./storage"
 import * as sync from "./sync"
 
 // Per-store key (docs/MULTI-STORE-SPEC.md §4.2): namespaced by the ACTIVE
@@ -31,11 +31,22 @@ const savedTsK = () => savedTsKey(data.activeStore().mid)
 
 export const SAVED_TOKEN = "~saved"
 
-// Re-read on each access (no module-level cache): the set is small and
-// user-curated, so the localStorage parse is cheap, and reading fresh stays
-// correct across tabs and keeps tests/`vi.resetModules` free of stale state.
-function readSavedSet(): Set<number> {
-   return readIdSet(savedK())
+// Read fresh from storage on each access — correct across tabs, and no state
+// for tests/`vi.resetModules` to stale — but PARSED only when the stored string
+// moved: the ★ Saved lane asks per list row, and the parse plus the Set were
+// the cost. Callers never mutate the returned set (toggleSaved copies).
+let parsedKey = ""
+let parsedRaw: string | null = null
+let parsed = new Set<number>()
+function readSavedSet(): ReadonlySet<number> {
+   const key = savedK()
+   const raw = lsGet(key)
+   if (key !== parsedKey || raw !== parsedRaw) {
+      parsed = readIdSet(key)
+      parsedKey = key
+      parsedRaw = raw
+   }
+   return parsed
 }
 // Save order (Set iteration == insertion order): the ★ Saved queue read
 // front-to-back. NOT sorted by chronIdx — new saves append to the end.
@@ -43,19 +54,9 @@ export function savedOrder(): number[] {
    return [...readSavedSet()]
 }
 
-// Whether the latest publish of model.saved was a toggle — a save or un-save
-// made on this device, the only kind pin-ui pins. Every other publish (the boot
-// publish, a store switch, a profile merge, another tab's write) replaces the
-// set wholesale, and the pin effect re-baselines over it.
-let lastByToggle = false
-export function publishedByToggle(): boolean {
-   return lastByToggle
-}
-
 // Publish the ACTIVE store's saved order as stored (a merge wrote localStorage
 // itself; the first publish after boot). toggleSaved is the other writer.
 export function publishSaved(): void {
-   lastByToggle = false
    model.saved.set(savedOrder())
 }
 
@@ -132,11 +133,6 @@ function stampSaved(chron: number): void {
 export function isSaved(chron: number): boolean {
    return readSavedSet().has(chron)
 }
-// The bulk-read twin of getSeenMap: one parse for a whole render/refresh pass
-// (list.ts threads it through rowEl) instead of a localStorage read per row.
-export function getSavedSet(): Set<number> {
-   return readSavedSet()
-}
 export function savedCount(): number {
    return readSavedSet().size
 }
@@ -152,7 +148,7 @@ export function toggleSaved(
    chron: number,
    ctx: { savedMode: boolean; pos: number; onQueueChange: () => void },
 ): boolean {
-   const set = readSavedSet()
+   const set = new Set(readSavedSet())
    const nowSaved = !set.has(chron)
    // Un-saving the article currently on screen in ★ Saved mode: capture its queue
    // neighbors + ahead-count from the pre-removal order so the reader can still
@@ -173,8 +169,12 @@ export function toggleSaved(
    sync.pushSoon()
    ctx.onQueueChange()
    // Last: the flush this write triggers runs every effect over the saved set,
-   // and nothing above may depend on all of them succeeding.
-   lastByToggle = true
-   model.saved.set([...set])
+   // and nothing above may depend on all of them succeeding. The toggle itself
+   // is published beside the set, in the same flush, for the one subscriber
+   // that answers a toggle rather than a set (pin-ui).
+   batch(() => {
+      model.saved.set([...set])
+      model.savedToggle.set({ chron, on: nowSaved })
+   })
    return nowSaved
 }

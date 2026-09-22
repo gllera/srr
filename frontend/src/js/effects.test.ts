@@ -554,9 +554,9 @@ describe("listRows", () => {
    // happens under app.ts's boot hold, so this effect's very first run sees
    // model.rendering() already true and must freeze its PRE-hold baseline
    // (cursor -1, not live) rather than treat the held state as unprimed. A
-   // version that reverted to signals.ts's plain diffedForEffects (whose skip
-   // bails before ever touching `last`) would hand this body `prev: null` on
-   // release, read that as "nothing moved", and call refreshListRows instead —
+   // diffed() whose hold bailed before ever touching `last` (the earlier skip
+   // gate) would hand this body `prev: null` on release, read that as "nothing
+   // moved", and call refreshListRows instead —
    // silently leaving the split pane unbuilt for a #pos deep link that lands
    // entirely inside a held boot (see split.e2e.test.ts's "builds the list pane
    // beside a #pos deep link", the regression this pins at the unit level).

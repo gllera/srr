@@ -10,7 +10,6 @@
 // This file imports no implementation: make-lane.ts is the one module that knows
 // them all, so lane.ts and the lane-*.ts files never import each other in a cycle.
 import * as data from "../data"
-import type { IMetaWire } from "../format.gen"
 import { feedIdOf } from "../route"
 import { SAVED_TOKEN } from "../saved"
 
@@ -31,11 +30,13 @@ export interface LaneEnv {
    searchKey(): string
 }
 
-// switchFilter's landing decision. `land: -1` means the lane has nothing to land
-// on and takes the plain no-match placeholder, exactly as first()/last() do.
+// switchFilter's landing decision — always a RESUME (nav records nothing for
+// it). `land: -1` means the lane has nothing to land on and takes the plain
+// no-match placeholder, exactly as first()/last() do. `notStarted` arms Next on
+// the placeholder with the whole backlog behind it.
 export type LaneEntry =
-   | { land: number; record: false }
-   | { placeholder: true; notStarted: boolean; hasRight: boolean; rightCount?: number; startFeed?: number }
+   | { land: number }
+   | { placeholder: true; notStarted: boolean; rightCount?: number; startFeed?: number }
 
 export interface Lane {
    readonly kind: LaneKind
@@ -51,7 +52,6 @@ export interface Lane {
    readonly dividers: boolean
    // Display order is chronIdx order — false only for ★ Saved's save order.
    readonly chronOrdered: boolean
-   label(): string
    // Synchronous, for the hot paths; valid once prepare() resolved for the
    // current store snapshot. A lane with chronOrdered: false MUST ignore
    // feedId — goTo passes -1 for it (it has no value order to snap through).
@@ -80,8 +80,14 @@ export interface Lane {
    applyUnseen(seen: SeenMap): void
    // The unseen-only entry anchor, -1 for none.
    entryAnchor(): number
-   // The meta card of a hit, for lanes that already hold them (search).
-   card?(chron: number): IMetaWire | undefined
+   // Is `idx` a legitimate landing here — a resume position, a restored #pos?
+   // Total: out of range is false.
+   admits(idx: number): Promise<boolean>
+   // "Is this lane caught up": the oldest unread member under unread-only.
+   // `known` tells a genuine -1 (caught up) from a cold pack fetch that blipped —
+   // a caller must never strand an open on "All caught up" over a transient
+   // failure. A lane with no frontier to be behind never knows.
+   firstUnread(): Promise<{ chron: number; known: boolean }>
    // Fault in whatever matches() needs to answer for exactly this chron — for a
    // lane whose matches() depends on lazily-loaded state (the watch lane's
    // per-region planes) rather than something already resident after prepare().
@@ -142,27 +148,104 @@ export function minOf(values: Iterable<number>): number {
    return m === Infinity ? 0 : m
 }
 
-// The oldest-unread scan behind "is this lane caught up". `known` tells a genuine
-// -1 (caught up) from a cold pack fetch that blipped: a caller must never strand
-// an open on "All caught up" over a transient failure.
-export async function firstUnreadProbe(lane: Lane, unreadOnly: boolean): Promise<{ chron: number; known: boolean }> {
-   if (!unreadOnly || lane.peek || lane.members.size === 0) return { chron: -1, known: false }
-   try {
-      return { chron: await lane.atOrAbove(minOf(lane.members.values())), known: true }
-   } catch {
-      return { chron: -1, known: false }
+// A lane over no feeds: the value seam (nav.feedLeft/feedRight) answers what it
+// always answered for the set lanes — a walk over nothing — and the frontier
+// scope is empty. One shared empty map, never written.
+export const NO_FEEDS: ReadonlyMap<number, number> = new Map()
+
+// The defaults every lane shares; an implementation overrides what differs.
+// Each method is total, so a new lane inherits the totality rule instead of
+// re-typing the no-ops.
+export abstract class LaneBase implements Lane {
+   abstract readonly kind: LaneKind
+   abstract readonly peek: boolean
+   abstract readonly members: ReadonlyMap<number, number>
+   abstract readonly dividers: boolean
+   abstract readonly chronOrdered: boolean
+   readonly tokens: readonly string[]
+   readonly key: string
+
+   constructor(tokens: readonly string[]) {
+      this.tokens = tokens
+      this.key = keyOf(tokens)
+   }
+
+   abstract matches(feedId: number, chron: number): boolean
+   abstract atOrBelow(from: number): Promise<number>
+   abstract atOrAbove(from: number): Promise<number>
+   abstract oldest(): Promise<number>
+   abstract anchor(): Promise<number>
+   abstract ahead(floor: number, seen?: SeenMap): Promise<number>
+   abstract entry(): Promise<LaneEntry>
+
+   // The strict-neighbour seam is the value seam one step over, for every lane
+   // whose members sit in chron order.
+   older(chron: number): Promise<number> {
+      return this.atOrBelow(chron - 1)
+   }
+
+   newer(chron: number): Promise<number> {
+      return this.atOrAbove(chron + 1)
+   }
+
+   newest(): Promise<number> {
+      return this.atOrBelow(data.db.total_art - 1)
+   }
+
+   prepare(): Promise<void> {
+      return Promise.resolve()
+   }
+
+   refreshed(): Promise<void> {
+      return Promise.resolve()
+   }
+
+   abstract landed(chron: number, feedId: number): void
+   abstract applyUnseen(seen: SeenMap): void
+
+   entryAnchor(): number {
+      return -1
+   }
+
+   ensureRegion?(chron: number): Promise<void>
+
+   // The lane's own membership test, over a region faulted in for exactly
+   // this chron where matches() needs one.
+   async admits(idx: number): Promise<boolean> {
+      if (idx < 0 || idx >= data.db.total_art) return false
+      const feedId = await data.getFeedId(idx)
+      await this.ensureRegion?.(idx)
+      return this.matches(feedId, idx)
+   }
+
+   firstUnread(): Promise<{ chron: number; known: boolean }> {
+      return Promise.resolve({ chron: -1, known: false })
    }
 }
 
-// Is `idx` a legitimate landing — a resume position or a restored #pos? Under
-// unread-only a membership lane validates against the member's TRUE add_idx, not
-// the raised bound, so the lane's own resume (seen) position is accepted.
-export async function validResume(lane: Lane, idx: number, unreadOnly: boolean): Promise<boolean> {
-   if (idx < 0 || idx >= data.db.total_art) return false
-   const feedId = await data.getFeedId(idx)
-   if (unreadOnly && !lane.peek) return lane.members.has(feedId) && idx >= (data.db.feeds[feedId]?.add_idx ?? 0)
-   await lane.ensureRegion?.(idx)
-   return lane.matches(feedId, idx)
+// A lane that never moves a seen frontier (★ Saved, a query, a watch rule): no
+// day strata, and newest-first by default — a scan of hits, not a backlog to
+// consume. Its members are empty unless it is scoped to some (a scoped query).
+export abstract class PeekLane extends LaneBase {
+   readonly peek = true
+   readonly dividers = false
+   readonly members: ReadonlyMap<number, number> = NO_FEEDS
+
+   landed(): void {
+      // Nothing to remember about a landing.
+   }
+
+   applyUnseen(): void {
+      // No bounds to raise.
+   }
+
+   anchor(): Promise<number> {
+      return Promise.resolve(-1)
+   }
+
+   async entry(): Promise<LaneEntry> {
+      return { land: await this.newest() }
+   }
 }
 
 // first()'s target for a chron-ordered lane: nothing exists below the smallest

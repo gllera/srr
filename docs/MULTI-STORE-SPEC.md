@@ -758,7 +758,7 @@ export interface StoreContext {
 …plus every piece of module state that is today a `let` in `data.ts` moved onto a
 per-context record: `db`, `names`, `idxFetches`, `idxHeaders`, `latestIdx`,
 `deltaArts`, `deltaLoad`, `slots`, `expiredCounts`, `dataCache`, `metaCache`,
-`groupCache`, `manifestMemo`, `bgRefresh` — and in `search.ts`: the shard LRU,
+`groupCache`, `manifests`, `bgRefresh` — and in `search.ts`: the shard LRU,
 the summary and latest-tail lazy slots, the hit-set LRU, and the delta-fold memo.
 
 ### 11.2 Threading rule

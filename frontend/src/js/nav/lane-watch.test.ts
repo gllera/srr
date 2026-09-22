@@ -196,7 +196,7 @@ describe("WatchLane — matches, counts, entry, refresh", () => {
    })
 
    it("lands a switch on the newest hit", async () => {
-      expect(await lane().entry()).toEqual({ land: 50030, record: false })
+      expect(await lane().entry()).toEqual({ land: 50030 })
    })
 
    it("a refresh drops only the tail region, keeping a finalized resident region", async () => {

@@ -105,7 +105,7 @@ describe("MembersLane — shape and walk", () => {
       const all = lane([])
       expect([all.kind, all.key, all.peek, all.dividers, all.chronOrdered]).toEqual(["all", "", false, true, true])
       const one = lane(["2"])
-      expect([one.kind, one.key, one.label()]).toEqual(["members", "2", "F2"])
+      expect([one.kind, one.key]).toEqual(["members", "2"])
       expect(lane(["1", "2"]).key).toBe("")
    })
 
@@ -179,50 +179,81 @@ describe("MembersLane — ends, anchor, ahead", () => {
    })
 })
 
+describe("MembersLane — admits / firstUnread", () => {
+   it("admits: rejects out-of-range positions", async () => {
+      expect(await lane(["news"]).admits(-1)).toBe(false)
+      expect(await lane(["news"]).admits(6)).toBe(false)
+   })
+
+   it("admits: under unread-only validates against the TRUE add_idx, not the raised bound", async () => {
+      data.db.feeds[2].add_idx = 2
+      const l = lane(["2"], true)
+      l.applyUnseen({ "feed:2": 4 }) // the raised bound excludes chron 3
+      expect(await l.admits(3)).toBe(true) // feed 2, 3 >= add_idx 2
+      expect(await l.admits(1)).toBe(false) // feed 2, 1 < add_idx 2
+      expect(await l.admits(0)).toBe(false) // feed 1 is not a member
+   })
+
+   it("admits: otherwise asks matches()", async () => {
+      const l = lane(["2"])
+      expect(await l.admits(3)).toBe(true)
+      expect(await l.admits(0)).toBe(false)
+   })
+
+   it("firstUnread: unknown outside unread-only or with no members", async () => {
+      data.findRight.mockClear()
+      expect(await lane(["news"]).firstUnread()).toEqual({ chron: -1, known: false })
+      expect(await new MembersLane(["empty"], new Map(), env(true)).firstUnread()).toEqual({ chron: -1, known: false })
+      expect(data.findRight).not.toHaveBeenCalled()
+   })
+
+   it("firstUnread: walks from the smallest bound, and a failed walk is unknown rather than caught up", async () => {
+      const l = lane(["news"], true)
+      l.applyUnseen({ "feed:1": 4, "feed:2": 2 }) // bounds 5 and 3: the walk starts at 3
+      expect(await l.firstUnread()).toEqual({ chron: 3, known: true })
+      expect(data.findRight).toHaveBeenLastCalledWith(3, expect.any(Map))
+      data.findRight.mockRejectedValueOnce(new Error("blip"))
+      expect(await l.firstUnread()).toEqual({ chron: -1, known: false })
+   })
+})
+
 describe("MembersLane — entry (switchFilter's decision tree)", () => {
    it("unread-only + caught up: the plain placeholder", async () => {
       const l = lane(["news"], true)
       l.applyUnseen({ "feed:1": 4, "feed:2": 5 })
-      expect(await l.entry()).toEqual({ placeholder: true, notStarted: false, hasRight: false })
+      expect(await l.entry()).toEqual({ placeholder: true, notStarted: false })
    })
 
    it("resumes on the tag's oldest member frontier, accepted by the TRUE add_idx", async () => {
       seen({ "feed:1": 2, "feed:2": 1 })
       const l = lane(["news"], true)
       l.applyUnseen({ "feed:1": 2, "feed:2": 1 })
-      expect(await l.entry()).toEqual({ land: 1, record: false })
+      expect(await l.entry()).toEqual({ land: 1 })
    })
 
    it("show-read with nothing to resume opens the oldest article", async () => {
-      expect(await lane(["news"]).entry()).toEqual({ land: 0, record: false })
+      expect(await lane(["news"]).entry()).toEqual({ land: 0 })
    })
 
    it("unread-only + never opened: the ARMED not-started placeholder naming the first feed", async () => {
       const l = lane(["news"], true)
       l.applyUnseen({})
-      expect(await l.entry()).toEqual({
-         placeholder: true,
-         notStarted: true,
-         hasRight: true,
-         rightCount: 6,
-         startFeed: 1,
-      })
+      expect(await l.entry()).toEqual({ placeholder: true, notStarted: true, rightCount: 6, startFeed: 1 })
    })
 
    it("a known feed with no articles is an unarmed placeholder under its own token", async () => {
       expect(await new MembersLane(["empty"], new Map(), env(true)).entry()).toEqual({
          placeholder: true,
          notStarted: false,
-         hasRight: false,
       })
    })
 
    it("[ALL] opens at the oldest unread, else caught-up (unread-only) or the newest", async () => {
       seen({ "feed:1": 2, "feed:2": 1 })
-      expect(await lane([]).entry()).toEqual({ land: 3, record: false })
+      expect(await lane([]).entry()).toEqual({ land: 3 })
       seen({ "feed:1": 4, "feed:2": 5 })
-      expect(await lane([], true).entry()).toEqual({ placeholder: true, notStarted: false, hasRight: false })
-      expect(await lane([]).entry()).toEqual({ land: 5, record: false })
+      expect(await lane([], true).entry()).toEqual({ placeholder: true, notStarted: false })
+      expect(await lane([]).entry()).toEqual({ land: 5 })
    })
 })
 

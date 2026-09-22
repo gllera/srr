@@ -3,7 +3,7 @@ import {
    arrayEqual,
    batch,
    computed,
-   diffedForEffects,
+   diffed,
    effect,
    MAX_FLUSH_ITERATIONS,
    onChange,
@@ -401,7 +401,7 @@ describe("onChange / diffed (the shared prime-then-diff primitive)", () => {
    it("diffed: fireOnFirst runs the very first invocation with prev === null", () => {
       const s = signal("a")
       const seen: Array<[string, string | null]> = []
-      diffedForEffects(s, (now, prev) => seen.push([now, prev]), { fireOnFirst: true })
+      diffed(s, (now, prev) => seen.push([now, prev]), { fireOnFirst: true })
       expect(seen).toEqual([["a", null]])
       s.set("b")
       expect(seen).toEqual([
@@ -410,39 +410,39 @@ describe("onChange / diffed (the shared prime-then-diff primitive)", () => {
       ])
    })
 
-   it("diffed: a skip gate true on the very first run defers priming until it clears", () => {
+   it("diffed: a hold true on the very first run primes the baseline and fires once against it when it clears", () => {
       const s = signal(1)
-      let skip = true
+      let hold = true
       const body = vi.fn()
-      diffedForEffects(s, body, { fireOnFirst: true, skip: () => skip })
+      diffed(s, body, { fireOnFirst: true, hold: () => hold })
       expect(body).not.toHaveBeenCalled()
-      s.set(2) // still gated — must not prime on a value it never actually saw fire
+      s.set(2) // still held — the baseline stays the pre-hold value
       expect(body).not.toHaveBeenCalled()
-      skip = false
-      s.set(3) // the write that flips the effect while skip is now false
-      expect(body).toHaveBeenCalledExactlyOnceWith(3, null) // its first real fire, still "first"
+      hold = false
+      s.set(3) // the write that flips the effect while the hold is off
+      expect(body).toHaveBeenCalledExactlyOnceWith(3, 1) // its first real fire, prev = the frozen baseline
    })
 
-   it("diffed: a change made WHILE the skip gate is true is not lost — it is compared against the correct stale value once the gate clears", () => {
+   it("diffed: a change made WHILE held is not lost — it is compared against the correct stale value once the hold clears", () => {
       const s = signal(1)
-      let skip = false
+      let hold = false
       const body = vi.fn()
-      diffedForEffects(s, body, { fireOnFirst: true, skip: () => skip })
+      diffed(s, body, { fireOnFirst: true, hold: () => hold })
       expect(body).toHaveBeenCalledExactlyOnceWith(1, null)
-      skip = true
-      s.set(2) // moves while gated — must not be swallowed nor treated as "unchanged" later
+      hold = true
+      s.set(2) // moves while held — must not be swallowed nor treated as "unchanged" later
       expect(body).toHaveBeenCalledTimes(1)
-      skip = false
+      hold = false
       s.set(3) // a plain (non-signal) gate: unblocking alone doesn't refire it
       expect(body).toHaveBeenCalledTimes(2)
       expect(body).toHaveBeenLastCalledWith(3, 1) // prev is 1 (the last value it actually processed), not the missed 2
    })
 
-   it("diffed: a signal-backed skip gate re-fires the body when it clears (the rendering hold)", () => {
+   it("diffed: a signal-backed hold re-fires the body when it clears (the rendering hold)", () => {
       const s = signal(1)
       const gate = signal(false)
       const body = vi.fn()
-      diffedForEffects(s, body, { fireOnFirst: true, skip: () => gate() })
+      diffed(s, body, { fireOnFirst: true, hold: () => gate() })
       gate.set(true)
       s.set(2)
       expect(body).toHaveBeenCalledTimes(1)

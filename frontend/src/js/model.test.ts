@@ -18,6 +18,7 @@ const OWNERS: Record<string, string> = {
    mountsRev: "data.ts",
    seen: "seen.ts",
    saved: "saved.ts",
+   savedToggle: "saved.ts",
    snapshot: "refresh.ts",
    storeGrown: "refresh.ts",
    refreshError: "refresh.ts",
@@ -25,7 +26,7 @@ const OWNERS: Record<string, string> = {
    rendering: "app.ts",
    focus: "app.ts",
    split: "split.ts",
-   printOverride: "split.ts",
+   printSplit: "split.ts",
    paneHidden: "pane.ts",
    readerPainted: "reader.ts",
    profileRev: "profile.ts",
@@ -66,8 +67,8 @@ describe("model", () => {
       for (const n of [model.frontierEpoch, model.landed, model.snapshot, model.storeGrown, model.mountsRev])
          expect(n()).toBe(0)
       for (const n of [model.profileRev, model.profileMountsRev]) expect(n()).toBe(0)
-      for (const b of [model.rendering, model.split, model.paneHidden, model.readerPainted, model.printOverride])
-         expect(b()).toBe(false)
+      for (const b of [model.rendering, model.split, model.paneHidden, model.readerPainted]) expect(b()).toBe(false)
+      expect(model.printSplit()).toBe(null)
    })
 
    it("cursor, laneTokens, syncStatus, seen and saved ignore structurally equal writes", () => {

@@ -3,51 +3,33 @@
 // ghost (which stays module state there: it must survive a re-apply of this lane,
 // and nav clears it on every landing). Feed-agnostic and a peek mode: membership
 // is the set, and the frontier scope is empty.
-import * as data from "../data"
 import { isSaved, savedAhead, savedNeighbor, savedOrder } from "../saved"
-import { keyOf, labelFor, type Lane, type LaneEntry } from "./lane"
+import { PeekLane, type LaneEntry } from "./lane"
 
-// ★ Saved has no chronIdx order to step by value, so the value seam
-// (nav.feedLeft/feedRight) answers what it always answered in this mode: a walk
-// over no feeds. goTo never relies on it — chronOrdered is false, so it tests
-// membership directly.
-const NO_FEEDS = new Map<number, number>()
-
-export class SavedLane implements Lane {
+export class SavedLane extends PeekLane {
    readonly kind = "saved" as const
-   readonly tokens: readonly string[]
-   readonly key: string
-   readonly peek = true
-   readonly dividers = false
+   // No chronIdx order to step by value: goTo never relies on the value seam
+   // (chronOrdered false — it tests membership directly), and the neighbours
+   // step by save-INDEX below.
    readonly chronOrdered = false
-   readonly members: ReadonlyMap<number, number> = NO_FEEDS
-
-   constructor(tokens: readonly string[]) {
-      this.tokens = tokens
-      this.key = keyOf(tokens)
-   }
-
-   label(): string {
-      return labelFor(this.key)
-   }
 
    matches(_feedId: number, chron: number): boolean {
       return isSaved(chron)
    }
 
-   atOrBelow(from: number): Promise<number> {
-      return data.findLeft(from, NO_FEEDS)
+   atOrBelow(): Promise<number> {
+      return Promise.resolve(-1)
    }
 
-   atOrAbove(from: number): Promise<number> {
-      return data.findRight(from, NO_FEEDS)
+   atOrAbove(): Promise<number> {
+      return Promise.resolve(-1)
    }
 
-   older(chron: number): Promise<number> {
+   override older(chron: number): Promise<number> {
       return Promise.resolve(savedNeighbor(chron, "older"))
    }
 
-   newer(chron: number): Promise<number> {
+   override newer(chron: number): Promise<number> {
       return Promise.resolve(savedNeighbor(chron, "newer"))
    }
 
@@ -56,12 +38,13 @@ export class SavedLane implements Lane {
       return Promise.resolve(savedOrder()[0] ?? -1)
    }
 
-   newest(): Promise<number> {
+   override newest(): Promise<number> {
       const order = savedOrder()
       return Promise.resolve(order.length ? order[order.length - 1] : -1)
    }
 
-   anchor(): Promise<number> {
+   // The queue is read front-to-back: land at its front.
+   override anchor(): Promise<number> {
       return this.oldest()
    }
 
@@ -69,27 +52,7 @@ export class SavedLane implements Lane {
       return Promise.resolve(savedAhead(floor))
    }
 
-   async entry(): Promise<LaneEntry> {
-      return { land: await this.oldest(), record: false }
-   }
-
-   prepare(): Promise<void> {
-      return Promise.resolve()
-   }
-
-   refreshed(): Promise<void> {
-      return Promise.resolve()
-   }
-
-   landed(): void {
-      // The ghost is saved.ts state, cleared by nav on every landing (N15).
-   }
-
-   applyUnseen(): void {
-      // A peek lane has no bounds to raise.
-   }
-
-   entryAnchor(): number {
-      return -1
+   override async entry(): Promise<LaneEntry> {
+      return { land: await this.oldest() }
    }
 }

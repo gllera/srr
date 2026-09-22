@@ -13,82 +13,22 @@
 // projection of state), and anything that navigates.
 import { layout, type Layout } from "./layout"
 import * as model from "./model"
-import { arrayEqual, effect, resource, signal, untracked } from "./signals"
+import { arrayEqual, diffed, effect, resource, signal, untracked } from "./signals"
 
 // An effect whose body must not run inside a command (D3, S16): it tracks
 // `inputs`, waits out model.rendering, and runs once per change of the input
 // tuple — so a guarded landing that moved three of its inputs costs one run, at
 // the end, over the state the command left. `prev` is the tuple of the last run
-// (null on the first), for bodies that care what moved.
-//
-// This is now a small hand-rolled variant rather than a one-line wrapper over
-// signals.ts's diffed() (still exported there as diffedForEffects — currently
-// unused by this file, kept for the general "effect + diff + act" shape it
-// documents; see its own docblock). The two diverge on ONE thing: diffed()'s
-// `skip` bails out before ever priming (`last`/`primed` untouched), so an
-// effect table whose registration itself happens under a hold — which is what
-// app.ts's boot hold now does, task 9 — would prime with a null `prev` against
-// whatever state the FIRST held command lands on, discarding the true
-// pre-command baseline every "what moved" body (listRows) needs. This version
-// primes on the first run regardless of hold, freezes that baseline while
-// held, and always fires once, unconditionally, on the first run that isn't
-// held. Revisit collapsing the two back into one primitive if diffed() grows
-// a second caller with this same "prime through a hold" need.
-//
-// The baseline (`last`) is captured on the effect's VERY FIRST run — even one
-// that lands while rendering is held, which is exactly what happens now that
-// app.ts wraps the table's own registration in a boot hold (so nothing primes
-// against nav's pre-route state). While held, `last` is FROZEN at that
-// baseline rather than tracking every intermediate write a command makes — a
-// caller like listRows reads `prev` to ask "what moved", and the answer is the
-// gap between the state before the command and the state it landed, not
-// whatever the command's own writes looked like mid-flight.
-//
-// `body` itself only ever runs outside a hold, and the FIRST time it runs is
-// unconditional — even when the held state happened to settle back to exactly
-// the frozen baseline (an [ALL] boot re-applying [] over [], the empty-store
-// resting panel) — because nothing has actually been PAINTED yet; skipping
-// that first call on an equality match would mean the effect never renders at
-// all. Every call after that first one is the ordinary equal-value skip.
-//
-// A side effect of that unconditional first call: `prev` on it is the frozen
-// PRE-hold baseline, not null — a caller whose body only acts when `prev !==
-// null` (pickerRows, below) now sees a non-null `prev` on its very first run
-// too, where every earlier version of this table always handed the first
-// call `prev: null`. Currently harmless (nothing can open the picker before
-// `registerEffects()` returns, so pickerRows' own first-ever call always has
-// `pickerOpen() === false` regardless of `prev`) — pinned benign by the
-// "keeps its PRE-hold baseline across a boot hold" case in effects.test.ts's
-// `listRows` describe, which exercises the same first-call `prev` on the
-// sibling effect that DOES act on it.
-function deferred(inputs: () => unknown[], body: (now: unknown[], prev: unknown[] | null) => void): () => void {
-   let last: unknown[] | null = null
-   let primed = false
-   let ran = false // has `body` itself run at least once — not "was something painted": paint() swallows a surface's own errors, and a body can return early without calling it
-   return effect(() => {
-      const now = inputs()
-      const held = model.rendering()
-      if (!primed) {
-         primed = true
-         last = now
-         if (held) return
-         ran = true
-         untracked(() => body(now, null))
-         return
-      }
-      if (held) return
-      if (!ran) {
-         const prev = last
-         ran = true
-         last = now
-         untracked(() => body(now, prev))
-         return
-      }
-      if (last !== null && arrayEqual(last, now)) return
-      const prev = last
-      last = now
-      untracked(() => body(now, prev))
-   })
+// (null on the very first), for bodies that care what moved. The hold semantics
+// are diffed()'s: the baseline is primed on the first run even under a hold —
+// app.ts registers this table under its boot hold, so nothing primes against
+// nav's pre-route state — and frozen while held, so a "what moved" body reads
+// the gap between the state before the command and the state it landed.
+function deferred<T extends readonly unknown[]>(
+   inputs: () => [...T],
+   body: (now: T, prev: T | null) => void,
+): () => void {
+   return diffed(inputs, body, { equals: arrayEqual, fireOnFirst: true, hold: model.rendering })
 }
 
 export interface EffectSurfaces {
@@ -333,7 +273,7 @@ export function registerEffects(s: EffectSurfaces): Effects {
       () => [layout().listMounted, model.laneTokens(), model.unreadOnly(), model.frontierEpoch(), model.activeMid()],
       ([listMounted]) => {
          paint(() => {
-            const build = s.reconcileList(listMounted as boolean)
+            const build = s.reconcileList(listMounted)
             if (build)
                build.then(
                   () => s.afterListBuild(),
@@ -359,10 +299,10 @@ export function registerEffects(s: EffectSurfaces): Effects {
          // may have no ROWS either: a guarded placeholder landing (a reload onto a
          // caught-up #pos) moves nothing tracked here and runs no list command.
          // followCursor rebuilds only a window built for another membership.
-         if (split && (c as model.Cursor).chron < 0) paint(s.followListCursor)
+         if (split && c.chron < 0) paint(s.followListCursor)
          if (prev !== null && prev[0] === listMounted && prev[1] === split) {
-            const moved = (prev[3] as model.Cursor).chron !== (c as model.Cursor).chron
-            const becameLive = !prev[2] && (readerLive as boolean)
+            const moved = prev[3].chron !== c.chron
+            const becameLive = !prev[2] && readerLive
             if (split && readerLive && (moved || becameLive)) return paint(s.followListCursor)
             const onlyCursor = prev[2] === readerLive && prev[4] === seen && prev[5] === saved
             if (onlyCursor && !readerLive) return
@@ -395,8 +335,8 @@ export function registerEffects(s: EffectSurfaces): Effects {
          model.mountsRev(),
          model.activeMid(),
       ],
-      (_now, prev) => {
-         if (prev !== null && s.pickerOpen()) paint(s.renderPicker)
+      () => {
+         if (s.pickerOpen()) paint(s.renderPicker)
       },
    )
 

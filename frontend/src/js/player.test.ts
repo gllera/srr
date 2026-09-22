@@ -1374,7 +1374,7 @@ describe("the seek bar", () => {
    })
 
    // The ARIA slider pattern puts ↑/↓ on the value axis. app.ts's global keymap
-   // maps them to cyclePrev/cycleNext, so unhandled they stepped the FILTER
+   // routes them through onCycle, so unhandled they stepped the FILTER
    // while the seek bar had focus; handled here they seek and (below) never
    // reach the document at all.
    it("steps the value on ArrowUp/ArrowDown, the ARIA slider axis", () => {

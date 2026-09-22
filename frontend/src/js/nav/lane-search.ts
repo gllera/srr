@@ -7,10 +7,10 @@
 // when it was nav's state — `searchKey !== searchLoadedFor` is the one rule that
 // drops it. search.ts's loadHits cache stays warm underneath, so a returning query
 // re-resolves without re-scanning.
-import * as data from "../data"
 import type { IMetaWire } from "../format.gen"
+import { lowerBound } from "../idx"
 import * as search from "../search"
-import { keyOf, labelFor, oldestByBounds, SEARCH_PREFIX, type Lane, type LaneEntry, type LaneEnv } from "./lane"
+import { oldestByBounds, PeekLane, SEARCH_PREFIX, type LaneEnv } from "./lane"
 import { reconcileMembers, resolveMembership } from "./lane-members"
 
 // Capped so a broad query cannot fetch the whole archive; searchTruncated() flags it.
@@ -41,54 +41,42 @@ export function searchCard(chron: number): IMetaWire | undefined {
    return searchCards.get(chron)
 }
 
-// Largest entry ≤ from / smallest ≥ from in an ascending array (-1 = none).
+// Largest entry ≤ from / smallest ≥ from in an ascending array (-1 = none), and
+// how many sit strictly above `floor` — three questions, one binary search.
 function setLeft(sorted: number[], from: number): number {
-   let res = -1
-   for (const c of sorted) {
-      if (c > from) break
-      res = c
-   }
-   return res
+   return sorted[lowerBound(sorted.length, (i) => sorted[i] <= from) - 1] ?? -1
 }
 function setRight(sorted: number[], from: number): number {
-   for (const c of sorted) if (c >= from) return c
-   return -1
+   return sorted[lowerBound(sorted.length, (i) => sorted[i] < from)] ?? -1
+}
+function countAbove(sorted: number[], floor: number): number {
+   return sorted.length - lowerBound(sorted.length, (i) => sorted[i] <= floor)
 }
 
-export class SearchLane implements Lane {
+export class SearchLane extends PeekLane {
    readonly kind = "search" as const
-   readonly tokens: readonly string[]
-   readonly key: string
-   readonly peek = true
-   readonly dividers = false
    readonly chronOrdered = true
    readonly query: string
    readonly scope: readonly string[]
    // The snapshot's identity: the query AND its scope. JSON rather than a
    // separator join — a tag name may contain any separator.
    readonly searchKey: string
+   // The scope's membership at natural add_idx bounds (no applyUnseen: a peek
+   // mode, so a query inside a lane must still find that lane's read articles);
+   // empty for an unscoped query.
    private readonly feeds: Map<number, number>
+   override readonly members: ReadonlyMap<number, number>
    private readonly env: LaneEnv
 
    constructor(tokens: readonly string[], q: number, env: LaneEnv) {
-      this.tokens = tokens
-      this.key = keyOf(tokens)
+      super(tokens)
       this.env = env
       this.query = tokens[q].slice(SEARCH_PREFIX.length)
       this.scope = tokens.filter((_, i) => i !== q)
-      // Natural add_idx bounds and no applyUnseen: a peek mode, so a query inside
-      // a lane must still find that lane's read articles.
       this.feeds = this.scope.length > 0 ? resolveMembership(this.scope) : new Map()
+      this.members = this.feeds
       this.searchKey = JSON.stringify([this.query, ...this.scope])
       if (this.searchKey !== searchLoadedFor) resetSearchStream()
-   }
-
-   get members(): ReadonlyMap<number, number> {
-      return this.feeds
-   }
-
-   label(): string {
-      return labelFor(this.key)
    }
 
    matches(_feedId: number, chron: number): boolean {
@@ -97,7 +85,7 @@ export class SearchLane implements Lane {
 
    // Load (or confirm) the hit set. A result for a key that is no longer the
    // ACTIVE lane's is discarded — the concurrent load for the newer key stores its own.
-   async prepare(): Promise<void> {
+   override async prepare(): Promise<void> {
       const key = this.searchKey
       if (searchLoadedFor === key) return
       if (!this.query) {
@@ -126,57 +114,20 @@ export class SearchLane implements Lane {
       return this.prepare().then(() => setRight(searchSorted, from))
    }
 
-   older(chron: number): Promise<number> {
-      return this.atOrBelow(chron - 1)
-   }
-
-   newer(chron: number): Promise<number> {
-      return this.atOrAbove(chron + 1)
-   }
-
    oldest(): Promise<number> {
       return oldestByBounds(this)
    }
 
-   newest(): Promise<number> {
-      return this.atOrBelow(data.db.total_art - 1)
-   }
-
-   // Newest-first: a query always shows its newest hit, whatever is read.
-   anchor(): Promise<number> {
-      return Promise.resolve(-1)
-   }
-
    async ahead(floor: number): Promise<number> {
       await this.prepare()
-      return searchSorted.filter((c) => c > floor).length
-   }
-
-   async entry(): Promise<LaneEntry> {
-      return { land: await this.newest(), record: false }
+      return countAbove(searchSorted, floor)
    }
 
    // The snapshot was computed against the old store: reconcile the scope's
    // bounds (never from seen — a peek mode), drop the snapshot, reload it.
-   async refreshed(): Promise<void> {
+   override async refreshed(): Promise<void> {
       if (this.scope.length > 0) reconcileMembers(this.feeds, resolveMembership(this.scope), false)
       resetSearchStream()
       await this.prepare()
-   }
-
-   landed(): void {
-      // A peek lane remembers nothing about a landing.
-   }
-
-   applyUnseen(): void {
-      // A query inside a lane must still find its read articles.
-   }
-
-   entryAnchor(): number {
-      return -1
-   }
-
-   card(chron: number): IMetaWire | undefined {
-      return searchCards.get(chron)
    }
 }

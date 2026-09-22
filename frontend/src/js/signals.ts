@@ -375,31 +375,34 @@ export interface DiffedOpts<K> {
    // first run is itself a paint to do, as opposed to onChange()'s callers,
    // whose first run is a baseline rather than a change.
    fireOnFirst?: boolean
-   // An extra gate re-checked on every run, independent of whether dep()
-   // changed. Skipping here (rather than in the caller's dep()) means a change
-   // during the gate is not lost: it is compared against the stale `last` on
-   // the next run once the gate clears.
-   skip?: () => boolean
+   // A gate re-checked on every run, independent of whether dep() changed: while
+   // it holds, the body must not run (effects.ts's model.rendering). The
+   // baseline is primed on the very FIRST run even when held — the state before
+   // the command, which a "what moved" body needs — and frozen while held, so a
+   // change made under the hold is compared against that baseline once the hold
+   // clears rather than lost. The first run that is not held fires
+   // unconditionally (nothing has acted yet); every later one is the ordinary
+   // equal-value skip.
+   hold?: () => boolean
 }
 
-// The one "effect + diff + act under untracked" state machine. onChange() is a
-// one-line wrapper over it; see diffedForEffects below for the other export.
-function diffed<K>(dep: () => K, body: (now: K, prev: K | null) => void, opts: DiffedOpts<K> = {}): () => void {
-   const { equals = Object.is, fireOnFirst = false, skip } = opts
+// The one "effect + diff + act under untracked" state machine: onChange() and
+// effects.ts's deferred() are both one-line wrappers over it.
+export function diffed<K>(dep: () => K, body: (now: K, prev: K | null) => void, opts: DiffedOpts<K> = {}): () => void {
+   const { equals = Object.is, fireOnFirst = false, hold } = opts
    let last: K | null = null
    let primed = false
+   let ran = !fireOnFirst // the first run is a baseline, not a change, unless the caller says otherwise
    return effect(() => {
       const now = dep()
-      if (skip?.()) return
+      const prev = primed ? last : null
       if (!primed) {
          primed = true
-         const prev = last
          last = now
-         if (fireOnFirst) untracked(() => body(now, prev))
-         return
       }
-      if (equals(last as K, now)) return
-      const prev = last
+      if (hold?.()) return
+      if (ran && equals(last as K, now)) return
+      ran = true
       last = now
       untracked(() => body(now, prev))
    })
@@ -412,14 +415,6 @@ function diffed<K>(dep: () => K, body: (now: K, prev: K | null) => void, opts: D
 export function onChange<K>(dep: () => K, body: (now: K, prev: K) => void, equals: Equals<K> = Object.is): () => void {
    return diffed(dep, (now, prev) => body(now, prev as K), { equals })
 }
-
-// Currently unused in production — effects.ts's deferred() was a one-line
-// wrapper over this until it needed to prime through a boot hold (see that
-// module's own docblock for why), and was rewritten as a small hand-rolled
-// variant instead. Exported (and exercised by signals.test.ts) for the
-// fireOnFirst/skip policy this primitive documents, which has no other
-// caller today; collapse the two back into one if a second caller needs it.
-export { diffed as diffedForEffects }
 
 export function shallowEqual<T extends object>(a: T, b: T): boolean {
    if (Object.is(a, b)) return true

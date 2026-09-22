@@ -34,7 +34,7 @@ import { elementScroller, windowScroller } from "./scroller"
 import * as searchUI from "./search-ui"
 import { initSplit, isSplit, onSplitChange } from "./split"
 import { arrayEqual, effect, onChange } from "./signals"
-import { lsSet } from "./storage"
+import { lsGet, lsSet } from "./storage"
 import * as sync from "./sync"
 
 // Which surface has the KEYBOARD is model.focus, written by showList /
@@ -125,6 +125,19 @@ function beginRendering(): symbol {
 function endRendering(hold: symbol): void {
    renderingHolds.delete(hold)
    if (renderingHolds.size === 0) model.rendering.set(false)
+}
+// Hold rendering across one synchronous run of writes — a list command's store,
+// lane and hash writes made BEFORE its own render takes its hold (S16) — and
+// hand back whatever the run started, so the caller awaits the render outside
+// the hold. The render itself holds on its own synchronously, before its first
+// await, so the release here leaves no gap.
+function holdRendering<T>(fn: () => T): T {
+   const hold = beginRendering()
+   try {
+      return fn()
+   } finally {
+      endRendering(hold)
+   }
 }
 // Freshness token for the list's async cycle: each W/S press bumps it, and only
 // the LATEST press applies its resolved token, so rapid presses can't land out
@@ -327,10 +340,9 @@ async function laneChange(fn: () => Promise<IShowFeed>): Promise<void> {
 // readerChrome effect re-derives its arrows and pill. A placeholder has no
 // article to probe — and the question is what the READER shows, not whether the
 // cursor is set: under split the list pane claims the cursor beside a
-// placeholder — so the lane switch runs again, but ONLY for a
-// single-token/[ALL] filter: getCurrentFilterKey() collapses a multi-token
-// (URL-only, e.g. #!5+9) filter to "", which switchFilter("") would misread as
-// [ALL] and teleport the reader off its lane. A command, never an effect (S17).
+// placeholder — so the lane is re-entered through its own entry decision
+// (nav.reenterLane: the active lane as it is, a multi-token URL-only filter
+// included). A command, never an effect (S17).
 function rerunPlaceholder() {
    // "The reader needs re-deriving" is a LAYOUT question under split: the pane
    // is on screen with its arrows and pending pill live even while the LIST has
@@ -339,8 +351,7 @@ function rerunPlaceholder() {
    // bounds that had moved.
    if (!layout().readerSteppable) return
    if (reader.hasArticle()) return
-   if (nav.isFilterActive() && nav.filterTokens().length > 1) return
-   void guard(() => nav.switchFilter(nav.getCurrentFilterKey()))
+   void guard(() => nav.reenterLane())
 }
 
 // Toggle the current article's saved state from the reader. A local state flip
@@ -528,10 +539,7 @@ function bootHash(): string {
       history.replaceState(null, "", location.pathname + location.search)
       hash = ""
    }
-   if (!hash)
-      try {
-         hash = localStorage.getItem(HASH_KEY)?.substring(1) || ""
-      } catch {}
+   if (!hash) hash = lsGet(HASH_KEY).substring(1)
    return hash
 }
 
@@ -567,20 +575,15 @@ async function route(hash: string) {
    const beforeMid = data.activeStore().mid
    const beforeLane = model.laneTokens()
    // Held across the store + lane writes until renderListSurface takes its own
-   // hold (synchronously, before its first await) — S16.
-   let listed: Promise<void>
-   const hold = beginRendering()
-   try {
+   // hold — S16.
+   await holdRendering(() => {
       if (mid !== data.activeStore().mid) data.setActive(mid)
       nav.applyFilter(tokens)
       // Canonicalize the URL (boot may restore an empty location.hash from
       // localStorage) without growing history.
       commitListHash(false)
-      listed = renderListSurface()
-   } finally {
-      endRendering(hold)
-   }
-   await listed
+      return renderListSurface()
+   })
    // A history step onto ANOTHER lane's list entry is that lane's pick made by
    // the browser: under split the live pane follows it the same way. Back onto
    // the lane already applied is Escape made by the browser, and keeps the pane's
@@ -625,15 +628,10 @@ async function selectTokens(tokens: string[], paneLive = layout().readerLive) {
    // bounce the list back into search. Typing itself never routes through here.
    searchUI.clearSearchDebounce()
    const beforeChron = nav.currentChron()
-   let listed: Promise<void>
-   const hold = beginRendering() // S16: until renderListSurface holds on its own
-   try {
+   await holdRendering(() => {
       nav.applyFilter(tokens)
-      listed = goToList(true)
-   } finally {
-      endRendering(hold)
-   }
-   await listed
+      return goToList(true)
+   })
    await landPaneOnListLane(paneLive, beforeChron)
 }
 
@@ -693,15 +691,11 @@ async function selectFilter(token: string) {
    const paneLive = layout().readerLive
    // A mount-qualified token (a peer lane picked from the picker) switches the
    // active lane and resolves to its bare half — nav owns that grammar (§6.3).
-   let selected: Promise<void>
-   const hold = beginRendering() // S16: the store switch is a write the list must not react to alone
-   try {
-      token = nav.resolveMountToken(token)
-      selected = selectTokens(token === "" ? [] : [token], paneLive)
-   } finally {
-      endRendering(hold)
-   }
-   await selected
+   // Held: the store switch is a write the list must not react to alone (S16).
+   await holdRendering(() => {
+      const bare = nav.resolveMountToken(token)
+      return selectTokens(bare === "" ? [] : [bare], paneLive)
+   })
 }
 
 // Switch the active mount from the picker's mount switcher WITHOUT closing the
@@ -711,17 +705,12 @@ async function selectFilter(token: string) {
 async function switchMount(mid: string) {
    if (held()) return
    if (mid === data.activeStore().mid) return
-   let listed: Promise<void> | null = null
-   const hold = beginRendering() // S16
-   try {
-      if (data.setActive(mid)) {
-         nav.applyFilter([])
-         commitListHash(true)
-         listed = renderListSurface()
-      }
-   } finally {
-      endRendering(hold)
-   }
+   const listed = holdRendering(() => {
+      if (!data.setActive(mid)) return null
+      nav.applyFilter([])
+      commitListHash(true)
+      return renderListSurface()
+   })
    // The picker's rows for the new store are the pickerRows effect's.
    if (listed) await listed
 }
@@ -791,14 +780,6 @@ const stepRight = () => {
    if (!layout().readerSteppable || overlayUp()) return
    return el.next.disabled ? reader.bumpReaderEdge("next") : guard(() => nav.right())
 }
-// The reader keymap's W/S — the same lane change onCycle's reader branch makes,
-// so it takes the same split follow-up (laneChange).
-const cycle = (dir: -1 | 1) => () => {
-   if (nav.getFilterEntries().length > 1) void laneChange(() => nav.cycleFilter(dir))
-}
-const cyclePrev = cycle(-1)
-const cycleNext = cycle(1)
-
 // The pager's committed drag: the SAME guarded step the keyboard uses. Success
 // is "the cursor moved" — resolve() commits pos only on success, guard() owns
 // its own error popup, and a busy mutex returns without stepping — so an
@@ -830,10 +811,12 @@ const KEY_ACTIONS: Record<string, () => void> = {
    a: stepLeft,
    ArrowRight: stepRight,
    d: stepRight,
-   ArrowUp: cyclePrev,
-   w: cyclePrev,
-   ArrowDown: cycleNext,
-   s: cycleNext,
+   // The cycle keys reach this map only with the reader focused (the list
+   // consumes them first, below), where onCycle IS the reader's lane change.
+   ArrowUp: () => onCycle(-1),
+   w: () => onCycle(-1),
+   ArrowDown: () => onCycle(1),
+   s: () => onCycle(1),
    q: () => guard(() => nav.first()),
    e: () => guard(() => nav.last()),
    b: () => !el.save.disabled && toggleSave(),
@@ -935,9 +918,7 @@ async function init() {
    // on just what's unread. An explicit choice persists as "1"/"0" via
    // setUnreadOnly, so a user who turns it off stays off; only a never-set key
    // (null) trips this default. Set before route() so the first render is filtered.
-   try {
-      if (localStorage.getItem(UNREAD_ONLY_KEY) === null) nav.setUnreadOnly(true)
-   } catch {}
+   if (lsGet(UNREAD_ONLY_KEY) === "") nav.setUnreadOnly(true)
 
    // Has the person touched anything yet this session? The boot sync pull
    // re-anchors the list only BEFORE the first interaction (the device-switch
@@ -1025,14 +1006,10 @@ async function init() {
       // home inside `adopt` and publishes the switch at once; the hold keeps the
       // list from rebuilding under the gone store's lane before route("") resets
       // it (route takes its own hold synchronously, before this one ends).
-      rehome: (adopt) => {
-         const hold = beginRendering()
-         try {
+      rehome: (adopt) =>
+         holdRendering(() => {
             if (adopt()) void route("")
-         } finally {
-            endRendering(hold)
-         }
-      },
+         }),
    })
 
    // The filter picker overlay: a pick closes it and routes per surface — from
@@ -1289,36 +1266,30 @@ async function init() {
    // title, the list's rows and membership — primes over the state the first
    // surface leaves, never over nav's pre-route lane. route() takes its hold
    // synchronously, before its first await, so the release below leaves no gap.
-   const bootHold = beginRendering()
-   effects = registerEffects({
-      unreadTotal: unreadTotalOfActiveStore,
-      setListTitle: () => setTitle(listTitle()),
-      applyUnreadTotal,
-      refreshSettingsStatus: menus.refreshSettingsStatus,
-      probeChrome: nav.probeCurrent,
-      applyChrome: reader.applyChrome,
-      paintSaveButton: reader.paintSaveButton,
-      paintFeedLabel: reader.paintFeedLabel,
-      restingState: nav.restingState,
-      renderResting: reader.renderResting,
-      reconcileList: list.reconcile,
-      afterListBuild: searchUI.syncSearchBar,
-      onListError: (e) => showError(e, () => void renderListSurface()),
-      refreshListRows: list.refresh,
-      followListCursor,
-      listGrown: () => void list.onStoreGrown(),
-      pickerOpen: picker.isOpen,
-      renderPicker: picker.render,
-      onPaintError: (e) => showError(e),
+   await holdRendering(() => {
+      effects = registerEffects({
+         unreadTotal: unreadTotalOfActiveStore,
+         setListTitle: () => setTitle(listTitle()),
+         applyUnreadTotal,
+         refreshSettingsStatus: menus.refreshSettingsStatus,
+         probeChrome: nav.probeCurrent,
+         applyChrome: reader.applyChrome,
+         paintSaveButton: reader.paintSaveButton,
+         paintFeedLabel: reader.paintFeedLabel,
+         restingState: nav.restingState,
+         renderResting: reader.renderResting,
+         reconcileList: list.reconcile,
+         afterListBuild: searchUI.syncSearchBar,
+         onListError: (e) => showError(e, () => void renderListSurface()),
+         refreshListRows: list.refresh,
+         followListCursor,
+         listGrown: () => void list.onStoreGrown(),
+         pickerOpen: picker.isOpen,
+         renderPicker: picker.render,
+         onPaintError: (e) => showError(e),
+      })
+      return route(location.hash === bootLocation ? hash : bootHash())
    })
-
-   let routed: Promise<void>
-   try {
-      routed = route(location.hash === bootLocation ? hash : bootHash())
-   } finally {
-      endRendering(bootHold)
-   }
-   await routed
    // RDR16 — offer back an episode a reload interrupted. After route() so the
    // active store is settled and the first surface has painted; PAUSED, never
    // auto-resumed (browsers block it, and audio starting by itself on a cold

@@ -194,21 +194,14 @@ function bloomHas(blooms: Uint8Array, shardOff: number, bits: number[]): boolean
 
 interface Shard {
    entries: IMetaWire[]
-   folded: string[] // fold(entry.t), computed once at parse
+   folded: string[] // fold(entry.t), computed once per shard
 }
 
-function parseShard(buf: ArrayBuffer, skipBloom: boolean): Shard {
-   if (skipBloom && buf.byteLength < SEARCH_BLOOM_BYTES) {
-      // A finalized shard shorter than its bloom header is truncated/corrupt;
-      // blindly slicing would silently drop its hits (or mis-parse bloom bytes
-      // as JSONL). Surface it and treat the shard as empty.
-      console.warn(`search: finalized meta shard truncated (${buf.byteLength} < ${SEARCH_BLOOM_BYTES} bytes)`)
-      return { entries: [], folded: [] }
-   }
-   const sliced = skipBloom ? buf.slice(SEARCH_BLOOM_BYTES) : buf
-   const entries = data.parseJsonl<IMetaWire>(sliced)
-   const folded = entries.map((e) => fold(e.t ?? ""))
-   return { entries, folded }
+// The cards themselves come from data.loadMetaPack — the same parse, in the
+// same per-snapshot cache, the list reads its rows from — so a shard the list
+// scrolled through is never gunzipped and parsed a second time for a query.
+function makeShard(entries: IMetaWire[]): Shard {
+   return { entries, folded: entries.map((e) => fold(e.t ?? "")) }
 }
 
 // Everything below is lazy: nothing is fetched until the first query, so
@@ -249,7 +242,7 @@ function makeState(): SearchState {
       loadLatest: lazySlot(() => {
          const meta = data.storeNames().meta
          if (meta.tail < 0) throw new Error("meta tail: the store names none")
-         return data.fetchPackBytes(meta.keys[meta.tail], true).then((buf) => parseShard(buf, false))
+         return data.loadMetaPack(meta.tail).then(makeShard)
       }),
       shardCache: makeLRU<Promise<Shard>>(8),
       hitCache: makeLRU<Promise<HitSet>, string>(8),
@@ -268,11 +261,7 @@ function stateOf(store: Store): SearchState {
 }
 
 function loadShard(st: SearchState, n: number): Promise<Shard> {
-   return cachedPromise(st.shardCache, n, () => {
-      const key = data.storeNames().meta.keys[n]
-      if (!key) throw new Error(`meta shard ${n}: the store names no object at that position`)
-      return data.fetchPackBytes(key, false).then((buf) => parseShard(buf, true))
-   })
+   return cachedPromise(st.shardCache, n, () => data.loadMetaPack(n).then(makeShard))
 }
 
 // The resident delta chain projected as a synthetic Shard so the newest chrons

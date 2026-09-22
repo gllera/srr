@@ -5,6 +5,7 @@ const data = vi.hoisted(() => ({
    feedTitle: vi.fn(() => "x"),
    findLeft: vi.fn(async () => -1),
    findRight: vi.fn(async () => -1),
+   getFeedId: vi.fn(async () => 1),
    activeStore: () => ({ mid: "0", base: new URL("http://localhost/") }),
 }))
 vi.mock("../data", () => data)
@@ -24,14 +25,7 @@ beforeEach(() => {
 describe("SavedLane", () => {
    it("is a feed-agnostic peek lane in save order", () => {
       const l = lane()
-      expect([l.kind, l.key, l.label(), l.peek, l.dividers, l.chronOrdered]).toEqual([
-         "saved",
-         "~saved",
-         "★ Saved",
-         true,
-         false,
-         false,
-      ])
+      expect([l.kind, l.key, l.peek, l.dividers, l.chronOrdered]).toEqual(["saved", "~saved", true, false, false])
       expect(l.members.size).toBe(0)
       expect(l.entryAnchor()).toBe(-1)
    })
@@ -65,16 +59,23 @@ describe("SavedLane", () => {
       expect(await l.ahead(1)).toBe(1)
    })
 
+   it("admits a member of the set and nothing else, and never knows an unread", async () => {
+      expect(await lane().admits(4)).toBe(true)
+      expect(await lane().admits(2)).toBe(false)
+      expect(await lane().admits(9)).toBe(false) // out of range
+      expect(await lane().firstUnread()).toEqual({ chron: -1, known: false })
+   })
+
    it("lands a switch on the front of the queue", async () => {
-      expect(await lane().entry()).toEqual({ land: 4, record: false })
+      expect(await lane().entry()).toEqual({ land: 4 })
       localStorage.setItem("srr-saved", "[]")
-      expect(await lane().entry()).toEqual({ land: -1, record: false })
+      expect(await lane().entry()).toEqual({ land: -1 })
    })
 
    it("answers the value seam as a walk over no feeds, as feedLeft/feedRight always did here", async () => {
       expect(await lane().atOrBelow(5)).toBe(-1)
-      expect(data.findLeft).toHaveBeenCalledWith(5, new Map())
       expect(await lane().atOrAbove(0)).toBe(-1)
-      expect(data.findRight).toHaveBeenCalledWith(0, new Map())
+      expect(data.findLeft).not.toHaveBeenCalled()
+      expect(data.findRight).not.toHaveBeenCalled()
    })
 })

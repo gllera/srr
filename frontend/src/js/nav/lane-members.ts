@@ -5,18 +5,7 @@
 import * as data from "../data"
 import { feedIdOf } from "../route"
 import { feedKey, getSeen, readSeen, tagUnreadFromCounts, tallyWith } from "../seen"
-import {
-   firstUnreadProbe,
-   keyOf,
-   labelFor,
-   minOf,
-   oldestByBounds,
-   validResume,
-   type Lane,
-   type LaneEntry,
-   type LaneEnv,
-   type SeenMap,
-} from "./lane"
+import { LaneBase, minOf, oldestByBounds, type LaneEntry, type LaneEnv, type SeenMap } from "./lane"
 
 // Resolve a token list to its feed membership at natural add_idx bounds — a
 // numeric token is that feed, anything else a tag's members; only feeds with
@@ -67,10 +56,8 @@ export function reconcileMembers(members: Map<number, number>, fresh: Map<number
    for (const id of [...members.keys()]) if (!fresh.has(id)) members.delete(id)
 }
 
-export class MembersLane implements Lane {
+export class MembersLane extends LaneBase {
    readonly kind: "all" | "members"
-   readonly tokens: readonly string[]
-   readonly key: string
    readonly peek = false
    readonly dividers = true
    readonly chronOrdered = true
@@ -84,19 +71,14 @@ export class MembersLane implements Lane {
    private anchorChron = -1
 
    constructor(tokens: readonly string[], members: Map<number, number>, env: LaneEnv) {
+      super(tokens)
       this.kind = tokens.length === 0 ? "all" : "members"
-      this.tokens = tokens
-      this.key = keyOf(tokens)
       this.feeds = members
       this.env = env
    }
 
    get members(): ReadonlyMap<number, number> {
       return this.feeds
-   }
-
-   label(): string {
-      return labelFor(this.key)
    }
 
    matches(feedId: number, chron: number): boolean {
@@ -118,20 +100,8 @@ export class MembersLane implements Lane {
       return data.findRight(from, this.feeds).then((found) => (a >= from && (found === -1 || a < found) ? a : found))
    }
 
-   older(chron: number): Promise<number> {
-      return this.atOrBelow(chron - 1)
-   }
-
-   newer(chron: number): Promise<number> {
-      return this.atOrAbove(chron + 1)
-   }
-
    oldest(): Promise<number> {
       return oldestByBounds(this)
-   }
-
-   newest(): Promise<number> {
-      return this.atOrBelow(data.db.total_art - 1)
    }
 
    // The OLDEST UNREAD member: each bound raised past its seen high-water
@@ -176,53 +146,67 @@ export class MembersLane implements Lane {
          // [ALL] opens at the oldest unread; fully caught up, the placeholder
          // (unread-only) or the newest article (show-read).
          const idx = await this.anchor()
-         if (idx !== -1) return { land: idx, record: false }
-         if (unreadOnly) return { placeholder: true, notStarted: false, hasRight: false }
-         return { land: await this.newest(), record: false }
+         if (idx !== -1) return { land: idx }
+         if (unreadOnly) return { placeholder: true, notStarted: false }
+         return { land: await this.newest() }
       }
       // A KNOWN feed/tag with no articles (makeLane's keepKnownEmpty).
-      if (this.feeds.size === 0) return { placeholder: true, notStarted: false, hasRight: false }
+      if (this.feeds.size === 0) return { placeholder: true, notStarted: false }
       // One oldest-unread scan, reused for the caught-up test and startFeed.
-      const { chron: firstUnread, known } = await firstUnreadProbe(this, unreadOnly)
-      if (known && firstUnread === -1) return { placeholder: true, notStarted: false, hasRight: false }
+      const { chron: firstUnread, known } = await this.firstUnread()
+      if (known && firstUnread === -1) return { placeholder: true, notStarted: false }
       const seenIdx = this.tokens.length === 1 ? getSeen(this.tokens[0]) : undefined
-      if (seenIdx !== undefined && (await validResume(this, seenIdx, unreadOnly)))
-         return { land: seenIdx, record: false }
-      if (!unreadOnly) return { land: await this.oldest(), record: false }
+      if (seenIdx !== undefined && (await this.admits(seenIdx))) return { land: seenIdx }
+      if (!unreadOnly) return { land: await this.oldest() }
       // Unread-only and never opened: the reader is a resume surface, so show the
       // not-started placeholder with Next ARMED, its pill the whole backlog, naming
       // the feed the backlog starts with (a tag's label alone cannot say which).
       return {
          placeholder: true,
          notStarted: true,
-         hasRight: true,
          rightCount: await this.ahead(-1).catch(() => -1),
          startFeed:
             firstUnread < 0 ? undefined : await Promise.resolve(data.getFeedId(firstUnread)).catch(() => undefined),
       }
    }
 
-   prepare(): Promise<void> {
-      return Promise.resolve()
-   }
-
-   refreshed(): Promise<void> {
+   override refreshed(): Promise<void> {
       reconcileMembers(this.feeds, resolveMembership(this.tokens), this.env.unreadOnly())
       return Promise.resolve()
    }
 
-   landed(chron: number, feedId: number): void {
+   override landed(chron: number, feedId: number): void {
       // A landing the raised bounds do NOT cover is an entry anchor; a matching
       // one leaves it alone (stepping forward must not orphan the entry).
       if (this.env.unreadOnly() && !this.matches(feedId, chron)) this.anchorChron = chron
    }
 
-   applyUnseen(seen: SeenMap): void {
+   override applyUnseen(seen: SeenMap): void {
       if (!this.env.unreadOnly()) return
       for (const [id, addIdx] of this.feeds) this.feeds.set(id, Math.max(addIdx, (seen[feedKey(id)] ?? -1) + 1))
    }
 
-   entryAnchor(): number {
+   override entryAnchor(): number {
       return this.anchorChron
+   }
+
+   // Under unread-only a landing validates against the member's TRUE add_idx,
+   // not the raised bound, so the lane's own resume (seen) position is accepted.
+   override async admits(idx: number): Promise<boolean> {
+      if (!this.env.unreadOnly()) return super.admits(idx)
+      if (idx < 0 || idx >= data.db.total_art) return false
+      const feedId = await data.getFeedId(idx)
+      return this.feeds.has(feedId) && idx >= (data.db.feeds[feedId]?.add_idx ?? 0)
+   }
+
+   // The oldest-unread scan from the smallest raised bound; a walk that blipped
+   // is unknown rather than caught up.
+   override async firstUnread(): Promise<{ chron: number; known: boolean }> {
+      if (!this.env.unreadOnly() || this.feeds.size === 0) return { chron: -1, known: false }
+      try {
+         return { chron: await this.atOrAbove(minOf(this.feeds.values())), known: true }
+      } catch {
+         return { chron: -1, known: false }
+      }
    }
 }

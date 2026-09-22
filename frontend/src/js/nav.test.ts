@@ -1816,6 +1816,25 @@ describe("goToArticle — the mini-player's exact jump", () => {
       expect(nav.isSavedFilter()).toBe(false)
    })
 
+   it("a jump that moves the unread-only entry anchor invalidates the cached step probes", async () => {
+      // The switch resumes on the read 1 (entry anchor 1); → → ← lands on the
+      // unread 2 with its ← probe cached (1). Jump to the read 0 (anchor := 0)
+      // and back to 2: ← must reach the new anchor 0, not the stale cached 1.
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 1 })) // 0,1 read
+      nav.setUnreadOnly(true)
+      await nav.switchFilter("1")
+      expect(data.loadArticle).toHaveBeenLastCalledWith(1)
+      await nav.right()
+      await nav.right()
+      await nav.left()
+      expect(data.loadArticle).toHaveBeenLastCalledWith(2)
+      await nav.goToArticle(0)
+      await nav.goToArticle(2)
+      await nav.left()
+      expect(data.loadArticle).toHaveBeenLastCalledWith(0)
+   })
+
    it("clamps an unaddressable (expired) chron to the nearest live match, like a deep link", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
       data.db.feeds[1].add_idx = 1 // chron 0 expired

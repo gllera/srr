@@ -32,6 +32,7 @@ import {
    manifestNames,
    type IManifestWire,
    type StoreNames,
+   type SeriesList,
 } from "./names"
 import { ASSET_KEY_SRC } from "./sw-grammar"
 import { emptyPlane, parseWatchPlane, type WatchPlane } from "./watch-plane"
@@ -124,11 +125,11 @@ export interface Store extends StoreContext {
    // Decoded watch/ bitmap objects by position (loadWatchPlane).
    watchCache: LRU<Promise<WatchPlane>>
    groupCache: Partial<Record<"active" | "all", GroupResult>>
-   // One in-flight-or-resolved manifest, keyed by its generation number.
-   // Manifest names are write-once, so this can never go stale; it exists so an
-   // unchanged poll (refresh() re-parses the root every 5 minutes) costs no
-   // second fetch.
-   manifestMemo: { m: number; man: Promise<IManifestWire> } | null
+   // One in-flight-or-resolved manifest, keyed by its generation number (a
+   // one-slot LRU: a new generation evicts the old). Manifest names are
+   // write-once, so this can never go stale; it exists so an unchanged poll
+   // (refresh() re-parses the root every 5 minutes) costs no second fetch.
+   manifests: LRU<Promise<IManifestWire>>
    // Marks the window in which refresh() re-applies a new db.gz from the
    // background heartbeat (see assertPackOk).
    bgRefresh: boolean
@@ -151,7 +152,7 @@ function makeStore(ctx: StoreContext): Store {
       metaCache: makeLRU<Promise<IMetaWire[]>>(20),
       watchCache: makeLRU<Promise<WatchPlane>>(8),
       groupCache: {} as Partial<Record<"active" | "all", GroupResult>>,
-      manifestMemo: null as Store["manifestMemo"],
+      manifests: makeLRU<Promise<IManifestWire>>(1),
       bgRefresh: false,
    }
    // Kick the eager db.gz fetch at construction — for the home store this fires
@@ -363,34 +364,28 @@ type IRootWire = Partial<IDBWire> &
    Partial<Omit<IDB, "feeds">> & { t?: number; feeds?: Record<number, IFeedWire> | null }
 
 function loadManifest(store: Store, m: number): Promise<IManifestWire> {
-   if (store.manifestMemo?.m === m) return store.manifestMemo.man
-   const man = fetchTimed(new URL(`manifest/${m}.gz`, store.base), "force-cache", store.cred, async (res) => {
-      // NOT assertPackOk: a 404 here is not the stale-tab tail-GC case that
-      // reload self-heals. The root we just fetched no-cache is by definition
-      // current, so it names a manifest the store should still serve; if it
-      // doesn't, reloading would fetch the same pair again. Surface it.
-      if (!res.ok) throw new Error(`manifest/${m}.gz fetch failed: ${res.status} ${res.url}`)
-      return gunzipJson<IManifestWire>(res)
-   }).then((parsed) => {
-      // manifest/<m>.gz is write-once, so its body can only ever describe
-      // generation m. A disagreement means the store served something else
-      // entirely — refuse it rather than address every pack through the wrong
-      // generation's name list.
-      if (parsed.m !== m) throw new Error(`manifest/${m}.gz declares generation ${parsed.m}`)
-      // One constant for the whole store format: the root and every manifest
-      // it names carry the same `v` (backend dbFormatVersion), because a root
-      // is a pointer into the manifest chain and neither is meaningful without
-      // the other.
-      if ((parsed.v ?? 0) > DB_FORMAT_VERSION) throw new TooNewError("manifest", parsed.v)
-      return parsed
-   })
-   store.manifestMemo = { m, man }
-   // A rejected memo must not poison the next attempt (the cachedPromise
-   // discipline, applied by hand since this is a single slot).
-   man.catch(() => {
-      if (store.manifestMemo?.man === man) store.manifestMemo = null
-   })
-   return man
+   return cachedPromise(store.manifests, m, () =>
+      fetchTimed(new URL(`manifest/${m}.gz`, store.base), "force-cache", store.cred, async (res) => {
+         // NOT assertPackOk: a 404 here is not the stale-tab tail-GC case that
+         // reload self-heals. The root we just fetched no-cache is by definition
+         // current, so it names a manifest the store should still serve; if it
+         // doesn't, reloading would fetch the same pair again. Surface it.
+         if (!res.ok) throw new Error(`manifest/${m}.gz fetch failed: ${res.status} ${res.url}`)
+         return gunzipJson<IManifestWire>(res)
+      }).then((parsed) => {
+         // manifest/<m>.gz is write-once, so its body can only ever describe
+         // generation m. A disagreement means the store served something else
+         // entirely — refuse it rather than address every pack through the wrong
+         // generation's name list.
+         if (parsed.m !== m) throw new Error(`manifest/${m}.gz declares generation ${parsed.m}`)
+         // One constant for the whole store format: the root and every manifest
+         // it names carry the same `v` (backend dbFormatVersion), because a root
+         // is a pointer into the manifest chain and neither is meaningful without
+         // the other.
+         if ((parsed.v ?? 0) > DB_FORMAT_VERSION) throw new TooNewError("manifest", parsed.v)
+         return parsed
+      }),
+   )
 }
 
 // The root selection rule — THE ROOT IS AUTHORITATIVE FOR WHAT IT CARRIES; the
@@ -511,9 +506,23 @@ async function fromManifestRoot(store: Store, raw: IRootWire): Promise<Snapshot>
 
 // The (re-runnable) boot body: swap the snapshot into `store` and rebuild
 // everything derived from it. Also the refresh() path — the caches are recreated
-// wholesale (one code path, no diff logic); refetches ride the SW/HTTP cache,
-// and on a gen change the stale bytes MUST go anyway.
+// wholesale (one code path, no diff logic), then seeded with whatever the
+// previous snapshot had parsed for a position that still names the SAME object
+// (carryOver below); refetches of anything else ride the SW/HTTP cache.
 async function applyDb(store: Store, snap: Snapshot): Promise<void> {
+   // The previous snapshot's names and caches, for the carry-over below —
+   // absent on the first apply (nothing is resident yet).
+   const prev = store.names
+      ? {
+           names: store.names,
+           slots: store.slots,
+           nf: numFinalizedIdx(store),
+           idx: store.idxFetches,
+           data: store.dataCache,
+           meta: store.metaCache,
+           watch: store.watchCache,
+        }
+      : null
    // db and names are installed TOGETHER and synchronously, before any await:
    // every name the rest of this function resolves must belong to the snapshot
    // it is applying, and deltaLoad below is set in the same synchronous run.
@@ -545,6 +554,21 @@ async function applyDb(store: Store, snap: Snapshot): Promise<void> {
    store.idxFetches = makeLRU(nf + 1)
    store.deltaArts = []
    store.deltaLoad = Promise.resolve([])
+   // Every object is write-once under a stem that is never reused
+   // (docs/MANIFEST-SPEC.md §4), so a position whose key is unchanged names the
+   // same bytes: its parsed value carries over, and the reader's next step in
+   // the archive costs no re-fetch, gunzip or parse after a heartbeat adopted a
+   // generation. A grown tail and a compaction both write fresh stems, so they
+   // miss by construction. An idx pack's parse is sized to the store's slots,
+   // and the latest pack is built from the tail and the delta chain, so only
+   // finalized packs under an unchanged slot count carry over there.
+   if (prev) {
+      carryOver(prev.data, store.dataCache, prev.names.data, store.names.data)
+      carryOver(prev.meta, store.metaCache, prev.names.meta, store.names.meta)
+      carryOver(prev.watch, store.watchCache, prev.names.series.get("watch"), store.names.series.get("watch"))
+      if (prev.slots === store.slots)
+         carryOver(prev.idx, store.idxFetches, prev.names.idx, store.names.idx, Math.min(prev.nf, nf))
+   }
 
    if (store.db.total_art === 0) {
       store.idxHeaders = [] // defensive: a re-run must never leave headers from a previous snapshot
@@ -770,8 +794,8 @@ export async function refresh(store: Store = active): Promise<"unchanged" | "upd
    // one that survives a failed apply as the half-swapped snapshot this whole
    // paragraph exists to prevent. The fields applyDb does not write are
    // provably unchanged across the window (mid/base/cred/role are immutable,
-   // dbLoad is written only by init/refreshPeers, manifestMemo was already set
-   // by the loadDb above, and bgRefresh is false here and false again in the
+   // dbLoad is written only by init/refreshPeers, the manifest slot was already
+   // filled by the loadDb above, and bgRefresh is false here and false again in the
    // finally), so carrying them costs nothing.
    const prev = { ...store }
    store.bgRefresh = true
@@ -1018,6 +1042,26 @@ export function unreadTally<T extends TallyFeed>(
    )
 }
 
+// Seed `into` from `from` at every position below `upTo` that names the same
+// object in both snapshots. Through cachedPromise, so a carried promise that
+// later rejects drops from the cache it now lives in.
+function carryOver<T>(
+   from: LRU<Promise<T>>,
+   into: LRU<Promise<T>>,
+   prev: SeriesList | undefined,
+   next: SeriesList | undefined,
+   upTo = Infinity,
+): void {
+   if (!prev || !next) return
+   const end = Math.min(next.keys.length, upTo)
+   for (let p = 0; p < end; p++) {
+      const key = next.keys[p]
+      if (!key || key !== prev.keys[p]) continue
+      const hit = from.peek(p)
+      if (hit) void cachedPromise(into, p, () => hit)
+   }
+}
+
 // A finalized pack can be skipped without fetching it: its per-feed
 // counts are the deltas between consecutive cumulative headers. The latest
 // pack has no next boundary — it is resident anyway and scans cheaply.
@@ -1162,7 +1206,7 @@ export function metaCardOf(a: IArticle): IMetaWire {
 
 // parseJsonl decodes an ArrayBuffer of newline-delimited JSON into typed
 // objects. Exported for search.ts (meta shard parsing).
-export function parseJsonl<T>(buf: ArrayBuffer): T[] {
+export function parseJsonl<T>(buf: ArrayBuffer | Uint8Array): T[] {
    const text = new TextDecoder().decode(buf)
    const out: T[] = []
    for (const line of text.split("\n")) {
@@ -1196,12 +1240,23 @@ function metaPackId(store: Store, chronIdx: number): number {
    return Math.min(Math.floor(chronIdx / META_PACK_SIZE), numFinalizedMeta(store))
 }
 
-function loadMetaPack(store: Store, n: number): Promise<IMetaWire[]> {
+// One meta shard's cards by POSITION, parsed once per snapshot — the list's
+// cards below `head` and search's scan (which folds the titles on top) share it.
+export function loadMetaPack(n: number, store: Store = active): Promise<IMetaWire[]> {
    return cachedPromise(store.metaCache, n, async () => {
       const isLatest = n === store.names.meta.tail
       const buf = await fetchPackBytes(keyAt(store.names.meta, n, `meta shard ${n}`), isLatest, store)
       // Finalized shards carry a SEARCH_BLOOM_BYTES bloom prefix; the latest tail does not.
-      return parseJsonl<IMetaWire>(isLatest ? buf : buf.slice(SEARCH_BLOOM_BYTES))
+      if (isLatest) return parseJsonl<IMetaWire>(buf)
+      if (buf.byteLength < SEARCH_BLOOM_BYTES) {
+         // A finalized shard shorter than its bloom header is truncated/corrupt;
+         // blindly slicing would silently drop its cards. Surface it and treat
+         // the shard as empty.
+         console.warn(`meta shard ${n}: truncated (${buf.byteLength} < ${SEARCH_BLOOM_BYTES} bytes)`)
+         return []
+      }
+      // A view past the bloom, not a slice: the slice copied the whole shard to skip 4 KB.
+      return parseJsonl<IMetaWire>(new Uint8Array(buf, SEARCH_BLOOM_BYTES))
    })
 }
 
@@ -1234,7 +1289,7 @@ export async function loadMeta(chronIdx: number, store: Store = active): Promise
    }
    if (metaReady(store)) {
       const n = metaPackId(store, chronIdx)
-      const entries = await loadMetaPack(store, n)
+      const entries = await loadMetaPack(n, store)
       const e = entries[chronIdx - n * META_PACK_SIZE]
       if (e) return e
       // Defensive: an undefined slot (coverage race) — fall through to data/.
