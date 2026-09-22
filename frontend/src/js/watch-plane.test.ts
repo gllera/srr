@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
-import { bitAt, emptyPlane, nextSet, parseWatchPlane, popcountRange, prevSet, WATCH_DOC_VERSION } from "./watch-plane"
+import { WATCH_DOC_VERSION } from "./format.gen"
+import { bitAt, emptyPlane, nextSet, parseWatchPlane, popcountRange, prevSet } from "./watch-plane"
 import { b64, bytesOf } from "./watch-plane.testfixtures"
 
 describe("parseWatchPlane", () => {
@@ -39,7 +40,7 @@ describe("parseWatchPlane", () => {
    it("emptyPlane is an all-zero region, and the version matches the writer's", () => {
       const p = emptyPlane(100000, 7)
       expect([p.base, p.n, p.bits.size]).toEqual([100000, 7, 0])
-      expect(WATCH_DOC_VERSION).toBe(1) // backend/watch.go watchDocVersion
+      expect(WATCH_DOC_VERSION).toBe(1) // generated from backend/watch.go watchDocVersion
    })
 })
 

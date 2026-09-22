@@ -5,8 +5,7 @@
 // The object at position p covers chrons [base, base+n) with base = p·50000. Each
 // rule with at least one hit carries a base64 plane of ceil(n/8) bytes, LSB-first:
 // chron base+i is byte i>>3, bit i&7. A rule with no hit in the region is absent.
-
-export const WATCH_DOC_VERSION = 1
+import { WATCH_DOC_VERSION } from "./format.gen"
 
 export interface WatchPlane {
    base: number

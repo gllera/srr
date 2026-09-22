@@ -21,6 +21,9 @@ export const META_PACK_SIZE = 5000
 // chrons per watch/ bitmap object: bit i of the object at position p describes chron p*this + i, LSB-first within each byte (docs/MANIFEST-SPEC.md §4.8)
 export const WATCH_PACK_SIZE = 50000
 
+// the `v` every watch/ bitmap object body carries (backend/watch.go watchDoc); a reader rejects any other rather than guess at the bits
+export const WATCH_DOC_VERSION = 1
+
 // cap on the newest-glance head projection in db.gz (db.head: the newest cards, chron order)
 export const HEAD_MAX = 40
 

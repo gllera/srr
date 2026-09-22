@@ -43,6 +43,7 @@ var tsConsts = []struct {
 	{"IDX_PACK_SIZE", idxPackSize, "entries per finalized idx pack (split threshold)"},
 	{"META_PACK_SIZE", metaPackSize, "entries per finalized meta shard (the meta/ split stride; a divisor of IDX_PACK_SIZE)"},
 	{"WATCH_PACK_SIZE", watchPackSize, "chrons per watch/ bitmap object: bit i of the object at position p describes chron p*this + i, LSB-first within each byte (docs/MANIFEST-SPEC.md §4.8)"},
+	{"WATCH_DOC_VERSION", watchDocVersion, "the `v` every watch/ bitmap object body carries (backend/watch.go watchDoc); a reader rejects any other rather than guess at the bits"},
 	{"HEAD_MAX", headMax, "cap on the newest-glance head projection in db.gz (db.head: the newest cards, chron order)"},
 	{"IDX_STATE_SIZE", idxStateSize, "bytes: the 2 leading uint32 LE idx-header state fields (packId/packOff bases)"},
 	{"IDX_HEADER_PREFIX", idxHeaderPrefix, "bytes: idx-header fixed prefix (2 state uint32s + numSlots uint32); the variable count array follows"},
