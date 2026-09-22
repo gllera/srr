@@ -26,4 +26,7 @@ export function unb64u(s: string): Uint8Array {
    return out
 }
 
+/** Decode a base64url-encoded JSON document. Throws like unb64u; every caller answers null. */
+export const unb64uJson = (s: string): unknown => JSON.parse(utf8decode.decode(unb64u(s)))
+
 export const random = (n: number): string => b64u(crypto.getRandomValues(new Uint8Array(n)))

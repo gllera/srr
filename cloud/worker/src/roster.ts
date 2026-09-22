@@ -13,6 +13,7 @@
 // personal data), and onboarding a user must not require a code change. Set it
 // as a wrangler secret in production, in .dev.vars for local runs. Phase 2
 // replaces it with the control plane's roster.
+import { isObject } from "./bytes"
 import { UID_RE } from "./router"
 
 export interface RosterEntry {
@@ -30,13 +31,13 @@ export function parseRoster(raw: string | undefined): Record<string, RosterEntry
    const out: Record<string, RosterEntry> = {}
    try {
       const obj: unknown = JSON.parse(raw || "{}")
-      if (obj && typeof obj === "object" && !Array.isArray(obj)) {
-         for (const [email, v] of Object.entries(obj as Record<string, unknown>)) {
+      if (isObject(obj)) {
+         for (const [email, v] of Object.entries(obj)) {
             // Fail CLOSED per row: a malformed entry is DROPPED, never defaulted.
             // `active: "false"` is truthy, so accepting a non-boolean here would
             // turn a typo into a live tenant.
-            if (!v || typeof v !== "object") continue
-            const { uid, active } = v as { uid?: unknown; active?: unknown }
+            if (!isObject(v)) continue
+            const { uid, active } = v
             if (typeof uid !== "string" || typeof active !== "boolean") continue
             // Authorization is an equality test against a uid the router already
             // validated, so a row failing this could never match a request — drop

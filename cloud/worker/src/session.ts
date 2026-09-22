@@ -12,8 +12,8 @@
 // this token's own `exp` ends it. That is the deliberate cost of a confidential
 // client that does not talk to the IdP again until the session expires, and the
 // number below is a statement about how long a stale sign-out may last.
-import { b64u, isObject, unb64u, utf8, utf8decode } from "./bytes"
-import { openJws, timeAndSubjectOk } from "./jws"
+import { b64u, isObject, unb64uJson, utf8 } from "./bytes"
+import { nowSec, openJws, timeAndSubjectOk } from "./jws"
 import { memoAsync } from "./memo"
 
 // `__Host-` forbids Domain and pins Path=/, so a browser only ever returns this
@@ -55,7 +55,7 @@ const hmacKey = memoAsync((secret: string) =>
 
 /** Mint this worker's session token for an identity the IdP has just vouched for. */
 export async function mintSession(env: SessionConfig, { sub, email }: { sub: string; email: string }): Promise<string> {
-   const now = Math.floor(Date.now() / 1000)
+   const now = nowSec()
    const header = b64u(utf8.encode(JSON.stringify({ alg: SESSION_ALG, typ: SESSION_TYP })))
    const payload = b64u(
       utf8.encode(
@@ -124,14 +124,14 @@ export async function getSession(request: Request, env: SessionConfig): Promise<
       const ok = await crypto.subtle.verify("HMAC", await hmacKey(env.SESSION_HMAC_SECRET), jws.sig, jws.signed)
       if (!ok) return null
 
-      const claims: unknown = JSON.parse(utf8decode.decode(unb64u(jws.payload)))
+      const claims = unb64uJson(jws.payload)
       if (!isObject(claims)) return null
 
       // Who signed it, and that it is a session rather than some other token
       // this key might one day sign. The rest is the shared standard block.
       if (claims.iss !== SESSION_ISS) return null
       if (claims.t !== "sess") return null
-      if (!timeAndSubjectOk(claims, Math.floor(Date.now() / 1000))) return null
+      if (!timeAndSubjectOk(claims, nowSec())) return null
 
       return {
          sub: claims.sub as string,

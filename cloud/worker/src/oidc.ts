@@ -15,8 +15,8 @@
 // The id_token verification is hand-rolled and follows one rule: **the algorithm
 // is pinned, and the token's own header gets no vote.**
 // -----------------------------------------------------------------------------
-import { b64u, isObject, random, unb64u, utf8, utf8decode } from "./bytes"
-import { openJws, timeAndSubjectOk } from "./jws"
+import { b64u, isObject, random, unb64uJson, utf8 } from "./bytes"
+import { nowSec, openJws, timeAndSubjectOk } from "./jws"
 import { memoAsync } from "./memo"
 import {
    clearCookie,
@@ -165,7 +165,7 @@ function readFlow(request: Request): Flow | null {
    const raw = cookieValue(request.headers.get("cookie"), FLOW_COOKIE)
    if (!raw) return null
    try {
-      const f: unknown = JSON.parse(utf8decode.decode(unb64u(raw)))
+      const f = unb64uJson(raw)
       if (isObject(f) && typeof f.state === "string" && typeof f.nonce === "string" && typeof f.verifier === "string") {
          return {
             state: f.state,
@@ -304,7 +304,7 @@ async function verifyIdToken(
       }
       if (!verified) return null
 
-      const claims: unknown = JSON.parse(utf8decode.decode(unb64u(jws.payload)))
+      const claims = unb64uJson(jws.payload)
       if (!isObject(claims)) return null
 
       // A signature proves who minted a token, not who it was minted for.
@@ -314,7 +314,7 @@ async function verifyIdToken(
       const aud = Array.isArray(claims.aud) ? (claims.aud as unknown[]) : [claims.aud]
       if (!aud.includes(opts.audience)) return null
       if (aud.length > 1 && claims.azp !== opts.audience) return null
-      if (!timeAndSubjectOk(claims, Math.floor(Date.now() / 1000))) return null
+      if (!timeAndSubjectOk(claims, nowSec())) return null
       // OIDC Core §3.1.3.7 step 11. Without it, a token replayed from another
       // login verifies perfectly.
       if (claims.nonce !== opts.nonce) return null

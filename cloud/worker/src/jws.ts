@@ -6,7 +6,7 @@
 // nothing would notice until it mattered. What stays per-verifier is what
 // genuinely differs: the signature algorithm, and the claims that name the
 // audience (`t`/`iss` here, `aud`/`azp`/`nonce` there).
-import { isObject, unb64u, utf8, utf8decode } from "./bytes"
+import { isObject, unb64u, unb64uJson, utf8 } from "./bytes"
 
 /**
  * Split a compact JWS and pin the header. Returns the still-ENCODED payload
@@ -26,7 +26,7 @@ export function openJws(
    if (parts.length !== 3) return null
    const [h, p, s] = parts
 
-   const header: unknown = JSON.parse(utf8decode.decode(unb64u(h)))
+   const header = unb64uJson(h)
    if (!isObject(header)) return null
    // The pinned algorithm, never the header's claim about it. `alg: none`
    // matches nothing here, which is the point.
@@ -40,6 +40,9 @@ export function openJws(
    // to trust. The payload stays encoded.
    return { header, payload: p, sig: unb64u(s), signed: utf8.encode(`${h}.${p}`) }
 }
+
+/** The clock every temporal claim is minted and checked against: unix seconds. */
+export const nowSec = (): number => Math.floor(Date.now() / 1000)
 
 /**
  * The four standard claims both verifiers require identically: a numeric `iat`,
