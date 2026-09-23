@@ -8,8 +8,9 @@
            base-uri 'none' restricts <base href> only (our <base> sets target).
            No img-src/media-src/connect-src on purpose: the user-configured
            image proxy + sync endpoint + arbitrary feed media make them
-           unviable. Duplicated as a real header in _headers for the Pages
-           deploy; this meta is the store-root shell's only layer. -->
+           unviable. Duplicated as a real header by the reverse proxy in front
+           of a self-hosted deployment (docs/SELF-HOSTING.md); this meta is
+           the store-root shell's only layer when there is no proxy. -->
       <meta http-equiv="Content-Security-Policy" content="script-src 'self'; object-src 'none'; base-uri 'none'" />
       <!-- minimum-scale=1 forbids the zoomed-out-below-1 rest state phones reach
            when any content pokes past the viewport edge — there the fixed toolbar
@@ -35,9 +36,10 @@
       <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8' fill='%23f26522'><circle cx='1' cy='7' r='1'/><path d='M0 3v1a4 4 0 014 4h1A5 5 0 000 3z'/><path d='M0 0v1a7 7 0 017 7h1A8 8 0 000 0z'/></svg>" />
       <link rel="apple-touch-icon" href="apple-touch-icon.png" />
       <!-- use-credentials: the manifest is fetched in CORS mode without cookies by
-           default; behind an auth proxy (Cloudflare Access) that unauthenticated
-           fetch gets 302'd cross-origin to the login → CORS error. Sending creds
-           lets the Access session cookie ride along so it returns 200. -->
+           default; behind a forward-auth proxy (docs/SELF-HOSTING.md) that
+           unauthenticated fetch gets 302'd cross-origin to the login → CORS
+           error. Sending creds lets the auth session cookie ride along so it
+           returns 200. -->
       <link rel="manifest" href="manifest.webmanifest" crossorigin="use-credentials" />
       <link rel="stylesheet" href="styles.css" />
       <base target="_blank" />

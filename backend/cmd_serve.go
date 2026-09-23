@@ -47,9 +47,10 @@ func (o *ServeCmd) Run() error {
 
 	// No ReadHeaderTimeout (G112, Slowloris). Left as-is rather than "fixed"
 	// because the value is not obvious and this server is not the usual shape:
-	// it binds localhost:8088, its only real client is the cloudflared connector
-	// that terminates the public connection and re-originates, and hostGuard
-	// already refuses anything whose Host is not loopback. A slow-header attacker
+	// it binds localhost:8088, its only real client is the reverse proxy
+	// (docs/SELF-HOSTING.md) that terminates the public connection and
+	// re-originates, and hostGuard already refuses anything whose Host is not
+	// loopback. A slow-header attacker
 	// therefore needs local access first. Worth revisiting if serve is ever bound
 	// to a non-loopback --addr, where the exposure becomes real; whatever value is
 	// chosen must bound HEADER reads only, since /api/fetch is a minutes-long SSE
@@ -141,12 +142,13 @@ func secHeaders(next http.Handler) http.Handler {
 
 // hostGuard rejects requests whose Host (or cross-origin Origin) is not a
 // loopback address — anti-CSRF/DNS-rebinding hardening for the mutating API.
-// A GUI fronted by a Host-rewriting proxy (cloudflared tunnel + httpHostHeader)
-// passes the Host check but its browser mutations carry the outer, non-loopback
-// Origin; those are allowed only when the browser-set (unforgeable) fetch
-// metadata asserts the request initiator shares that outer origin. The Host
-// check stays unconditional: a DNS-rebinding page is same-origin to the browser
-// but cannot present a loopback Host.
+// A GUI fronted by a Host-rewriting reverse proxy that rewrites Host to the
+// loopback address (docs/SELF-HOSTING.md) passes the Host check but its
+// browser mutations carry the outer, non-loopback Origin; those are allowed
+// only when the browser-set (unforgeable) fetch metadata asserts the request
+// initiator shares that outer origin. The Host check stays unconditional: a
+// DNS-rebinding page is same-origin to the browser but cannot present a
+// loopback Host.
 func hostGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !loopbackHost(r.Host) {
@@ -233,7 +235,7 @@ func writeErr(w http.ResponseWriter, err error) {
 }
 
 // maxRequestBody caps every admin-API request body. The GUI is loopback/
-// Access-gated, but an unbounded io.ReadAll / json.Decode still lets a single
+// forward-auth-gated, but an unbounded io.ReadAll / json.Decode still lets a single
 // large body balloon memory — 8 MiB is far above any real feed-config or OPML
 // payload.
 const maxRequestBody = 8 << 20

@@ -52,9 +52,9 @@ export function apiLooksMissing(err: unknown): boolean {
 // contentType is set, sends body raw under that header (the OPML import's XML
 // dry-run) — and returns the parsed body.
 // Errors are NOT always our JSON {error}: hostGuard and intermediaries (the
-// tunnel, Cloudflare Access) answer plain text or HTML — that body is surfaced
-// verbatim, which is how a topology error (a 403, an Access login page) gets
-// diagnosed instead of showing an opaque "invalid JSON".
+// reverse proxy, a forward-auth gate) answer plain text or HTML — that body is
+// surfaced verbatim, which is how a topology error (a 403, an auth login page)
+// gets diagnosed instead of showing an opaque "invalid JSON".
 export async function api(method: string, path: string, body?: unknown, contentType?: string): Promise<unknown> {
    const opts: RequestInit = { method, headers: {} }
    if (body !== undefined) {

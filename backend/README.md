@@ -228,12 +228,12 @@ sftp:
 http:
   token: bearer-token...   # sent as "Authorization: Bearer <token>"
   headers:                 # extra request headers on every operation
-    CF-Access-Client-Id: xxx       # e.g. Cloudflare Access service tokens
-    CF-Access-Client-Secret: yyy   # an Authorization entry here wins over `token`
+    X-Auth-Client-Id: xxx          # e.g. a forward-auth proxy's service-token headers
+    X-Auth-Client-Secret: yyy      # an Authorization entry here wins over `token`
   insecure: false          # skip TLS certificate verification
 ```
 
-`http.headers` values may be credentials, so `srr config` masks the whole map. Set entries in YAML or through the `SRR_HTTP_HEADERS` env var — comma-separated `Name: value` entries (split on the first colon per entry, whitespace-trimmed): `SRR_HTTP_HEADERS="CF-Access-Client-Id: xxx, CF-Access-Client-Secret: yyy"`. The env value replaces the YAML map whole (env beats YAML, as everywhere); a header value containing a comma is only expressible in YAML. The backend refuses to follow a redirect on a write or delete (a 301/302/303 would silently downgrade PUT/DELETE to GET in Go's HTTP client and fake a success) — point the store URL at the canonical origin; plain GETs still follow redirects.
+`http.headers` values may be credentials, so `srr config` masks the whole map. Set entries in YAML or through the `SRR_HTTP_HEADERS` env var — comma-separated `Name: value` entries (split on the first colon per entry, whitespace-trimmed): `SRR_HTTP_HEADERS="X-Auth-Client-Id: xxx, X-Auth-Client-Secret: yyy"`. The env value replaces the YAML map whole (env beats YAML, as everywhere); a header value containing a comma is only expressible in YAML. The backend refuses to follow a redirect on a write or delete (a 301/302/303 would silently downgrade PUT/DELETE to GET in Go's HTTP client and fake a success) — point the store URL at the canonical origin; plain GETs still follow redirects.
 
 SFTP auth chain (in order): URL password → config password → config `private-key` → `~/.ssh/` keys → SSH agent. Uses `~/.ssh/known_hosts` for host key verification by default. Set `insecure: true` to skip verification.
 

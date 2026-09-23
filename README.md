@@ -52,7 +52,7 @@ Or self-host the reader from the same store as the packs — one origin serves b
 
 ### Automate
 
-The included GitHub Actions workflow (`cron.yml`) runs `srr fetch` on manual dispatch, and the `deploy-reader` job in `release.yml` deploys the hosted reader on version tags.
+The included GitHub Actions workflow (`cron.yml`) runs `srr fetch` on manual dispatch. The reader itself has no separate deploy step: `release.yml` bundles the SPA into `srrf.tar.gz` on every version tag, and `srr frontend update` installs that bundle straight into the store root — see [docs/SELF-HOSTING.md](docs/SELF-HOSTING.md).
 
 ## MCP
 
@@ -72,35 +72,28 @@ The included GitHub Actions workflow (`cron.yml`) runs `srr fetch` on manual dis
 
 ### Registering it
 
-Over the HTTP endpoint `srr serve` mounts at `/mcp` (loopback):
-
-```bash
-srr -o ./packs serve                                    # admin GUI + /mcp on :8088
-claude mcp add --transport http srr http://localhost:8088/mcp
-```
-
-Over stdio, where the client spawns the process itself:
+MCP is stdio-only, where the client spawns the process itself:
 
 ```bash
 claude mcp add srr -- srr mcp
 ```
 
-Remotely, when `srr serve` sits behind a Cloudflare tunnel + Access. **Operator step, not part of srr**: create an Access *Service Auth* policy for the hostname and issue a service token, then pass its two headers:
+Remotely, over SSH to the box that holds the store:
 
 ```bash
-claude mcp add --transport http srr https://admin-srr.example.com/mcp \
-  --header "CF-Access-Client-Id: <id>" \
-  --header "CF-Access-Client-Secret: <secret>"
+claude mcp add srr -- ssh <host> srr mcp
 ```
 
-Use a `headersHelper` in `.mcp.json` instead of literal `--header` values to keep the secret out of a checked-in config.
+A non-interactive `ssh` command runs without your login shell's PATH, so a
+bare `srr mcp` can fail "command not found" even though it works fine when
+you `ssh` in interactively — use the absolute install path and pass the store
+explicitly, e.g. `ssh host 'SRR_STORE=/srv/srr ~/.local/bin/srr mcp'`.
 
 ### Caveats
 
-- **`srr_fetch` can run for minutes** with no intermediate progress — the endpoint is stateless with plain JSON replies, so there are no progress notifications. Raise the client's tool timeout when a whole-store fetch is expected: `MCP_TOOL_TIMEOUT=600000` (ms).
-- **Writes contend with the fetch loop.** `srr_add_feed`, `srr_update_feed` and `srr_fetch` take the store lock; while a `srr serve --interval` cycle holds it they return `store busy: fetch cycle in progress; retry shortly` — the same 409 contract the admin GUI reports. Retry, don't change the arguments.
+- **`srr_fetch` can run for minutes** with no intermediate progress — the tool replies once, at the end, so there are no progress notifications. Raise the client's tool timeout when a whole-store fetch is expected: `MCP_TOOL_TIMEOUT=600000` (ms).
+- **Writes contend with the fetch loop.** `srr_add_feed`, `srr_update_feed` and `srr_fetch` take the store lock; while a `srr serve --interval` cycle holds it they return `store busy: fetch cycle in progress; retry shortly` — the same 409 contract the admin page reports. Retry, don't change the arguments.
 - **`srr_list_articles`' exact `Total` with `query` reads every data pack inside the window.** Pair `query` with `since` (e.g. `"7d"`) on a large store.
-- The endpoint inherits serve's loopback Host guard, and `/mcp` exposes a strict subset of what `/api/*` already offers the same caller — there is no separate on/off flag.
 
 ## Profile sync
 
@@ -116,7 +109,7 @@ Point a reader at it from the reader's own settings menu → **Sync…** → the
 - **Where the blob lives**: a file under `--sync-dir` (default `~/.config/srr/sync/<name>.json`), **not** the pack store. The profile is device state, not store state — it is deliberately absent from the manifest and the writer↔reader pack contract — and a store may be public by explicit choice, where a reading history has no business being. `SRR_SYNC_DIR=` (empty) turns the endpoint off; it then reports itself disabled.
 - **Concurrency is last-writer-wins**, whole-blob. That is what the reader already assumes: every sync cycle pulls and merges before it pushes, and it pushes whenever the endpoint is *behind* — so a device whose state an overwrite clobbered republishes it on its next cycle. Writes are atomic (temp file + rename), so a reader never sees a half-written profile.
 - **Bounds**: a PUT body must be a JSON object of at most 1 MiB; anything else is rejected without touching the stored blob.
-- **Same origin, by design.** The endpoint sits behind the same loopback `hostGuard` as `/api/*` and `/mcp`, which refuses a browser request that is not same-origin. So route the reader and `/sync/` under **one hostname** — e.g. one Cloudflare tunnel ingress rule sending `/sync/*` to `srr serve` (with the usual `httpHostHeader: localhost:8088` rewrite) and the rest to wherever the reader is hosted. A reader on a different hostname than the endpoint is refused, and that is the guard working, not a bug. Put an auth layer (Access, basic auth) in front: the reader's fetches carry `credentials: "include"`.
+- **Same origin, by design.** The endpoint sits behind the same loopback `hostGuard` as `/api/*`, which refuses a browser request that is not same-origin. So route the reader and `/sync/` under **one hostname** — see [docs/SELF-HOSTING.md](docs/SELF-HOSTING.md) for a worked reverse-proxy config that routes `/api/*` and `/sync/*` to `srr serve` and the rest to the static store root. A reader on a different hostname than the endpoint is refused, and that is the guard working, not a bug. Put an auth layer (forward-auth, basic auth) in front: the reader's fetches carry `credentials: "include"`.
 
 ## Project Structure
 
@@ -156,7 +149,6 @@ See [backend/README.md](backend/README.md) and [frontend/README.md](frontend/REA
 |----------|---------|--------|
 | `ci.yml` | Push to `main`, PRs | Runs `make verify` (lint, format, FE+BE tests, builds, jsdom e2e contract) and `make test-browser` (Puppeteer) in parallel jobs |
 | `release.yml` (`release` job) | `v*.*.*` tag | Cross-compiles backend binaries and bundles the SPA as `srrf.tar.gz`, creates GitHub release (`srr frontend update` installs the SPA from this asset) |
-| `release.yml` (`deploy-reader` job) | `v*.*.*` tag or manual | Builds the reader with the `SRR_CDN_URL` secret and deploys it as a Cloudflare Worker that both gates it (OIDC) and serves it — `cloud/worker/src/reader.ts`. Skips itself, loudly, unless `SRR_WORKER_ROUTE` is set |
 | `cron.yml` | Manual dispatch | Downloads latest `srr` binary and runs `srr fetch` against the configured store |
 
 ## License

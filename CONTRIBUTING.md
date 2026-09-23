@@ -1,6 +1,6 @@
 # Contributing
 
-SRR is a monorepo: `backend/` (Go CLI, the pack writer) and `frontend/` (TypeScript SPA, the reader), plus `cloud/` (the hosted-reader Worker) and a shared e2e contract suite in `frontend/e2e/`.
+SRR is a monorepo: `backend/` (Go CLI, the pack writer) and `frontend/` (TypeScript SPA, the reader plus the admin page), and a shared e2e contract suite in `frontend/e2e/`.
 
 ## Before you open a PR
 

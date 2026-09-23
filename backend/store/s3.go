@@ -166,8 +166,8 @@ func (d *S3) AtomicPut(ctx context.Context, key string, r io.Reader, meta Object
 
 // Version is the object's ETag, which is exactly what PutIfVersion's If-Match
 // takes — so the token is native here and the compare-and-swap is REAL, not the
-// best-effort check-then-write a filesystem is limited to. This is the backend
-// the production store runs on (R2), and the one the root flip needed it for.
+// best-effort check-then-write a filesystem is limited to. S3/R2 — the backends
+// real deployments use — is what the root flip needed a real CAS for.
 func (d *S3) Version(ctx context.Context, key string) (string, error) {
 	key = d.s3path("version", key)
 

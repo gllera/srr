@@ -98,9 +98,10 @@ func TestServeHostGuardRejectsCrossOrigin(t *testing.T) {
 	}
 }
 
-// A GUI served through a Host-rewriting proxy (cloudflared tunnel with a
-// httpHostHeader override) presents a loopback Host but the browser's real,
-// non-loopback Origin on every mutation. The browser-set Sec-Fetch-Site header
+// A GUI served through a Host-rewriting reverse proxy (one that rewrites Host
+// to the loopback address, docs/SELF-HOSTING.md) presents a loopback Host but
+// the browser's real, non-loopback Origin on every mutation. The browser-set
+// Sec-Fetch-Site header
 // distinguishes the GUI's own requests (same-origin) from a CSRF attacker's
 // (cross-site), so only the former may bypass the loopback-Origin requirement.
 func TestServeHostGuardProxiedOrigin(t *testing.T) {

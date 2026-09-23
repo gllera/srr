@@ -529,8 +529,8 @@ function routesToReader(hash: string): boolean {
 }
 
 // The hash the first route() takes. Foreign hashes (OAuth implicit-flow tokens
-// an auth provider in front of the app injected — Cloudflare Access
-// JWT-in-fragment, OIDC, …) are dropped so the page lands on the user's last
+// an auth provider in front of the app injected — OIDC implicit-flow
+// fragments and the like) are dropped so the page lands on the user's last
 // position instead of the latest article; SRR hashes are `[integer][!tokens]`
 // or `!tokens`. An empty hash restores the stored one.
 function bootHash(): string {

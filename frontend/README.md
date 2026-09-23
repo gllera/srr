@@ -104,10 +104,7 @@ app  -->  {gestures, dropdown, pin, refresh, sync, fmt}
 
 ## Deployment
 
-Two supported shapes, both built by `release.yml` on version tags (`v*.*.*`) or manual trigger:
-
-- **Hosted reader** (cross-origin packs): the `deploy-reader` job builds with the `SRR_CDN_URL` secret from the `ci` environment and deploys `dist/srrf/` as the assets of a Cloudflare Worker (`cloud/worker/src/reader.ts`) that gates the shell behind OIDC and serves it. One origin for the gate and the bytes, so there is no second address answering around the login.
-- **Self-hosted from the store root** (same origin): the `release` job attaches the SPA as `srrf.tar.gz` built with **no** cdn-url, so packs resolve relative to `index.html`; install it into a store root next to `db.gz` with `srr frontend update`.
+Self-hosted from the store root (same origin): the `release.yml` `release` job (version tags `v*.*.*` or manual trigger) attaches the SPA as `srrf.tar.gz` built with **no** cdn-url, so packs resolve relative to `index.html`; install it into a store root next to `db.gz` with `srr frontend update`. Front the whole store root with a reverse proxy that routes `/api/*` and `/sync/*` to `srr serve` and adds a forward-auth gate for a private deployment — see [docs/SELF-HOSTING.md](../docs/SELF-HOSTING.md) for a worked Caddy + Authelia example.
 
 ## Stack
 

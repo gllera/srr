@@ -19,7 +19,7 @@ var httpCfg HTTPConfig
 // HTTPConfig configures the HTTP backend. Basic auth rides the store URL's
 // userinfo (https://user:pass@host/path); Token adds a bearer Authorization
 // header instead. Headers are extra request headers sent on every operation
-// (e.g. Cloudflare Access service-token headers) — an explicit Authorization
+// (e.g. a forward-auth proxy's service-token headers) — an explicit Authorization
 // entry wins over Token; values may be credentials, so the whole map is
 // secret-tagged (masked by `srr config`). Set entries via YAML or the
 // SRR_HTTP_HEADERS env var (comma-separated "Name: value" entries — see

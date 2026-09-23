@@ -51,10 +51,11 @@ import (
 // worth stating plainly: a browser reader served from a DIFFERENT origin than
 // this endpoint is refused (its request is cross-site, by construction). The
 // supported shape is one hostname routing the reader and /sync/ to their
-// respective origins — e.g. a Cloudflare tunnel with a path rule for /sync/*
-// pointing at serve's httpHostHeader-rewritten localhost:8088, the same trick
-// an Access-fronted admin host already uses — so the browser sees one origin. Non-browser
-// clients send no Origin and only meet the Host check. See README → Profile sync.
+// respective origins — e.g. a reverse proxy that rewrites Host to the loopback
+// address (docs/SELF-HOSTING.md) with a path rule sending /sync/* and /api/*
+// to serve's localhost:8088 and everything else to the static store root — so
+// the browser sees one origin. Non-browser clients send no Origin and only
+// meet the Host check. See README → Profile sync.
 
 // syncBlobDir is where the profile blobs are kept, resolved once by
 // ServeCmd.Run from --sync-dir before the listener starts (the same

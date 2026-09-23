@@ -36,17 +36,17 @@ Front the store origin with an auth layer and give the reader credentials for
 it. The pieces already exist:
 
 - the **HTTP store backend** carries credential headers (`HTTPConfig.Token`,
-  `HTTPConfig.Headers` — e.g. Cloudflare Access service tokens), so the writer
-  authenticates;
+  `HTTPConfig.Headers`), so the writer authenticates;
 - the reader's **sync layer** already demonstrates credentialed fetches
   (`credentials: "include"`), and the manifest link uses
   `crossorigin="use-credentials"` for exactly this case;
-- the admin GUI is already Access-gated in this deployment
-  (`admin-srr.example.com`), so the pattern is in production use.
+- self-hosting behind a forward-auth reverse proxy (e.g. Caddy + Authelia) is a
+  supported deployment shape — see `docs/SELF-HOSTING.md`.
 
-The reader fetches packs with plain `fetch`, so a cookie-based gate (Cloudflare
-Access and similar) is the least invasive option: the browser attaches the
-session automatically once the user has authenticated to the origin.
+The reader fetches packs with plain `fetch`, so a cookie-based gate (a
+forward-auth reverse proxy such as Caddy + Authelia, or an equivalent hosted
+service) is the least invasive option: the browser attaches the session
+automatically once the user has authenticated to the origin.
 
 ## The leak-shrinker was taken (2026-07-21)
 

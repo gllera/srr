@@ -130,7 +130,8 @@ func TestServeSyncRejects(t *testing.T) {
 // not carve an exception out of it: a non-loopback Host is refused on the read
 // side as well as the write side, a cross-site browser request is refused, and
 // the ONE shape that passes is the proxied deployment the guard was built for —
-// a Host-rewriting tunnel plus the browser's own same-origin fetch metadata.
+// a reverse proxy rewriting Host plus the browser's own same-origin fetch
+// metadata.
 func TestServeSyncHostGuard(t *testing.T) {
 	syncDirForTest(t)
 	h := newMux()
