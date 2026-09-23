@@ -585,3 +585,129 @@ func TestLoadStoreClampsARootClockBehindItsManifest(t *testing.T) {
 		t.Errorf("resolved fetched_at = %d, want 5000 (the manifest's, clamped up from the root's 100)", got)
 	}
 }
+
+// TestDBMetaCleanAfterFeedIDReuse: AddFeed hands out the lowest free id, so a
+// deleted feed's id is reused by the next subscription. The dead incarnation's
+// idx entries stay (packs are immutable) below the new feed's add_idx, so idx
+// holds MORE entries for that id than the live feed's all-time total_art. That
+// is a healthy store and must validate clean.
+func TestDBMetaCleanAfterFeedIDReuse(t *testing.T) {
+	db, core, _ := setupTestDB(t)
+	old := &Feed{Title: "Old", URL: "https://old.example/f"}
+	if err := db.AddFeed(old); err != nil {
+		t.Fatal(err)
+	}
+	putExpireBatch(t, db, fresh1d, []*Item{{Feed: old, Title: "o1"}, {Feed: old, Title: "o2"}, {Feed: old, Title: "o3"}})
+	if err := db.RemoveFeed(ctx, old.id); err != nil {
+		t.Fatal(err)
+	}
+	reused := &Feed{Title: "New", URL: "https://new.example/f"}
+	if err := db.AddFeed(reused); err != nil {
+		t.Fatal(err)
+	}
+	if reused.id != old.id {
+		t.Fatalf("precondition: AddFeed gave id %d, want the freed id %d", reused.id, old.id)
+	}
+	putExpireBatch(t, db, fresh1d, []*Item{{Feed: reused, Title: "n1"}})
+	fetch := func(key string) ([]byte, error) { return db.readGz(ctx, key) }
+	packs, _, err := loadIdxPacks(fetch, core)
+	if err != nil {
+		t.Fatalf("loadIdxPacks: %v", err)
+	}
+	var issues int
+	out := captureStdout(t, func() { issues = ins.checkDBMeta(fetch, core, packs) })
+	if issues != 0 {
+		t.Fatalf("checkDBMeta reported %d issue(s) on a store with a reused feed id:\n%s", issues, out)
+	}
+}
+
+// TestDBMetaFlagsTotalArtAboveIdx: all-time total_art can never exceed the idx
+// entries carrying that id, reuse or not — that direction is still corruption.
+func TestDBMetaFlagsTotalArtAboveIdx(t *testing.T) {
+	fetch, core := inspBoundaryStore(t)
+	c := inspCloneCore(core)
+	c.Feeds[1].TotalArt += 5
+	c.Feeds[1].Expired += 5 // keep the live count consistent so only total_art trips
+	packs := inspFreshPacks(t, fetch, c)
+	var issues int
+	out := captureStdout(t, func() { issues = ins.checkDBMeta(fetch, c, packs) })
+	if issues != 1 || !strings.Contains(out, "total_art") {
+		t.Fatalf("checkDBMeta: got %d issue(s), want exactly 1 total_art finding:\n%s", issues, out)
+	}
+}
+
+// reusePacks builds two idx packs for one feed id whose FIRST incarnation owns
+// pack 0's first two entries and whose current incarnation (add_idx 2) owns the
+// third: pack 1's header therefore counts 1 (the current incarnation's
+// all-time count before pack 1), not pack 0's cumulative 3.
+func reusePacks(t *testing.T, pack1Header uint32) []*idxPack {
+	t.Helper()
+	pack0, err := parseIdxPack(buildIdxRaw(1, 0, []uint32{0}, []uint16{0, 0, 0}, nil), 0, 3, 1)
+	if err != nil {
+		t.Fatalf("parseIdxPack pack0: %v", err)
+	}
+	pack1, err := parseIdxPack(buildIdxRaw(2, 3, []uint32{pack1Header}, []uint16{0}, nil), 1, 1, 1)
+	if err != nil {
+		t.Fatalf("parseIdxPack pack1: %v", err)
+	}
+	return []*idxPack{pack0, pack1}
+}
+
+// TestFeedCountsCleanAfterFeedIDReuse: a reused id's header restarts from the
+// new incarnation, so it sits BELOW the previous pack's cumulative. That is not
+// a continuity break.
+func TestFeedCountsCleanAfterFeedIDReuse(t *testing.T) {
+	var issues int
+	out := captureStdout(t, func() { issues = ins.checkFeedCountsContinuity(reusePacks(t, 1)) })
+	if issues != 0 {
+		t.Fatalf("checkFeedCountsContinuity: got %d issue(s) on a reused feed id, want 0:\n%s", issues, out)
+	}
+}
+
+// TestFeedCountsLiveMatchesReaderInvariant pins the property the reader
+// actually relies on: for a live feed and every pack whose base is at or past
+// its add_idx, header − expired == the feed's idx entries in [add_idx, base).
+// It holds across id reuse, and it is what still catches a corrupted header
+// that the (now reuse-tolerant) continuity check lets through.
+func TestFeedCountsLiveMatchesReaderInvariant(t *testing.T) {
+	feeds := map[int]*Feed{0: {Title: "New", AddIdx: 2, TotalArt: 2}}
+
+	t.Run("reused id, correct header", func(t *testing.T) {
+		var issues int
+		out := captureStdout(t, func() { issues = ins.checkFeedCountsLive(reusePacks(t, 1), feeds) })
+		if issues != 0 {
+			t.Fatalf("got %d issue(s), want 0:\n%s", issues, out)
+		}
+	})
+
+	t.Run("header below the running total but still wrong", func(t *testing.T) {
+		var issues int
+		out := captureStdout(t, func() {
+			issues = ins.checkFeedCountsContinuity(reusePacks(t, 2)) + ins.checkFeedCountsLive(reusePacks(t, 2), feeds)
+		})
+		if issues == 0 {
+			t.Fatalf("a header of 2 for 1 live entry went unreported:\n%s", out)
+		}
+	})
+
+	t.Run("expired prefix is subtracted", func(t *testing.T) {
+		// Same incarnation throughout: 3 entries in pack 0, the first expired,
+		// so add_idx 1 and expired 1; the header is the all-time 3.
+		exp := map[int]*Feed{0: {Title: "Exp", AddIdx: 1, TotalArt: 4, Expired: 1}}
+		var issues int
+		out := captureStdout(t, func() { issues = ins.checkFeedCountsLive(reusePacks(t, 3), exp) })
+		if issues != 0 {
+			t.Fatalf("got %d issue(s), want 0:\n%s", issues, out)
+		}
+	})
+}
+
+// TestFeedCountsContinuityStillFlagsExcess: a header ABOVE the previous pack's
+// cumulative is impossible under any history and stays an issue.
+func TestFeedCountsContinuityStillFlagsExcess(t *testing.T) {
+	var issues int
+	captureStdout(t, func() { issues = ins.checkFeedCountsContinuity(reusePacks(t, 4)) })
+	if issues == 0 {
+		t.Fatal("a header above the running total went unreported")
+	}
+}

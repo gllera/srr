@@ -33,6 +33,7 @@ func (o *InspectCmd) validateAll(fetch keyGetter, core *DBCore, packs []*idxPack
 		{"bounds-vs-data", func() int { return o.checkBoundsVsData(fetch, core, packs, deltas) }},
 		{"db-meta", func() int { return o.checkDBMeta(fetch, core, packs) }},
 		{"feed-counts-continuity", func() int { return o.checkFeedCountsContinuity(packs) }},
+		{"feed-counts-live", func() int { return o.checkFeedCountsLive(packs, core.Feeds) }},
 		{"unknown-feed-ids", func() int { return o.checkUnknownFeedIDs(core, packs) }},
 		{"latest-files", func() int { return o.checkLatestFiles(fetch, core) }},
 		{"idx-summary", func() int { return o.checkIdxSummary(fetch, core, packs) }},
@@ -262,16 +263,18 @@ func (o *InspectCmd) checkDBMeta(fetch keyGetter, core *DBCore, packs []*idxPack
 	feedIDs := slices.Sorted(maps.Keys(core.Feeds))
 	for _, id := range feedIDs {
 		sub := core.Feeds[id]
-		actual := idxCount[id]
-		if actual != sub.TotalArt {
-			fmt.Fprintf(o.w(), "[db-meta] sub %d (%q): total_art=%d but idx has %d entries\n",
+		// total_art is the CURRENT incarnation's all-time count. AddFeed reuses
+		// the lowest free id, and a dead incarnation's entries stay in the
+		// immutable packs, so idx may hold MORE entries for an id than
+		// total_art — never fewer. The exact per-incarnation check is the
+		// live one below (and feed-counts-live across pack headers).
+		if actual := idxCount[id]; actual < sub.TotalArt {
+			fmt.Fprintf(o.w(), "[db-meta] sub %d (%q): total_art=%d exceeds the %d idx entries carrying this id\n",
 				id, sub.Title, sub.TotalArt, actual)
 			issues++
 		}
-		// Entries before add_idx are expected (expiration, feed-id reuse; the
-		// all-time total_art check above still assumes no id reuse — a known,
-		// pre-existing limitation); add_idx and the expired counter just have
-		// to stay in range.
+		// Entries before add_idx are expected (expiration, feed-id reuse);
+		// add_idx and the expired counter just have to stay in range.
 		if sub.AddIdx < 0 || sub.AddIdx > core.TotalArticles {
 			fmt.Fprintf(o.w(), "[db-meta] sub %d (%q): add_idx=%d out of range [0, %d]\n",
 				id, sub.Title, sub.AddIdx, core.TotalArticles)
@@ -297,9 +300,14 @@ func (o *InspectCmd) checkDBMeta(fetch keyGetter, core *DBCore, packs []*idxPack
 	return issues
 }
 
-// checkFeedCountsContinuity verifies header feedCounts[s] in pack i+1
-// equals feedCounts[s] + ownFeedCounts[s] from pack i. Only meaningful
-// once total_art crosses idxPackSize.
+// checkFeedCountsContinuity verifies header feedCounts[s] in pack i+1 against
+// feedCounts[s] + ownFeedCounts[s] from pack i. Only meaningful once total_art
+// crosses idxPackSize. A header ABOVE that running total is impossible under
+// any history and is an issue. One BELOW it is what a reused feed id looks
+// like — writeIdxHeader counts the id's CURRENT incarnation (its all-time
+// total_art), so the header restarts after AddFeed reused the id — and is
+// reported as information only; checkFeedCountsLive verifies those headers
+// exactly, against what the reader computes from them.
 func (o *InspectCmd) checkFeedCountsContinuity(packs []*idxPack) int {
 	if len(packs) < 2 {
 		fmt.Fprintln(o.w(), "[feed-counts] only 1 idx pack; continuity check skipped")
@@ -329,10 +337,14 @@ func (o *InspectCmd) checkFeedCountsContinuity(packs []*idxPack) int {
 
 		for s := range slots {
 			expected := cur.feedCount(s) + curOwn[s]
-			if next.feedCount(s) != expected {
+			switch got := next.feedCount(s); {
+			case got > expected:
 				fmt.Fprintf(o.w(), "[feed-counts] pack %d sub %d: header=%d but pack %d ended with cumulative %d\n",
-					next.packIndex, s, next.feedCount(s), cur.packIndex, expected)
+					next.packIndex, s, got, cur.packIndex, expected)
 				issues++
+			case got < expected:
+				fmt.Fprintf(o.w(), "[feed-counts] pack %d sub %d: header=%d restarts below pack %d's cumulative %d (feed id reused; checked by feed-counts-live)\n",
+					next.packIndex, s, got, cur.packIndex, expected)
 			}
 		}
 	}
@@ -346,6 +358,43 @@ func (o *InspectCmd) checkFeedCountsContinuity(packs []*idxPack) int {
 	if issues == 0 {
 		fmt.Fprintf(o.w(), "[feed-counts] %d pack boundary transitions consistent\n", len(packs)-1)
 	}
+	return issues
+}
+
+// checkFeedCountsLive verifies the one property the reader draws from idx
+// headers: for a live feed, the articles visible before pack P are
+// header[f] − expired once add_idx ≤ P's base chron (idx.ts / data.ts). So for
+// every such pack, header − expired must equal the feed's idx entries in
+// [add_idx, base). Exact across feed-id reuse (the dead incarnation's entries
+// sit below add_idx) and across expiration (the expired prefix is what
+// `expired` counts), which is why it — not raw continuity — is the check that
+// guards those headers.
+func (o *InspectCmd) checkFeedCountsLive(packs []*idxPack, feeds map[int]*Feed) int {
+	issues := 0
+	seen := map[int]uint32{} // live feed id → its entries in [add_idx, current chron)
+	ids := slices.Sorted(maps.Keys(feeds))
+	for _, p := range packs {
+		base := p.packIndex * idxPackSize
+		if p.packIndex > 0 {
+			for _, id := range ids {
+				f := feeds[id]
+				if base < f.AddIdx {
+					continue // the reader never reads this header for this feed
+				}
+				if got, want := int(p.feedCount(id))-f.Expired, int(seen[id]); got != want {
+					fmt.Fprintf(o.w(), "[feed-counts-live] pack %d sub %d (%q): header-expired=%d but idx holds %d entries in [add_idx %d, %d)\n",
+						p.packIndex, id, f.Title, got, want, f.AddIdx, base)
+					issues++
+				}
+			}
+		}
+		for i, s := range p.feedIDs {
+			if f := feeds[int(s)]; f != nil && base+i >= f.AddIdx {
+				seen[int(s)]++
+			}
+		}
+	}
+	fmt.Fprintf(o.w(), "[feed-counts-live] checked %d live feed(s) across %d pack header(s)\n", len(feeds), max(len(packs)-1, 0))
 	return issues
 }
 
