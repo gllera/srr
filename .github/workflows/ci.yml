@@ -77,8 +77,8 @@ jobs:
   # the critical path is `race` (~110s), and an instrumented backend run is well
   # under that, so this job is free wall-clock — where folding it into `verify`
   # would have made the shortest job longer for no gain. Go only: cover-be runs
-  # `go test ./...` directly, which compiles against the committed placeholder
-  # backend/webui/dist, so it needs neither Node nor golangci.
+  # `go test ./...` directly, which is a plain Go build, so it needs neither Node
+  # nor golangci.
   #
   # The actual-vs-floor delta table is echoed into the job summary as well as
   # the log, so a drift shows on the run's front page rather than only to

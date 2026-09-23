@@ -4,14 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// This file owns the MCP server registry and its HTTP transport seam; the tool
-// handlers themselves live in mcp_tools.go.
+// This file owns the MCP server registry; the tool handlers themselves live in
+// mcp_tools.go. MCP is served over stdio only (`srr mcp`, cmd_mcp.go) — there
+// is no HTTP transport.
 //
 // STDOUT DISCIPLINE: nothing under the MCP surface may write to os.Stdout.
 // The stdio transport (`srr mcp`, cmd_mcp.go) speaks JSON-RPC on stdout, so a
@@ -41,42 +41,6 @@ func newMCPServer() *mcp.Server {
 	}, nil)
 	addMCPTools(s)
 	return s
-}
-
-// mcpHTTPHandler is the single seam the phase-2 auth middleware wraps: the MCP
-// endpoint is one http.Handler, so authentication is a decorator around this
-// return value and never leaks into the tool handlers.
-//
-// Stateless: the binary restarts on every deploy, and no tool needs
-// server-initiated messages — a session map would only turn a restart into a
-// wall of "session not found" for connected clients.
-//
-// JSONResponse: replies are plain JSON bodies rather than an SSE stream. The
-// remote path runs through a Cloudflare tunnel, where a buffered/idle SSE
-// stream is the classic way for a long call to look hung.
-//
-// DisableLocalhostProtection is deliberately LEFT OFF (protection stays ON).
-// What it actually validates in v1.6.1 (mcp/streamable.go ServeHTTP): if the
-// connection's LOCAL address is loopback, then `req.Host` must also be
-// loopback, else 403. Both real client paths satisfy it:
-//   - a loopback client hitting http://localhost:8088/mcp sends Host
-//     "localhost:8088" — loopback, allowed;
-//   - an off-box Claude Code hitting https://admin-srr.example.com/mcp arrives via
-//     cloudflared, which connects to 127.0.0.1:8088 with the Host REWRITTEN to
-//     "localhost:8088" (originRequest.httpHostHeader) — also loopback, allowed.
-//
-// So it costs nothing and duplicates serve's own hostGuard Host check as
-// defence in depth (if this handler is ever mounted outside hostGuard, the
-// DNS-rebinding guard still stands). Note the SDK's Origin check is a separate,
-// nil-by-default option we do not set: hostGuard already owns the cross-origin
-// carve-out for the tunnel deployment, and a non-browser MCP client sends no
-// Origin header at all.
-func mcpHTTPHandler() http.Handler {
-	srv := newMCPServer()
-	return mcp.NewStreamableHTTPHandler(
-		func(*http.Request) *mcp.Server { return srv },
-		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true},
-	)
 }
 
 // msgMCPStoreBusy mirrors the admin API's 409 contract (msgLockContention) in

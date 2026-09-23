@@ -2,8 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -12,14 +10,13 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// The MCP surface has three contracts, and this file pins one per layer:
+// The MCP surface has two contracts, and this file pins one per layer:
 //
 //  1. HANDLER — the tool semantics themselves (mcp_tools.go), called directly
 //     with no transport in the way.
-//  2. HTTP — the streamable endpoint mounted by newMux(), exercised through
-//     hostGuard exactly as a remote client reaches it.
-//  3. STDIO-EQUIVALENT — newMCPServer().Run over an in-memory transport pair,
-//     which is the `srr mcp` code path minus the OS pipes (no subprocess).
+//  2. STDIO-EQUIVALENT — newMCPServer().Run over an in-memory transport pair,
+//     which is the `srr mcp` code path minus the OS pipes (no subprocess). MCP
+//     is stdio-only — serve mounts no HTTP transport.
 
 // --- layer 1: handlers ------------------------------------------------------
 
@@ -425,121 +422,6 @@ func TestMCPResolveFeedSecretScopeGrant(t *testing.T) {
 	}
 }
 
-// --- layer 2: HTTP transport ------------------------------------------------
-
-// mcpReq POSTs one JSON-RPC message to /mcp with the headers the streamable
-// HTTP transport requires (the SDK 415s a wrong Content-Type and 400s an
-// Accept that doesn't name both media types).
-func mcpReq(t *testing.T, h http.Handler, body string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
-	req.Host = "localhost"
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	return rec
-}
-
-// mcpRPC sends one message and decodes the JSON-RPC envelope. JSONResponse is
-// on, so the reply is a plain JSON body — no SSE framing to strip.
-func mcpRPC(t *testing.T, h http.Handler, body string) map[string]any {
-	t.Helper()
-	rec := mcpReq(t, h, body)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("POST /mcp = %d, want 200 (%s)", rec.Code, rec.Body)
-	}
-	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
-		t.Fatalf("content-type = %q, want application/json (JSONResponse)", ct)
-	}
-	var env map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
-		t.Fatalf("decode reply: %v (raw: %s)", err, rec.Body)
-	}
-	if e, ok := env["error"]; ok {
-		t.Fatalf("JSON-RPC error: %v", e)
-	}
-	res, ok := env["result"].(map[string]any)
-	if !ok {
-		t.Fatalf("reply has no result object: %s", rec.Body)
-	}
-	return res
-}
-
-// The full remote client handshake over the mounted endpoint: initialize,
-// tools/list (every registered tool), then a real tools/call answering from
-// the store. Stateless mode means each POST stands alone — no session header.
-func TestMCPHTTPEndpoint(t *testing.T) {
-	db, _, _ := setupTestDB(t)
-	stubPassthroughResolve()
-	seedFeed(t, db, &Feed{Title: "News feed", URL: "https://n.example/f", Tag: "news"})
-	h := newMux()
-
-	t.Run("initialize", func(t *testing.T) {
-		res := mcpRPC(t, h, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":`+
-			`{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}`)
-		info, _ := res["serverInfo"].(map[string]any)
-		if info["name"] != "srr" {
-			t.Errorf("serverInfo.name = %v, want srr", info["name"])
-		}
-		if info["version"] != version {
-			t.Errorf("serverInfo.version = %v, want %q", info["version"], version)
-		}
-	})
-
-	t.Run("tools/list", func(t *testing.T) {
-		res := mcpRPC(t, h, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
-		list, _ := res["tools"].([]any)
-		var names []string
-		for _, tl := range list {
-			m, _ := tl.(map[string]any)
-			name, _ := m["name"].(string)
-			names = append(names, name)
-		}
-		slices.Sort(names)
-		want := []string{
-			"srr_add_feed", "srr_fetch", "srr_list_articles", "srr_overview",
-			"srr_preview_feed", "srr_resolve_feed", "srr_update_feed",
-		}
-		if !slices.Equal(names, want) {
-			t.Errorf("tools = %v, want %v", names, want)
-		}
-	})
-
-	t.Run("tools/call srr_overview", func(t *testing.T) {
-		res := mcpRPC(t, h, `{"jsonrpc":"2.0","id":3,"method":"tools/call",`+
-			`"params":{"name":"srr_overview","arguments":{}}}`)
-		if res["isError"] == true {
-			t.Fatalf("tool reported an error: %v", res)
-		}
-		sc, ok := res["structuredContent"].(map[string]any)
-		if !ok {
-			t.Fatalf("no structuredContent: %v", res)
-		}
-		store, _ := sc["store"].(map[string]any)
-		if store["version"] != version {
-			t.Errorf("store.version = %v, want %q", store["version"], version)
-		}
-		feeds, _ := store["feeds"].([]any)
-		if len(feeds) != 1 {
-			t.Fatalf("feeds = %v, want the one seeded feed", feeds)
-		}
-	})
-
-	t.Run("tools/call reports a tool error in-band", func(t *testing.T) {
-		// A bad argument is a tool-level failure (isError), not a transport
-		// one: the client sees the message and can fix the call.
-		res := mcpRPC(t, h, `{"jsonrpc":"2.0","id":4,"method":"tools/call",`+
-			`"params":{"name":"srr_list_articles","arguments":{"since":"garbage"}}}`)
-		if res["isError"] != true {
-			t.Fatalf("isError = %v, want true", res["isError"])
-		}
-		if !strings.Contains(rawJSON(t, res), "invalid time") {
-			t.Errorf("error content does not carry the parse message: %v", res)
-		}
-	})
-}
-
 func rawJSON(t *testing.T, v any) string {
 	t.Helper()
 	b, err := json.Marshal(v)
@@ -549,42 +431,12 @@ func rawJSON(t *testing.T, v any) string {
 	return string(b)
 }
 
-// /mcp lives inside serve's hostGuard, so a DNS-rebinding page (same-origin to
-// the browser, but unable to present a loopback Host) is refused before the SDK
-// handler ever sees the body.
-func TestMCPHTTPNonLoopbackHostForbidden(t *testing.T) {
-	setupTestDB(t)
-	h := newMux()
-
-	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
-	req.Host = "evil.example.com"
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("POST /mcp with non-loopback Host = %d, want 403 (%s)", rec.Code, rec.Body)
-	}
-}
-
-// The endpoint is registered method-by-method (POST/GET/DELETE) to dodge the
-// ServeMux pattern conflict with "GET /": anything else must not fall through
-// to the admin UI's file server, which would answer 200 with HTML.
-func TestMCPHTTPUnsupportedMethod(t *testing.T) {
-	setupTestDB(t)
-	rec := doReq(t, newMux(), http.MethodPut, "/mcp", "")
-	if rec.Code == http.StatusOK {
-		t.Fatalf("PUT /mcp = 200, want a rejection (did it reach the UI file server?): %s", rec.Body)
-	}
-}
-
-// --- layer 3: stdio-equivalent session --------------------------------------
+// --- layer 2: stdio-equivalent session --------------------------------------
 
 // The `srr mcp` path exercised without OS pipes: the very same
 // newMCPServer().Run a stdio session drives, wired to a real mcp.Client over an
 // in-memory transport pair. Pins that the registry a locally-spawned client
-// sees is the same one the HTTP endpoint serves.
+// sees is the same registry `srr mcp` serves.
 func TestMCPInMemorySession(t *testing.T) {
 	db, _, _ := setupTestDB(t)
 	stubPassthroughResolve()

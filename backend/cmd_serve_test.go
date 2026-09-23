@@ -10,7 +10,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"testing/fstest"
 )
 
 func doReq(t *testing.T, h http.Handler, method, target, body string) *httptest.ResponseRecorder {
@@ -36,6 +35,28 @@ func seedFeed(t *testing.T, db *DB, ch *Feed) {
 	}
 }
 
+// serve is API-only: no admin bundle at "/", no HTTP MCP transport. The admin
+// page ships in the frontend bundle and MCP is stdio (`srr mcp`) only.
+func TestServeAPIOnly(t *testing.T) {
+	setupTestDB(t)
+	h := newMux()
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/"},
+		{http.MethodGet, "/index.html"},
+		{http.MethodGet, "/mcp"},
+		{http.MethodPost, "/mcp"},
+		{http.MethodDelete, "/mcp"},
+	} {
+		rec := doReq(t, h, tc.method, tc.path, "")
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s %s = %d, want 404 (%s)", tc.method, tc.path, rec.Code, rec.Body)
+		}
+	}
+	if rec := doReq(t, h, http.MethodGet, "/api/overview", ""); rec.Code != http.StatusOK {
+		t.Errorf("GET /api/overview = %d, want 200 (%s)", rec.Code, rec.Body)
+	}
+}
+
 // A malformed JSON body is rejected with 400 by every mutating handler that
 // decodes one (the shared decodeJSON seam): feeds save, recipe put, syndicate
 // put. decodeJSON runs before any DB scope, so a bad body never touches state.
@@ -54,33 +75,9 @@ func TestServeMalformedJSONBodyRejected(t *testing.T) {
 	}
 }
 
-// GET / serves the embedded admin bundle (the committed placeholder in a bare
-// checkout, the real Parcel index.html after `make build-admin`). Assert only
-// what both share — HTML, non-empty, naming the admin console — so the test is
-// independent of whether the frontend was built.
-func TestServeUIIndex(t *testing.T) {
-	h := newMux()
-	rec := doReq(t, h, "GET", "/", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET / = %d, want 200", rec.Code)
-	}
-	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
-		t.Fatalf("content-type = %q, want text/html", ct)
-	}
-	if body := rec.Body.String(); !strings.Contains(body, "<!doctype html") && !strings.Contains(body, "<!DOCTYPE html") {
-		if len(body) > 200 {
-			body = body[:200]
-		}
-		t.Fatalf("index body is not HTML; got:\n%s", body)
-	}
-	if !strings.Contains(strings.ToLower(rec.Body.String()), "srr") {
-		t.Fatal("index body does not name the SRR admin console")
-	}
-}
-
 func TestServeHostGuardRejectsNonLoopback(t *testing.T) {
 	h := newMux()
-	req := httptest.NewRequest("GET", "/", nil)
+	req := httptest.NewRequest("GET", "/api/overview", nil)
 	req.Host = "evil.example.com"
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -91,7 +88,7 @@ func TestServeHostGuardRejectsNonLoopback(t *testing.T) {
 
 func TestServeHostGuardRejectsCrossOrigin(t *testing.T) {
 	h := newMux()
-	req := httptest.NewRequest("GET", "/", nil)
+	req := httptest.NewRequest("GET", "/api/overview", nil)
 	req.Host = "localhost"
 	req.Header.Set("Origin", "http://evil.example.com")
 	rec := httptest.NewRecorder()
@@ -107,6 +104,7 @@ func TestServeHostGuardRejectsCrossOrigin(t *testing.T) {
 // distinguishes the GUI's own requests (same-origin) from a CSRF attacker's
 // (cross-site), so only the former may bypass the loopback-Origin requirement.
 func TestServeHostGuardProxiedOrigin(t *testing.T) {
+	setupTestDB(t)
 	for _, tc := range []struct {
 		fetchSite string
 		want      int
@@ -117,7 +115,7 @@ func TestServeHostGuardProxiedOrigin(t *testing.T) {
 		{"", http.StatusForbidden},
 	} {
 		h := newMux()
-		req := httptest.NewRequest("GET", "/", nil)
+		req := httptest.NewRequest("GET", "/api/overview", nil)
 		req.Host = "localhost:8088"
 		req.Header.Set("Origin", "https://srr.example.com")
 		if tc.fetchSite != "" {
@@ -136,7 +134,7 @@ func TestServeHostGuardProxiedOrigin(t *testing.T) {
 // hostname — the guard rejects it regardless of fetch metadata.
 func TestServeHostGuardRebindingDespiteSameOrigin(t *testing.T) {
 	h := newMux()
-	req := httptest.NewRequest("GET", "/", nil)
+	req := httptest.NewRequest("GET", "/api/overview", nil)
 	req.Host = "evil.example.com:8088"
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	rec := httptest.NewRecorder()
@@ -164,7 +162,7 @@ func TestServeSecHeaders(t *testing.T) {
 			}
 		}
 	}
-	check("GET / (bundle)", doReq(t, h, "GET", "/", ""))
+	check("GET / (404 — serve is API-only)", doReq(t, h, "GET", "/", ""))
 	check("GET /api/overview (200)", doReq(t, h, "GET", "/api/overview", ""))
 	check("DELETE missing feed (4xx)", doReq(t, h, "DELETE", "/api/feeds/99999", ""))
 
@@ -252,67 +250,6 @@ func TestServeSyndicatePutExternal(t *testing.T) {
 	}
 }
 
-// The Parcel bundle is content-hashed, so webUICacheHeaders splits its
-// Cache-Control like store.cacheControlForKey: a hashed asset name is immutable
-// (cached a year, no revalidation), while index.html (and any unhashed root
-// file) is no-cache + a startup content ETag that answers 304. Tested against a
-// synthetic FS so it is independent of whether the real bundle was built.
-func TestServeWebUICacheValidators(t *testing.T) {
-	fsys := fstest.MapFS{
-		"index.html":           {Data: []byte("<!doctype html><title>SRR admin</title>")},
-		"frontend.abcdef01.js": {Data: []byte("console.log(1)")},
-	}
-	h := webUICacheHeaders(fsys, http.FileServerFS(fsys))
-
-	// A hashed asset name → immutable.
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/frontend.abcdef01.js", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET hashed asset = %d, want 200", rec.Code)
-	}
-	if cc := rec.Header().Get("Cache-Control"); cc != "public, max-age=31536000, immutable" {
-		t.Errorf("hashed Cache-Control = %q, want immutable", cc)
-	}
-	if tag := rec.Header().Get("ETag"); tag != "" {
-		t.Errorf("hashed asset carried an ETag %q; immutable names need none", tag)
-	}
-
-	// index.html (served for /) → no-cache + a content ETag.
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET / = %d, want 200", rec.Code)
-	}
-	tag := rec.Header().Get("ETag")
-	if tag == "" {
-		t.Fatal("no ETag on index.html")
-	}
-	if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
-		t.Errorf("index Cache-Control = %q, want no-cache", cc)
-	}
-
-	// A matching If-None-Match answers 304 with no body.
-	req := httptest.NewRequest("GET", "/", nil)
-	req.Header.Set("If-None-Match", tag)
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotModified {
-		t.Errorf("conditional GET = %d, want 304", rec.Code)
-	}
-	if rec.Body.Len() != 0 {
-		t.Errorf("304 carried a %d-byte body", rec.Body.Len())
-	}
-
-	// A stale validator still serves the fresh bytes.
-	req = httptest.NewRequest("GET", "/", nil)
-	req.Header.Set("If-None-Match", `"stale"`)
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || rec.Body.Len() == 0 {
-		t.Errorf("stale validator: code=%d len=%d, want 200 with a body", rec.Code, rec.Body.Len())
-	}
-}
-
 // 404 must be decided by the wrapped fs.ErrNotExist sentinel, not by the words
 // in the message — and a validation rejection whose text happens to contain
 // "not found" must stay a 400.
@@ -333,57 +270,5 @@ func TestServeWriteErrStatusIsStructural(t *testing.T) {
 	writeErr(rec3, fmt.Errorf("busy: %w", os.ErrExist))
 	if rec3.Code != http.StatusConflict {
 		t.Errorf("lock contention = %d, want 409", rec3.Code)
-	}
-}
-
-// TestServeUnbuiltNote pins what `srr serve` answers at "/" when the binary was
-// compiled without the admin bundle — the state a Node-less `go build` produces,
-// where webui/dist holds only the .gitkeep that satisfies the //go:embed.
-//
-// It used to be a committed placeholder index.html inside that generated
-// directory, which every local build overwrote; keeping the right bytes in git
-// took a manual `git checkout` before each commit plus a Makefile gate for the
-// times someone forgot. The note is in the binary now, so this asserts the
-// handler rather than a file's contents.
-func TestServeUnbuiltNote(t *testing.T) {
-	rec := httptest.NewRecorder()
-	serveUnbuiltNote(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200: the request reached the right server, and a 404 sends the operator looking for a routing bug", rec.Code)
-	}
-	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
-		t.Errorf("Content-Type = %q, want text/html", ct)
-	}
-	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
-		t.Errorf("Cache-Control = %q, want no-store — the page stops being the answer the moment the bundle is built", cc)
-	}
-	// It has to name the command that fixes it; that is its whole job.
-	for _, want := range []string{"make build-admin", "not built"} {
-		if !strings.Contains(rec.Body.String(), want) {
-			t.Errorf("the note does not mention %q: %s", want, rec.Body.String())
-		}
-	}
-}
-
-// TestNewMuxServesTheBundleWhenBuilt guards the other side of that branch: with
-// an index.html present the wildcard file server owns "/", and the note must not
-// shadow it. newMux reads the real embedded FS, so this asserts against whatever
-// this binary was built with — a built bundle in CI, the .gitkeep locally.
-func TestNewMuxServesTheBundleWhenBuilt(t *testing.T) {
-	ui := embeddedWebUI()
-	_, err := fs.Stat(ui, "index.html")
-	built := err == nil
-
-	rec := doReq(t, newMux(), "GET", "/", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET / = %d, want 200 (built=%v)", rec.Code, built)
-	}
-	note := strings.Contains(rec.Body.String(), "make build-admin")
-	if built && note {
-		t.Error("GET / served the not-built note even though an index.html is embedded")
-	}
-	if !built && !note {
-		t.Error("GET / did not serve the not-built note with no index.html embedded")
 	}
 }

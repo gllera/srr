@@ -106,7 +106,7 @@ type CLI struct {
 	Recipe    RecipeGroup    `cmd:"" help:"Manage processing recipes (named {ingest, pipe} bundles)."`
 	Watch     WatchGroup     `cmd:"" help:"Manage keyword watchlists (named per-article match rules)."`
 	Preview   PreviewCmd     `cmd:"" aliases:"p" help:"Preview processed feed articles in a browser."`
-	Serve     ServeCmd       `cmd:"" help:"Serve a local web admin GUI for managing feeds, recipes, syndication."`
+	Serve     ServeCmd       `cmd:"" help:"Serve the admin API (and optionally the fetch loop) for the admin page."`
 	Mcp       McpCmd         `cmd:"" help:"Serve the SRR MCP tool interface over stdio."`
 	Frontend  FrontendGroup  `cmd:"" aliases:"fe" help:"Manage the self-hosted reader frontend in the store root."`
 	Config    ConfigCmd      `cmd:"" aliases:"c" help:"Print resolved configuration."`

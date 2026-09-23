@@ -89,8 +89,9 @@ func TestServeSyncRejects(t *testing.T) {
 		{"name with a bad char", "PUT", "/sync/a%20b", `{}`, http.StatusBadRequest},
 		{"over-long name", "GET", "/sync/" + strings.Repeat("n", 65), "", http.StatusBadRequest},
 		// A nested path is not a {name} segment at all, so it never reaches the
-		// handler — the admin console's GET / wildcard answers instead.
-		{"nested path", "PUT", "/sync/a/b", `{}`, http.StatusMethodNotAllowed},
+		// handler — with no "/" wildcard in this API-only mux, nothing else
+		// matches it either, so it 404s like any other unrecognized route.
+		{"nested path", "PUT", "/sync/a/b", `{}`, http.StatusNotFound},
 		{"unsupported method", "DELETE", "/sync/phone", "", http.StatusMethodNotAllowed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -163,7 +164,7 @@ func TestServeSyncHostGuard(t *testing.T) {
 }
 
 // With no --sync-dir the routes still exist but report themselves off, so an
-// operator gets a legible answer rather than the admin console's index.html.
+// operator gets a legible answer rather than a bare 404.
 func TestServeSyncDisabled(t *testing.T) {
 	prev := syncBlobDir
 	syncBlobDir = ""

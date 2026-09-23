@@ -1,4 +1,4 @@
-.PHONY: verify verify-fe verify-be typecheck-fe check-coverage-test fuzz-be lint-fe format-check-fe format-fe test-fe build-fe build-admin smoke-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-race-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design design-shots build-cloud verify-cloud smoke-cloud deploy-cloud build-reader check-reader-config deploy-reader
+.PHONY: verify verify-fe verify-be typecheck-fe check-coverage-test fuzz-be lint-fe format-check-fe format-fe test-fe build-fe smoke-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-race-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design design-shots build-cloud verify-cloud smoke-cloud deploy-cloud build-reader check-reader-config deploy-reader
 
 SHELL := /bin/bash -e
 
@@ -313,19 +313,8 @@ check-coverage-test:
 dist:
 	@mkdir -p $@
 
-# build-admin is its OWN parcel build into backend/webui/dist — a SEPARATE dist
-# from the reader (../dist/srrf), NOT a shared multi-entry build: a shared build
-# could hoist common chunks and rewrite the reader's content-hashed filenames,
-# which must stay byte-identical. `srr serve` embeds this dir via //go:embed.
-build-admin: frontend/node_modules/.package-lock.json
-	cd frontend && npm run build-admin
-
-# build-be depends on build-admin so the embedded admin console is fresh before
-# `go build` reads it (mirrors CI, which builds the frontend anyway). A bare
-# `go build`/`go test` without this target still compiles — the tracked
-# .gitkeep satisfies the //go:embed — and serve answers "/" with its
-# built-in not-built note.
-build-be: build-admin | dist
+# build-be is a plain go build; serve embeds nothing.
+build-be: | dist
 	cd backend && go build -o ../dist/srr .
 
 release: verify-be | dist
@@ -339,4 +328,3 @@ release: verify-be | dist
 
 clean:
 	rm -rf frontend/.parcel-cache dist
-	rm -f backend/webui/dist/*.js backend/webui/dist/*.css

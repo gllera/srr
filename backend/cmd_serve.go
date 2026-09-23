@@ -2,12 +2,9 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -15,25 +12,12 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"path"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
-
-	"srr/store"
 )
-
-// webui/dist is the Parcel-built admin console (a separate `parcel build` into
-// its own dist dir — see the frontend project). It is generated and gitignored
-// except for a tracked .gitkeep, which is what lets a bare `go build`/`go vet`/
-// `go test` compile this embed without Node: the `all:` prefix embeds dotfiles,
-// and Parcel's hashed asset names as-is. The sources are no longer hand-written and no longer minified at
-// startup (Parcel minifies): `minifiedWebUI` + the tdewolff/minify pass are gone.
-//
-//go:embed all:webui/dist
-var webuiFS embed.FS
 
 type ServeCmd struct {
 	Cycle cycleFlags `embed:"" group:"Fetch-cycle flags:"`
@@ -99,9 +83,9 @@ func (o *ServeCmd) Run() error {
 			defer client.CloseIdleConnections()
 			(&FetchCmd{Interval: o.Interval, feedFilter: o.feedFilter}).fetchLoop(ctx, client) //nolint:errcheck // always nil when Interval > 0
 		})
-		fmt.Printf("SRR admin GUI at http://%s  (store: %s, fetching every %s)\n", o.Addr, globals.Store, o.Interval)
+		fmt.Printf("SRR API at http://%s  (store: %s, fetching every %s)\n", o.Addr, globals.Store, o.Interval)
 	} else {
-		fmt.Printf("SRR admin GUI at http://%s  (store: %s)\n", o.Addr, globals.Store)
+		fmt.Printf("SRR API at http://%s  (store: %s)\n", o.Addr, globals.Store)
 	}
 
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -112,121 +96,38 @@ func (o *ServeCmd) Run() error {
 	return nil
 }
 
-// newMux wires the API routes and the embedded UI, wrapped in the Host guard.
+// newMux wires the admin API and the profile-sync routes, wrapped in the Host
+// guard. serve is API-only: the admin page ships in the frontend bundle
+// (admin.html next to the reader) and reaches these routes same-origin through
+// the reverse proxy; MCP is `srr mcp` over stdio.
 func newMux() http.Handler {
 	mux := http.NewServeMux()
 	registerAPI(mux)
-	// The MCP endpoint. Streamable HTTP uses three methods on the one path —
-	// POST (requests), GET (a server→client stream) and DELETE (session
-	// teardown) — so all three are registered; anything else on /mcp gets the
-	// mux's own 405, matching what the SDK handler would answer.
-	//
-	// They are registered method-BY-method rather than as a bare "/mcp" because
-	// Go 1.22+ ServeMux treats a bare "/mcp" and the "GET /" wildcard below as
-	// CONFLICTING (neither is more specific in both dimensions: "/mcp" has the
-	// more specific path, "GET /" the more specific method) and PANICS at
-	// registration. With the method stated, "GET /mcp" beats "GET /" on path
-	// specificity and the POST/DELETE patterns overlap nothing, so the admin
-	// UI's file server never sees an MCP request.
-	//
-	// The endpoint stays inside hostGuard: a non-browser MCP client sends no
-	// Origin (so only the unconditional loopback-Host check applies, which the
-	// tunnel's httpHostHeader rewrite satisfies), and /mcp exposes a strict
-	// subset of what /api/* already offers the same caller.
-	mcpHandler := mcpHTTPHandler()
-	for _, m := range []string{http.MethodPost, http.MethodGet, http.MethodDelete} {
-		mux.Handle(m+" /mcp", mcpHandler)
-	}
 	// The first-party reader-profile sync blob (RDR18), inside the same
-	// hostGuard and registered method-by-method for the same ServeMux-conflict
-	// reason as /mcp. Rationale, storage and the deployment note: serve_sync.go.
+	// hostGuard. Rationale, storage and the deployment note: serve_sync.go.
 	registerSync(mux)
-	// The static file server stays (this is NOT "serve becomes API-only"): it now
-	// serves the Parcel-built bundle embedded above instead of hand-written
-	// sources. "GET /mcp" still beats this "GET /" wildcard on path specificity.
-	ui := embeddedWebUI()
-	// A binary built without the Parcel bundle has an embedded dir holding only
-	// the .gitkeep that satisfies //go:embed, so the file server would answer a
-	// bare 404 at "/" with nothing to explain it. "GET /{$}" matches the root
-	// exactly and so beats the wildcard below, but only when there is no
-	// index.html to serve.
-	if _, err := fs.Stat(ui, "index.html"); err != nil {
-		mux.HandleFunc("GET /{$}", serveUnbuiltNote)
-	}
-	mux.Handle("GET /", webUICacheHeaders(ui, http.FileServerFS(ui)))
 	// secHeaders wraps OUTSIDE hostGuard so even a 403 carries the CSP/nosniff/
 	// Referrer-Policy/X-Frame-Options headers (SEC3).
 	return secHeaders(hostGuard(mux))
 }
 
-// unbuiltNote is what `srr serve` answers at "/" when the admin bundle was never
-// built. It lives here, as bytes in the binary, rather than as a placeholder
-// index.html committed into the generated backend/webui/dist — that file was
-// overwritten by every local build, so keeping the right bytes in git needed a
-// manual `git checkout` before every commit plus a Makefile gate to catch the
-// times someone forgot. The directory now tracks only a .gitkeep, which no
-// build ever rewrites, and the note cannot drift from the thing it describes.
-const unbuiltNote = `<!doctype html>
-<html lang="en">
-   <head>
-      <meta charset="utf-8" />
-      <meta name="viewport" content="width=device-width, initial-scale=1" />
-      <title>SRR admin — bundle not built</title>
-   </head>
-   <body>
-      <main>
-         <h1>SRR admin console — not built</h1>
-         <p>
-            This binary was compiled without the admin bundle. The API under
-            <code>/api/</code> and the MCP endpoint at <code>/mcp</code> work
-            normally; only this page is missing.
-         </p>
-         <p>
-            The console is a Parcel bundle. Build it with
-            <code>make build-admin</code> (or <code>make build-be</code>, which
-            depends on it), then re-run <code>srr serve</code>.
-         </p>
-      </main>
-   </body>
-</html>
-`
-
-func serveUnbuiltNote(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	// 200, not 404: the request reached the right server and this IS the
-	// response for it — an operator hitting a 404 would go looking for a routing
-	// problem instead of reading the note.
-	_, _ = io.WriteString(w, unbuiltNote)
-}
-
-// embeddedWebUI exposes the Parcel dist as the file server's root FS. Embed
-// reads cannot fail at runtime, so a failure here is a build bug.
-func embeddedWebUI() fs.FS {
-	sub, err := fs.Sub(webuiFS, "webui/dist")
-	if err != nil {
-		panic(err) // embed is compile-time; a failure here is a build bug
-	}
-	return sub
-}
-
-// webUICSP is the admin console's Content-Security-Policy (SEC3). The bundle is
-// generated, so it has no inline scripts/styles to grandfather — script-src and
-// style-src stay 'self'. img-src/media-src CANNOT be 'self': the preview dialog
-// renders real article HTML in a sandbox="" srcdoc iframe, and a srcdoc document
-// inherits the embedder's CSP, so a strict img-src would blank every preview —
-// the empty sandbox (no allow-scripts) is what stops execution, CSP is the
-// backstop. frame-src 'self' covers srcdoc. This is the console's OWN policy;
-// the reader keeps its different one (frontend/_headers + its index.html meta).
+// webUICSP is a strict static policy stamped on every API response (SEC3) —
+// defense in depth, since an API response is JSON/SSE/text and never a
+// document meant to run. It no longer guards a page here (serve is API-only;
+// the admin page ships as admin.html beside the reader in the frontend
+// bundle), but it is kept byte-identical on purpose to the admin page's own
+// policy — the meta tag in frontend/src/admin.html and the reverse proxy's
+// header (docs/SELF-HOSTING.md) — so this one string documents all three.
+// Changing it means changing the other two as well.
 const webUICSP = "default-src 'self'; img-src * data: blob:; media-src * data: blob:; " +
 	"style-src 'self'; script-src 'self'; object-src 'none'; frame-src 'self'; " +
 	"base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 // secHeaders stamps the static security headers on every response — the API
-// (200 and error), the served bundle, and a hostGuard 403 alike (it wraps
-// outside the guard). SEC3: header middleware, strict static CSP, nosniff,
-// Referrer-Policy, plus X-Frame-Options as the belt-and-braces clickjacking
-// legacy of frame-ancestors 'none'.
+// (200 and error) and a hostGuard 403 alike (it wraps outside the guard).
+// SEC3: header middleware, strict static CSP, nosniff, Referrer-Policy, plus
+// X-Frame-Options as the belt-and-braces clickjacking legacy of
+// frame-ancestors 'none'.
 func secHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -234,64 +135,6 @@ func secHeaders(next http.Handler) http.Handler {
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("X-Frame-Options", "DENY")
-		next.ServeHTTP(w, r)
-	})
-}
-
-// webUICacheHeaders gives the embedded admin UI the right Cache-Control for a
-// content-hashed Parcel bundle, mirroring store.cacheControlForKey:
-//
-//   - a hashed asset name (frontend.<hash>.js) → immutable, cached for a year
-//     with no revalidation (the hash IS the version);
-//   - index.html and any other unhashed root file → no-cache + a startup-computed
-//     content ETag, so a caching layer keeps the bytes but must revalidate and an
-//     unchanged file answers 304.
-//
-// This structurally fixes the trap the old MapFS scheme worked around (zero
-// ModTime ⇒ no validators ⇒ a static app.js name went stale after every release,
-// the reason for the admin host's edge cache-bypass rule): Parcel hashes the
-// asset names, so only the small mutable HTML shell needs a validator now.
-func webUICacheHeaders(fsys fs.FS, next http.Handler) http.Handler {
-	etags := map[string]string{}
-	_ = fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil //nolint:nilerr // a missing UI file is a build bug, not a request-time error
-		}
-		// A Parcel content-hashed asset name (frontend.<hash>.js) is the same
-		// shape the frontend-shell classifier owns: the name changes whenever
-		// the bytes do, so such a file is safe to cache forever.
-		if store.HashedFrontendAsset(path.Base(p)) {
-			return nil // hashed assets are immutable — no validator needed
-		}
-		b, err := fs.ReadFile(fsys, p)
-		if err != nil {
-			return nil
-		}
-		etags["/"+p] = fmt.Sprintf(`"%x"`, sha256.Sum256(b))
-		return nil
-	})
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p := r.URL.Path
-		if p == "/" {
-			p = "/index.html" // what FileServerFS will serve for the directory
-		}
-		if store.HashedFrontendAsset(path.Base(p)) {
-			w.Header().Set("Cache-Control", store.CacheImmutable)
-			next.ServeHTTP(w, r)
-			return
-		}
-		if tag, ok := etags[p]; ok {
-			w.Header().Set("ETag", tag)
-			w.Header().Set("Cache-Control", "no-cache")
-			// Compare against every candidate in If-None-Match; the shell is served
-			// as-is (no transforms), so a strong-tag equality check is enough.
-			for _, cand := range strings.Split(r.Header.Get("If-None-Match"), ",") {
-				if strings.TrimSpace(cand) == tag {
-					w.WriteHeader(http.StatusNotModified)
-					return
-				}
-			}
-		}
 		next.ServeHTTP(w, r)
 	})
 }

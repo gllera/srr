@@ -10,9 +10,9 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// McpCmd serves the same tool set as serve's /mcp endpoint over stdio — the
-// transport a locally-spawned client (`claude mcp add srr -- srr mcp`) uses,
-// where the client owns the process lifetime and speaks JSON-RPC on the pipe.
+// McpCmd serves the MCP tool set over stdio, the only MCP transport: a
+// locally-spawned client (`claude mcp add srr -- srr mcp`, or remotely
+// `ssh host srr mcp`) owns the process lifetime and speaks JSON-RPC on the pipe.
 //
 // STDOUT DISCIPLINE (the invariant this command depends on): stdout IS the
 // protocol stream here, so nothing on the tool path may write to it. Verified

@@ -44,8 +44,8 @@ import (
 // compare-and-swap here would buy nothing the reader's self-heal does not
 // already provide, and would need a token the reader has no field to carry.
 //
-// PLACEMENT: the routes are registered on the same mux as /api/* and /mcp and
-// are therefore behind the same `hostGuard` — unconditional loopback Host, plus
+// PLACEMENT: the routes are registered on the same mux as /api/* and are
+// therefore behind the same `hostGuard` — unconditional loopback Host, plus
 // the Origin carve-out that only a browser-set `Sec-Fetch-Site: same-origin`
 // satisfies. That is NOT weakened here, and it has a deployment consequence
 // worth stating plainly: a browser reader served from a DIFFERENT origin than
@@ -61,7 +61,7 @@ import (
 // process-wide-resolved-config shape as `globals`). Empty DISABLES the
 // endpoint: the routes stay registered and answer 404 with a message, so an
 // operator who turned it off (or whose box exposes no user config dir) gets a
-// legible answer instead of the admin console's index.html.
+// legible answer instead of a bare 404.
 var syncBlobDir string
 
 // maxSyncBody caps a PUT. A profile blob is a seen map (one entry per feed), a
@@ -91,11 +91,8 @@ func defaultSyncDir() string {
 	return ""
 }
 
-// registerSync mounts the blob routes. Method-by-method for the same Go 1.22+
-// ServeMux reason /mcp is: a bare "/sync/{name}" and the "GET /" UI wildcard are
-// CONFLICTING patterns (neither is more specific in both dimensions) and panic
-// at registration; with the method stated, "GET /sync/{name}" beats "GET /" on
-// path specificity and "PUT /sync/{name}" overlaps nothing.
+// registerSync mounts the blob routes, method-by-method (no bare "/sync/{name}"
+// pattern), matching how the rest of this API-only mux is registered.
 func registerSync(mux *http.ServeMux) {
 	mux.HandleFunc("GET /sync/{name}", getSyncProfile)
 	mux.HandleFunc("PUT /sync/{name}", putSyncProfile)
