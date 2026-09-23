@@ -3,6 +3,14 @@
    <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <!-- Same origin as the reader AND the admin API behind the proxy, so this page
+           carries its own strict policy. frame-ancestors cannot be set from a meta
+           tag; the reverse proxy's header adds it (docs/SELF-HOSTING.md). -->
+      <meta
+         http-equiv="Content-Security-Policy"
+         content="default-src 'self'; img-src * data: blob:; media-src * data: blob:; style-src 'self'; script-src 'self'; object-src 'none'; frame-src 'self'; base-uri 'none'; form-action 'none'"
+      />
+      <meta name="referrer" content="no-referrer" />
       <title>SRR admin</title>
       <meta name="theme-color" content="#fafaf7" media="(prefers-color-scheme: light)" />
       <meta name="theme-color" content="#111110" media="(prefers-color-scheme: dark)" />

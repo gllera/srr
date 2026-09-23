@@ -77,23 +77,15 @@ typecheck-fe lint-fe format-check-fe format-fe test-fe smoke-fe dev-fe: frontend
 # The npm `build` script wipes ../dist/srrf before running Parcel — Parcel never
 # cleans, so every content-hash change used to leave its predecessor behind and
 # the dir grew without bound (129 frontend.*.js at the 2026-07-20 audit). That
-# matters because the whole dir SHIPS: release.yml tars it into srrf.tar.gz and
-# stages it as the reader Worker's assets, so the pile was deployed too. The wipe
-# lives in package.json (next to build-admin's identical rm -f, and so it also
-# covers a bare `npm run build`) and is scoped to dist/srrf, NEVER dist/ — the
-# release job runs `make release` BEFORE `make build-fe`, so wiping dist/ would
-# delete the cross-compiled dist/srr-* binaries it is about to attach.
-#
-# build-fe also copies frontend/_headers into the bundle (Parcel has no
-# public-dir copy). It was the reader's CSP layer while the hosted reader was a
-# Cloudflare Pages site, and NOTHING reads it now: Pages is gone, the reader
-# Worker sets its own headers in code (reader.ts), build-reader deletes the file
-# from the staged bundle, and at a store root it was always inert. It stays
-# because a store root behind a plain static host is still a supported shape and
-# some of them honour it. It runs AFTER the build, so the wipe can't take it.
+# matters because the whole dir SHIPS: release.yml tars it into srrf.tar.gz, so
+# the pile was deployed too. The wipe lives in package.json (scoped to
+# dist/srrf, NEVER dist/ — the release job runs `make release` BEFORE
+# `make build-fe`, so wiping dist/ would delete the cross-compiled dist/srr-*
+# binaries it is about to attach) and runs once before both Parcel builds (the
+# reader, then the admin page — two builds so a multi-entry build doesn't hoist
+# shared chunks into the reader bundle).
 build-fe: frontend/node_modules/.package-lock.json
 	cd frontend && npm run build
-	cp frontend/_headers dist/srrf/_headers
 
 # The boot smoke reads the build output, so it must run after build-fe (the
 # order-only prereq holds even under parallel make).

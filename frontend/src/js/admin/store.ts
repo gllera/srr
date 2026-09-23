@@ -3,7 +3,7 @@
 // tabs never hits the store. The snapshot is re-read only on boot (a browser
 // reload re-runs it), after a mutation via refresh(), and by the focus-refresh.
 
-import { apiGet } from "./api"
+import { apiGet, apiLooksMissing, NO_API_HINT } from "./api"
 import { banner, clearBanner } from "./banner"
 import type { OverviewView } from "./types"
 
@@ -114,7 +114,12 @@ export async function boot(): Promise<void> {
    try {
       await loadSnapshot()
    } catch (e) {
-      banner((e as Error).message)
+      const msg = (e as Error).message
+      // Only append the "needs `srr serve`" hint when the API itself looks
+      // missing (a network error, or 404/502/503/504) — an expired
+      // forward-auth session (401/403) or a 409 lock means the API IS there
+      // and answered, and the hint would mislead.
+      banner(apiLooksMissing(e) ? `${msg} — ${NO_API_HINT}` : msg)
    }
    const want = location.hash.slice(1)
    showTab(renderers[want] ? want : "feeds")

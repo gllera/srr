@@ -77,5 +77,33 @@ if (!referrerMeta) {
    failed = true
 }
 
+// The admin page ships in the same bundle (srr serve is API-only). It must be
+// present and every bundle it loads must exist — a missing admin.html means the
+// second Parcel build never ran or the first one's wipe took it.
+const adminPath = join(DIST, "admin.html")
+if (!existsSync(adminPath)) {
+   console.error(`boot-smoke: no ${adminPath} — the admin build did not run`)
+   failed = true
+} else {
+   const adminHtml = readFileSync(adminPath, "utf8")
+   const adminRefs = [...adminHtml.matchAll(/\b(?:src|href)=["']?([^"'\s>]+\.(?:js|css))/g)].map((m) =>
+      m[1].split("/").pop(),
+   )
+   if (adminRefs.length === 0) {
+      console.error("boot-smoke: admin.html loads no bundle")
+      failed = true
+   }
+   for (const ref of adminRefs) {
+      if (!existsSync(join(DIST, ref))) {
+         console.error(`boot-smoke: admin.html loads ${ref}, but it is missing from the build`)
+         failed = true
+      }
+   }
+   if (!/http-equiv=["']?Content-Security-Policy/i.test(adminHtml)) {
+      console.error("boot-smoke: admin.html lost its CSP meta — it shares an origin with the reader and the API")
+      failed = true
+   }
+}
+
 if (failed) process.exit(1)
 console.log(`boot-smoke: OK — ${refs.length} loaded bundle(s) inlined all build-time defines + referrer meta present`)

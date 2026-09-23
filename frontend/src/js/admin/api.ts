@@ -3,11 +3,49 @@
 // load-bearing same-origin invariant (see the S40 spec): the bundle is only
 // deployable somewhere /api/* resolves to `srr serve` on the same origin.
 
+// What the banner adds when the first snapshot read fails: the admin page is a
+// static file next to the reader, so the usual cause is that no `srr serve`
+// answers /api on this origin (a plain static host, or serve down behind the
+// proxy) — say so rather than showing a bare "not found". Lives in this leaf
+// (no imports, no DOM) so the Node-side browser e2e can import it too.
+export const NO_API_HINT =
+   "The admin page needs `srr serve` answering /api/* on this origin — or, behind a login proxy, your session expired: reload the page."
+
 // one SSE frame handed to streamSSE's caller. `data` is the parsed JSON body of
 // the frame (or null); callers narrow it to the event's payload type.
 export interface SSEEvent {
    event: string
    data: unknown
+}
+
+// ApiError carries the HTTP status of a failed api() call, so callers can tell
+// "the API answered and said no" (401/403/409/…) from "nothing that looks like
+// the API answered at all" — see apiLooksMissing below.
+export class ApiError extends Error {
+   constructor(
+      message: string,
+      readonly status: number,
+   ) {
+      super(message)
+      this.name = "ApiError"
+   }
+}
+
+// apiLooksMissing(err) is true when err looks like there is no `srr serve`
+// answering /api/* on this origin at all, rather than an API that answered
+// and refused: a network failure (fetch itself threw, e.g. a TypeError — no
+// ApiError, since nothing that far ever saw a status) or a status a
+// reachable-but-absent API would produce (404 not found, or 502/503/504 from
+// a reverse proxy with nothing behind it). A login proxy's redirect to another
+// origin also surfaces as a network failure, which is why the hint itself names
+// an expired session too. An ApiError with any other status —
+// notably 401/403 (an expired forward-auth session) and 409 (the fetch loop
+// holds the store lock) — means the API IS there and answered, so it is
+// false: the boot banner must not append the "needs `srr serve`" hint to
+// those, which would mislead.
+export function apiLooksMissing(err: unknown): boolean {
+   if (!(err instanceof ApiError)) return true
+   return err.status === 404 || err.status === 502 || err.status === 503 || err.status === 504
 }
 
 // api(method, path, body?, contentType?) issues a JSON request — or, when
@@ -31,7 +69,7 @@ export async function api(method: string, path: string, body?: unknown, contentT
    } catch {
       if (res.ok) throw new Error("invalid JSON from " + path)
    }
-   if (!res.ok) throw new Error(errorMessage(res, text))
+   if (!res.ok) throw new ApiError(errorMessage(res, text), res.status)
    return data
 }
 

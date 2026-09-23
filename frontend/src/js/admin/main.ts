@@ -3,6 +3,7 @@
 // banner + tab router and boot the single-read snapshot model.
 
 import { bindBanner } from "./banner"
+import { refuseIfFramed } from "./frame"
 import { boot, wireTabRouter } from "./store"
 
 import "./feeds"
@@ -10,6 +11,8 @@ import "./recipes"
 import "./syndicate"
 import "./tools"
 
-bindBanner()
-wireTabRouter()
-void boot()
+if (!refuseIfFramed(window, document.body)) {
+   bindBanner()
+   wireTabRouter()
+   void boot()
+}
