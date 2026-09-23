@@ -4,7 +4,7 @@
 // Connection:close keep-alive workaround both layers need (without it
 // server.close() stalls on Chrome's keep-alive sockets).
 import { createReadStream, existsSync, statSync } from "node:fs"
-import { createServer, type Server, type ServerResponse } from "node:http"
+import { createServer, request, type Server, type ServerResponse } from "node:http"
 import type { AddressInfo } from "node:net"
 import { extname, join, normalize } from "node:path"
 
@@ -45,11 +45,40 @@ export async function startStaticServer(opts: {
    appDir: string
    packsDir: string
    indexFile?: string
+   apiTarget?: string
 }): Promise<StaticServer> {
    const indexFile = opts.indexFile ?? "index.html"
    const syncBlobs = new Map<string, Buffer>()
    const server = createServer((req, res) => {
       res.setHeader("Connection", "close") // avoid keep-alive sockets that stall server.close()
+      if (opts.apiTarget && (req.url || "").startsWith("/api/")) {
+         // Same parsing and loopback Host as frontend/.proxyrc.js: split on the
+         // LAST colon (IPv6 literals), and present a loopback Host so serve's
+         // hostGuard accepts the proxied request.
+         const at = opts.apiTarget.lastIndexOf(":")
+         const host = opts.apiTarget.slice(0, at).replace(/^\[|\]$/g, "") || "127.0.0.1"
+         const port = opts.apiTarget.slice(at + 1)
+         const up = request(
+            {
+               host,
+               port: Number(port),
+               method: req.method,
+               path: req.url,
+               headers: { ...req.headers, host: `localhost:${port}` },
+            },
+            (r) => {
+               res.writeHead(r.statusCode || 502, r.headers)
+               r.pipe(res)
+            },
+         )
+         up.on("error", () => {
+            res.statusCode = 502
+            res.end("api proxy error")
+         })
+         res.on("close", () => up.destroy()) // a client disconnect cancels the upstream request
+         req.pipe(up)
+         return
+      }
       let p = decodeURIComponent((req.url || "/").split("?")[0])
       if (p === "/") p = "/" + indexFile
       if (p.startsWith("/sync/")) {

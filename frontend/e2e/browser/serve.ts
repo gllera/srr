@@ -47,7 +47,12 @@ export default async function setup({ provide }: GlobalSetupContext) {
    // so the SW never controls the page and every SW e2e times out.
    await execFileAsync(
       resolve(cwd, "node_modules/.bin/parcel"),
-      ["build", "--dist-dir", "../dist/srrf", "--no-cache", "--no-source-maps"],
+      ["build", "src/index.html", "--dist-dir", "../dist/srrf", "--no-cache", "--no-source-maps"],
+      { cwd, env: { ...process.env, NODE_ENV: "production", SRR_CDN_URL: "/packs/" } },
+   )
+   await execFileAsync(
+      resolve(cwd, "node_modules/.bin/parcel"),
+      ["build", "src/admin.html", "--dist-dir", "../dist/srrf", "--no-cache", "--no-source-maps"],
       { cwd, env: { ...process.env, NODE_ENV: "production", SRR_CDN_URL: "/packs/" } },
    )
 
