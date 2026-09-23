@@ -748,7 +748,7 @@ describe("playlist", () => {
       expect(chips()[0].textContent).toBe("1")
       expect(chips()[1].textContent).toBe("2")
       expect(chips()[1].getAttribute("aria-label")).toBe("Remove from playlist — position 2")
-      // Unqueue the first — the second renumbers through syncChips.
+      // Unqueue the first — the second renumbers through the chips effect.
       chips()[0].click()
       expect(chips()[0].textContent).toBe("+")
       expect(chips()[1].textContent).toBe("1")
@@ -1584,5 +1584,131 @@ describe("the seek bar", () => {
       m.dispatchEvent(new Event("timeupdate"))
       expect(q(".srr-player-time").textContent).toBe("1:05")
       expect(q(".srr-player-duration").textContent).toBe("1:02:05")
+   })
+})
+
+// The state/projection split (player/state.ts + the effects) promises three
+// things no behaviour test above pins directly: a clock tick repaints the clock
+// and nothing else, the boot restore persists nothing, and the position is
+// saved on the events that matter and throttled between them.
+describe("state → projections", () => {
+   it("a clock tick repaints the clock only — the chrome is keyed on what it shows", () => {
+      const [m] = putAudio()
+      claim(m)
+      withDuration(m, 120)
+      const name = q<HTMLElement>(".srr-player-name")
+      expect(name.textContent).toBe("Episode 12")
+      name.textContent = "sentinel" // any chrome repaint would overwrite this
+      m.currentTime = 30
+      m.dispatchEvent(new Event("timeupdate"))
+      expect(q(".srr-player-time").textContent).toBe("0:30")
+      expect(q(".srr-player-duration").textContent).toBe("2:00")
+      expect(name.textContent).toBe("sentinel")
+      // A change the chrome DOES show (play → pause) repaints it.
+      playing(m, false)
+      m.dispatchEvent(new Event("pause"))
+      expect(name.textContent).toBe("Episode 12")
+   })
+
+   it("an unchanged sample wakes nothing — equal snapshots are no change", () => {
+      const [m] = putAudio()
+      claim(m)
+      m.currentTime = 30
+      m.dispatchEvent(new Event("timeupdate"))
+      const time = q<HTMLElement>(".srr-player-time")
+      time.textContent = "sentinel"
+      m.dispatchEvent(new Event("timeupdate")) // same time, same everything
+      expect(time.textContent).toBe("sentinel")
+   })
+
+   const HEAD = {
+      chron: 43,
+      index: 0,
+      time: 75,
+      rate: 1,
+      src: "assets/aa/0.mp3",
+      kind: "audio",
+      title: "E13",
+      feedId: 7,
+   }
+   const QUEUE = [{ chron: 44, index: 0, src: "assets/aa/1.mp3", kind: "audio", title: "E14", feedId: 7 }]
+
+   it("booting persists nothing — the empty first state must not wipe the blob restore is about to read", async () => {
+      const blob = JSON.stringify({ ...HEAD, queue: QUEUE })
+      localStorage.setItem("srr-player", blob)
+      vi.resetModules()
+      const fresh = await import("./player")
+      fresh.setup(deps)
+      fresh.noteMounted(MOUNTED)
+      expect(localStorage.getItem("srr-player")).toBe(blob)
+   })
+
+   it("a detached restore persists nothing, before metadata or after", () => {
+      // Before metadata the claim reads as position 0, which save() treats as
+      // never-played — persisting then would drop the head from the blob.
+      const blob = JSON.stringify({ ...HEAD, queue: QUEUE })
+      localStorage.setItem("srr-player", blob)
+      player.restorePersisted()
+      expect(player.isActive()).toBe(true)
+      expect(localStorage.getItem("srr-player")).toBe(blob)
+      const m = media().querySelector("audio") as HTMLMediaElement
+      m.dispatchEvent(new Event("loadedmetadata"))
+      expect(m.currentTime).toBe(75)
+      expect(localStorage.getItem("srr-player")).toBe(blob)
+   })
+
+   it("an in-place restore persists nothing either — queue and speed included", () => {
+      const [live] = putAudio()
+      // Both halves that DO wake the persist effect: a restored queue, and a
+      // stored speed that moves the preference at claim (1 → 1.5).
+      localStorage.setItem("srr-player-rate", "1.5")
+      const blob = JSON.stringify({ ...HEAD, chron: 42, queue: QUEUE })
+      localStorage.setItem("srr-player", blob)
+      player.restorePersisted()
+      expect(media().children).toHaveLength(0) // claimed the article's own element
+      expect(player.isActive()).toBe(true)
+      expect(localStorage.getItem("srr-player")).toBe(blob)
+      live.dispatchEvent(new Event("loadedmetadata"))
+      expect(localStorage.getItem("srr-player")).toBe(blob)
+   })
+
+   it("the position saves on play/pause and on a 5 s throttle between", () => {
+      vi.useFakeTimers()
+      try {
+         const [m] = putAudio()
+         claim(m)
+         const savedTime = () => JSON.parse(localStorage.getItem("srr-player") as string).time
+         m.currentTime = 10
+         m.dispatchEvent(new Event("pause")) // an event save, unthrottled
+         expect(savedTime()).toBe(10)
+         m.currentTime = 12
+         m.dispatchEvent(new Event("timeupdate")) // inside the 5 s window: throttled
+         expect(savedTime()).toBe(10)
+         vi.advanceTimersByTime(5000)
+         m.currentTime = 20
+         m.dispatchEvent(new Event("timeupdate")) // window elapsed: saved
+         expect(savedTime()).toBe(20)
+      } finally {
+         vi.useRealTimers()
+      }
+   })
+
+   it("a queue write alone updates every surface — list, count, chips, lock screen, blob", () => {
+      const setActionHandler = vi.fn()
+      Object.defineProperty(navigator, "mediaSession", {
+         value: { metadata: null, playbackState: "none", setActionHandler },
+         configurable: true,
+      })
+      playElsewhere()
+      putAudio(2)
+      player.injectQueueChips()
+      const chips = () => [...content().querySelectorAll<HTMLButtonElement>(".srr-queue-chip")]
+      chips()[1].click() // the one mutation; everything below is a projection of it
+      expect(q(".srr-player-list").querySelectorAll(".srr-player-row")).toHaveLength(1)
+      expect(q(".srr-player-count").textContent).toBe("1")
+      expect(chips()[1].textContent).toBe("1")
+      const next = setActionHandler.mock.calls.filter((c) => c[0] === "nexttrack").at(-1)
+      expect(typeof next?.[1]).toBe("function")
+      expect(JSON.parse(localStorage.getItem("srr-player") as string).queue).toHaveLength(1)
    })
 })

@@ -707,7 +707,7 @@ body.srr-toolbar-hidden .srr-player-folded .srr-player-fab {
 }
 
 /* Chrome coexistence, part 1: the reading surface. body.srr-playing is set for
-   exactly as long as the bar is up (player.ts syncBar), and it buys the last
+   exactly as long as the player is up (player/view.ts's chrome effect), and it buys the last
    paragraph — and any scroll-into-view landing — clearance over BOTH rows of
    chrome: the 3.35rem toolbar plus this 4rem bar, measured at 118.6px against
    the 120px below. The base 4rem rules near the top of this file are untouched,
@@ -1147,8 +1147,8 @@ body.srr-playing .srr-pin-progress {
    sanitizer ran, rebuilt on every render. AUDIO: the circle shares the player's
    row wearing the native player's own material (a borderless fill, sized to its
    height), so player + button read as one control cluster. States are a glyph
-   vocabulary: "+" add, the entry's 1-based queue POSITION while queued (syncChips
-   re-derives every chip after every queue mutation, so the numeral can't lie),
+   vocabulary: "+" add, the entry's 1-based queue POSITION while queued (the chips
+   effect re-derives every chip after every queue change, so the numeral can't lie),
    and "≡" when the queue is full — the door state, whose tap unfolds the player to
    prune instead of dead-ending (player.ts toggleQueued). */
 /* `:not(.srr-broken)` is load-bearing, not defensive: this selector is (0,2,1)
