@@ -126,6 +126,8 @@ export interface DesignTargets {
    ferrToken?: string // a feed id (as string) whose ferr is set
    longTitlePos?: number // chronIdx of the deliberately long-titled article
    sampleTag?: string // a tag that groups multiple feeds
+   richPos?: number // chronIdx of the long, element-rich article (typography grounding)
+   rtlPos?: number // chronIdx of the right-to-left (Arabic) article
 }
 
 async function loadTargets(): Promise<DesignTargets> {
@@ -189,6 +191,9 @@ export function buildPanel(targets: DesignTargets): HTMLElement {
       curated.append(button("Feed w/ error", () => go({ kind: "filter", token: targets.ferrToken! })))
    if (targets.longTitlePos != null)
       curated.append(button("Long title", () => go({ kind: "reader", pos: targets.longTitlePos! })))
+   if (targets.richPos != null)
+      curated.append(button("Rich article", () => go({ kind: "reader", pos: targets.richPos! })))
+   if (targets.rtlPos != null) curated.append(button("RTL article", () => go({ kind: "reader", pos: targets.rtlPos! })))
    if (targets.savedDeletedChron != null)
       curated.append(
          button("Saved (deleted feed)", () => {

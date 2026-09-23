@@ -43,7 +43,7 @@ const VIEWPORTS = [
 ] as const
 
 // The states captured in the desktop pass (a subset of surfaceShots).
-const DESKTOP_SURFACES = new Set(["list", "reader-newest"])
+const DESKTOP_SURFACES = new Set(["list", "reader-newest", "reader-rich"])
 
 // Surface states reached by setting the real hash (design.ts owns the grammar).
 function surfaceShots(t: DesignTargets): { name: string; state: DesignState }[] {
@@ -56,6 +56,8 @@ function surfaceShots(t: DesignTargets): { name: string; state: DesignState }[] 
    if (t.sampleTag) shots.push({ name: "tag", state: { kind: "filter", token: t.sampleTag } })
    if (t.ferrToken) shots.push({ name: "feed-error", state: { kind: "filter", token: t.ferrToken } })
    if (t.longTitlePos != null) shots.push({ name: "long-title", state: { kind: "reader", pos: t.longTitlePos } })
+   if (t.richPos != null) shots.push({ name: "reader-rich", state: { kind: "reader", pos: t.richPos } })
+   if (t.rtlPos != null) shots.push({ name: "reader-rtl", state: { kind: "reader", pos: t.rtlPos } })
    return shots
 }
 
@@ -96,7 +98,9 @@ describe("design-state screenshots", () => {
       // other grounding shot with dev chrome pasted over it. Hiding here (and
       // not once per page) is also what makes it survive navigation: each
       // page.goto rebuilds the DOM and brings the panel back.
-      const shoot = async (page: Page, name: string) => {
+      // `fullPage` captures the whole document, not the viewport — for the rich
+      // article, whose point is everything BELOW the first screenful.
+      const shoot = async (page: Page, name: string, fullPage = false) => {
          await page.evaluate(() => {
             const panel = document.getElementById("srr-design-panel")
             if (panel) panel.style.display = "none"
@@ -114,7 +118,7 @@ describe("design-state screenshots", () => {
                { timeout: 3000 },
             )
             .catch(() => {})
-         await page.screenshot({ path: join(SHOTS, `${name}.png`) })
+         await page.screenshot({ path: join(SHOTS, `${name}.png`), fullPage })
          taken.push(name)
       }
 
@@ -138,7 +142,7 @@ describe("design-state screenshots", () => {
                   if (!vp.full && !DESKTOP_SURFACES.has(s.name)) continue
                   await page.goto(`${srv.baseUrl}/design.html${stateHash(s.state)}`, { waitUntil: "networkidle0" })
                   await waitReady(page)
-                  await shoot(page, `${s.name}.${sfx}`)
+                  await shoot(page, `${s.name}.${sfx}`, s.name === "reader-rich")
                }
 
                // The filter-picker overlay and the settings menu aren't hash-routed —
