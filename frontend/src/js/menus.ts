@@ -175,6 +175,15 @@ export function bindFrontierMenu(anchor: HTMLElement): void {
    bindPressMenu(anchor, frontierMenuItems)
 }
 
+// ── Admin navigation ──────────────────────────────────────────────────────────
+
+// The admin page ships beside the reader (admin.html in the same bundle) and
+// talks to `srr serve` on this origin. Resolved against the page, not "/", so a
+// reader installed under a sub-path finds the admin installed with it.
+function openAdmin(): void {
+   location.assign(new URL("admin.html", location.href).href)
+}
+
 // ── Filter picker & settings menu ─────────────────────────────────────────────
 
 // The now-viewing readout's anchored settings menu — everything the retired
@@ -206,6 +215,7 @@ function settingsMenuItems(): MenuItem[] {
       { label: "Image proxy…", action: showImgProxyDialog },
       { label: "Backup / Restore…", action: () => showBackupDialog() },
       { label: "Sync…", action: showSyncDialog },
+      { label: "Admin…", action: openAdmin },
    )
    return items
 }

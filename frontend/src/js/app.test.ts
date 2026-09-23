@@ -3415,6 +3415,7 @@ describe("settings menu — the now-viewing readout", () => {
          "Image proxy…",
          "Backup / Restore…",
          "Sync…",
+         "Admin…",
       ])
    })
 
@@ -3496,6 +3497,26 @@ describe("settings menu — the now-viewing readout", () => {
       expect(dropdown.showImgProxyDialog).toHaveBeenCalledTimes(1)
       expect(dropdown.showBackupDialog).toHaveBeenCalledTimes(1)
       expect(dropdown.showSyncDialog).toHaveBeenCalledTimes(1)
+   })
+
+   it("'Admin…' navigates to the admin page beside the reader", async () => {
+      await boot()
+      openMenu()
+      const realLoc = window.location
+      const assign = vi.fn()
+      Object.defineProperty(window, "location", {
+         value: { ...realLoc, href: realLoc.href, assign },
+         configurable: true,
+         writable: true,
+      })
+      try {
+         menuCall()
+            .items.find((i) => i.label === "Admin…")!
+            .action()
+         expect(assign).toHaveBeenCalledWith(new URL("admin.html", realLoc.href).href)
+      } finally {
+         Object.defineProperty(window, "location", { value: realLoc, configurable: true, writable: true })
+      }
    })
 
    it("hands the menu a status footer built by picker.renderStatus", async () => {
