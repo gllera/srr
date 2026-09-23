@@ -271,13 +271,22 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
          // the author `display: inline-flex` on `.srr-player-controls button`
          // beats the UA sheet's [hidden] rule, so styles.css restates it — and
          // only a computed-style read can see whether the restatement holds.
-         // The Up next list says how to add instead of listing nothing.
+         // The playlist lists just the episode playing now — its current
+         // row — so it is not the empty state, and nothing sits under it.
          const chrome = await page.evaluate(() => ({
             next: getComputedStyle(document.querySelector(".srr-player-next")!).visibility,
             empty: getComputedStyle(document.querySelector(".srr-player-empty")!).display,
+            now: document.querySelectorAll(".srr-player-list .srr-player-row-now").length,
+            queued: document.querySelectorAll(".srr-player-list .srr-player-row:not(.srr-player-row-now)").length,
             count: document.querySelector(".srr-player-count")?.textContent,
          }))
-         expect(chrome, "an empty queue paints playlist chrome").toEqual({ next: "hidden", empty: "block", count: "" })
+         expect(chrome, "an empty queue paints playlist chrome").toEqual({
+            next: "hidden",
+            empty: "none",
+            now: 1,
+            queued: 0,
+            count: "1",
+         })
          // And it is still PLAYING, not merely un-paused.
          const t1 = await waitAdvanced(page, Math.max(t0, moved!.time), "in the bar")
 
@@ -329,7 +338,7 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
             contentPaused: (document.querySelector(".srr-content audio") as HTMLAudioElement).paused,
          }))
          expect(queued.barShown).toBe(true)
-         expect(queued.count).toBe("1")
+         expect(queued.count).toBe("2") // SHORT playing (paused) + QUEUED behind it
          expect(queued.pressed).toBe("true")
          expect(queued.contentPaused).toBe(true)
 
@@ -382,10 +391,16 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
             name: document.querySelector(".srr-player-name")?.textContent,
             barShown: !(document.querySelector(".srr-player") as HTMLElement).hidden,
             count: document.querySelector(".srr-player-count")?.textContent,
+            queued: document.querySelectorAll(".srr-player-list .srr-player-row:not(.srr-player-row-now)").length,
+            played: document.querySelectorAll(".srr-player-list .srr-player-row-played").length,
          }))
          expect(after.name).toBe(QUEUED)
          expect(after.barShown).toBe(true)
-         expect(after.count).toBe("") // drained
+         // Nothing was consumed: SHORT stays listed (played) above the QUEUED
+         // episode now playing, and the heading counts both.
+         expect(after.count).toBe("2")
+         expect(after.queued).toBe(1)
+         expect(after.played).toBe(1)
          // Still ADVANCING, not merely unpaused — the clock keeps moving.
          await page.waitForFunction(
             (t) => (document.querySelector(".srr-player-media audio") as HTMLAudioElement).currentTime > t,
@@ -417,13 +432,18 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
             timeout: 20000,
          })
          await page.click(".srr-content .srr-queue-chip")
-         // Folded by default: only the corner button paints.
+         // Folded by default: nothing floats over the article — the sheet is
+         // hidden and the floating dock is the folded player.
          const folded = await page.evaluate(() => ({
             sheet: getComputedStyle(document.querySelector(".srr-player")!).visibility,
-            fab: getComputedStyle(document.querySelector(".srr-player-fab")!).visibility,
+            // The view's ✕ (hide) lives in its header, hidden with it.
+            handle: getComputedStyle(document.querySelector(".srr-player-close")!).visibility,
+            // A grid item's inline-flex blockifies to flex, so "shown" is "not none".
+            dock: getComputedStyle(document.querySelector(".srr-player-dock")!).display !== "none",
          }))
-         expect(folded).toEqual({ sheet: "hidden", fab: "visible" })
-         await page.click(".srr-player-fab")
+         expect(folded).toEqual({ sheet: "hidden", handle: "hidden", dock: true })
+         // A tap on the dock opens the player view.
+         await page.click(".srr-player-dock")
 
          const layout = () =>
             page.evaluate(() => {
@@ -442,7 +462,8 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
                   seekFull: seek.offsetWidth >= body.offsetWidth - 1,
                   time: shown(".srr-player-time"),
                   duration: shown(".srr-player-duration"),
-                  rows: bar.querySelectorAll(".srr-player-list .srr-player-row").length,
+                  rows: bar.querySelectorAll(".srr-player-list .srr-player-row:not(.srr-player-row-now)").length,
+                  now: bar.querySelectorAll(".srr-player-list .srr-player-row-now").length,
                   count: bar.querySelector(".srr-player-count")?.textContent,
                   top: bar.getBoundingClientRect().top,
                }
@@ -461,27 +482,70 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
             expect(l.keyRows, `transport wrapped at ${at}`).toBe(1)
             expect(l.seekFull, `scrubber short of the sheet at ${at}`).toBe(true)
             expect(l.time && l.duration, `a clock hidden at ${at}`).toBe(true)
-            expect(l.rows, `Up next not listed at ${at}`).toBe(1)
-            expect(l.count).toBe("1")
+            expect(l.rows, `queue not listed at ${at}`).toBe(1)
+            expect(l.now, `current row missing at ${at}`).toBe(1)
+            expect(l.count).toBe("2")
             expect(l.top, `sheet ran off the top at ${at}`).toBeGreaterThanOrEqual(0)
          }
 
-         // A video gets a real frame the sheet's width; audio none. Width, not
-         // display, decides it: the element must stay rendered for playback to
-         // survive, the base .srr-player-media rule's argument.
+         // The handle reorders with a real drag (jsdom has no layout, so this
+         // is where the geometry is proven): the second row dragged above the
+         // first swaps them.
+         const names = () =>
+            page.evaluate(() => [...document.querySelectorAll(".srr-player-row-name")].map((n) => n.textContent))
+         const before = await names()
+         const grips = await page.$$(".srr-player-row-grip")
+         const from = (await grips[1].boundingBox())!
+         const onto = (await grips[0].boundingBox())!
+         const x = from.x + from.width / 2
+         await page.mouse.move(x, from.y + from.height / 2)
+         await page.mouse.down()
+         for (let y = from.y + from.height / 2; y >= onto.y; y -= 8) await page.mouse.move(x, y)
+         await page.mouse.up()
+         expect(await names()).toEqual([before[1], before[0]])
+
+         // Audio and video give the episode row the SAME height, so the
+         // transport never moves when the next episode is the other kind: a
+         // video plays as a 16:9 thumbnail in the cover tile's slot. Width,
+         // not display, decides the host: the element must stay rendered for
+         // playback to survive, the base .srr-player-media rule's argument.
          const frame = await page.evaluate(() => {
             const bar = document.querySelector(".srr-player") as HTMLElement
             const host = bar.querySelector(".srr-player-media") as HTMLElement
-            const audio = host.offsetWidth
-            bar.dataset.kind = "video"
-            return {
-               audio,
-               video: host.offsetWidth,
-               sheet: (bar.querySelector(".srr-player-body") as HTMLElement).offsetWidth,
+            const toggle = bar.querySelector(".srr-player-toggle") as HTMLElement
+            const cover = bar.querySelector(".srr-player-cover") as HTMLElement
+            const name = bar.querySelector(".srr-player-name") as HTMLElement
+            const audio = {
+               host: host.offsetWidth,
+               tile: cover.offsetHeight,
+               toggle: toggle.getBoundingClientRect().top,
             }
+            // A one-line title must not pull the transport up either.
+            const title = name.textContent
+            name.textContent = "x"
+            const short = toggle.getBoundingClientRect().top
+            name.textContent = title
+            // Stand a video in the host, as a claim relocates one.
+            const v = document.createElement("video")
+            host.append(v)
+            bar.dataset.kind = "video"
+            const video = {
+               host: host.offsetWidth,
+               height: host.offsetHeight,
+               toggle: toggle.getBoundingClientRect().top,
+               cover: getComputedStyle(cover).display,
+               expand: getComputedStyle(bar.querySelector(".srr-player-expand")!).display,
+            }
+            v.remove()
+            return { audio, short, video }
          })
-         expect(frame.audio, "an audio episode reserves no frame").toBe(0)
-         expect(frame.video, "a video episode gets the full-width frame").toBe(frame.sheet)
+         expect(frame.audio.host, "an audio episode reserves no frame").toBe(0)
+         expect(frame.video.cover, "the tile gives way to the video").toBe("none")
+         expect(frame.video.expand, "the thumbnail offers full screen").toBe("flex")
+         expect(frame.video.height, "the thumbnail is the tile's height").toBe(frame.audio.tile)
+         expect(Math.round((frame.video.host / frame.video.height) * 9), "a 16:9 thumbnail").toBe(16)
+         expect(frame.video.toggle, "the transport moved between audio and video").toBe(frame.audio.toggle)
+         expect(frame.short, "the transport moved with the title's length").toBe(frame.audio.toggle)
       } finally {
          await close()
       }

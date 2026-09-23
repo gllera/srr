@@ -287,17 +287,26 @@ describe("browser: split view (two-pane desktop)", () => {
                // `left: 0; right: 0; margin: 0 auto`, i.e. centred on the whole
                // window and painting over the pane below ~1440px, which is the
                // bug this width sweep was written for.
-               for (const sel of [".srr-tb-reader", ".srr-player", ".srr-snackbar", ".srr-pin-progress"])
+               // Not .srr-player: since 2026-09-23 the player is a whole VIEW over
+               // the window (the filter picker's shape), not a lane on the column
+               // — asserted separately below.
+               // The dock lane rides the column like the snackbar (the player's
+               // folded corner circle sits at its right edge).
+               for (const sel of [".srr-tb-reader", ".srr-snackbar", ".srr-pin-progress", ".srr-player-dock-lane"])
                   bars[sel] = box(sel)
-               return { col, pane, bars, pill: box(".srr-new-pill") }
+               return { col, pane, bars, pill: box(".srr-new-pill"), player: box(".srr-player"), vw: innerWidth }
             })
 
             // Non-vacuity, per bar: a rule nothing measured is a rule nothing
-            // asserts. Three of the four are up by construction above; only
+            // asserts. Two of the three are up by construction above; only
             // .srr-pin-progress is genuinely conditional and keeps the `continue`.
             expect(m.bars[".srr-tb-reader"], `toolbar measured at ${width}px`).not.toBeNull()
-            expect(m.bars[".srr-player"], `player measured at ${width}px`).not.toBeNull()
+            // The player view spans the whole window at every width.
+            expect(m.player, `player measured at ${width}px`).not.toBeNull()
+            expect(m.player!.left, `player view left at ${width}px`).toBe(0)
+            expect(m.player!.right, `player view right at ${width}px`).toBe(m.vw)
             expect(m.bars[".srr-snackbar"], `snackbar measured at ${width}px`).not.toBeNull()
+            expect(m.bars[".srr-player-dock-lane"], `dock lane measured at ${width}px`).not.toBeNull()
             for (const [sel, bar] of Object.entries(m.bars)) {
                if (!bar) continue // not up in this state — nothing to place
                // Centred on the reader column (±1px for subpixel rounding)…

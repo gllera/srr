@@ -732,7 +732,7 @@ function onCycle(dir: number) {
    // the open picker overlay (same input-leak class as the keyboard and
    // one-finger-swipe guards) — nor under the open image lightbox, which is a
    // modal over the reader and owns every input while it is up.
-   if (picker.isOpen() || lightbox.isOpen()) return
+   if (picker.isOpen() || lightbox.isOpen() || player.isViewOpen()) return
    if (nav.getFilterEntries().length <= 1) return
    // cycleToken steps relative to cycleOriginKey (a single tagged-feed filter
    // cycles by its tag) and skips ★ Saved / empty-of-unread lanes, so the list and
@@ -771,8 +771,9 @@ function onCycle(dir: number) {
 // live beside the list and its prev/next buttons stay enabled on both surfaces:
 // a key must reach the same article the button beside it does, or ← / → go dead
 // on the list surface while the arrows a centimetre away still work.
-// A modal over the reader (the picker, the image lightbox) owns input while up.
-const overlayUp = () => picker.isOpen() || lightbox.isOpen()
+// A modal over the reader (the picker, the image lightbox, the player view)
+// owns input while up.
+const overlayUp = () => picker.isOpen() || lightbox.isOpen() || player.isViewOpen()
 const stepLeft = () => {
    if (!layout().readerSteppable || overlayUp()) return
    return el.prev.disabled ? reader.bumpReaderEdge("prev") : guard(() => nav.left())
@@ -1161,6 +1162,7 @@ async function init() {
          }
          e.preventDefault()
          if (picker.isOpen()) picker.close()
+         else if (player.isViewOpen()) player.closeView()
          else if (layout().focus === "reader") void goToList(true)
          else void enterReader()
          return
@@ -1170,7 +1172,7 @@ async function init() {
       // keymap below (`/`, A/D row stepping) — and the reader keymap after it —
       // would drive the surfaces stacked behind it. Escape is handled above;
       // the picker keeps its own UI (rows are plain links, Tab walks them).
-      if (picker.isOpen()) return
+      if (picker.isOpen() || player.isViewOpen()) return
       // Typing beats every shortcut below: a bare-letter keymap over a focused
       // field would eat the text. isContentEditable joins the tag test because a
       // rich-text host is a text field that happens not to be an <input>.

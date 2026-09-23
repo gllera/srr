@@ -367,11 +367,14 @@ const SKELETON = `
          <button class="srr-prev" disabled></button>
          <button class="srr-next" disabled><span class="srr-next-count"></span></button>
          <button class="srr-save" disabled></button>
+         <button class="srr-player-dock" hidden><span class="srr-player-eq"></span></button>
          <button class="srr-filter"></button>
       </nav>
       <section class="srr-picker" hidden></section>
-      <div class="srr-player" hidden>
+      <div class="srr-player" tabindex="-1" hidden>
          <div class="srr-player-media"></div>
+         <button class="srr-player-expand"></button>
+         <div class="srr-player-cover" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
          <div class="srr-player-body">
             <button class="srr-player-title"><span class="srr-player-source"></span><span class="srr-player-name"></span></button>
             <div class="srr-player-seek" role="slider" tabindex="0"><div class="srr-player-seek-fill"></div></div>
@@ -380,9 +383,10 @@ const SKELETON = `
          <button class="srr-player-close"></button>
          <div class="srr-player-controls">
             <button class="srr-player-rate"></button>
-            <button class="srr-player-back15"></button>
+            <button class="srr-player-prev" hidden></button>
+            <button class="srr-player-back"></button>
             <button class="srr-player-toggle"></button>
-            <button class="srr-player-fwd15"></button>
+            <button class="srr-player-fwd"></button>
             <button class="srr-player-next" hidden></button>
          </div>
          <section class="srr-player-upnext">
@@ -390,7 +394,6 @@ const SKELETON = `
             <div class="srr-player-list" role="list"></div>
             <p class="srr-player-empty"></p>
          </section>
-         <button class="srr-player-fab" aria-expanded="false"></button>
       </div>
       <div class="srr-pin-progress" hidden></div>
       <div class="srr-snackbar" hidden><span class="srr-snackbar-text"></span>
@@ -2520,6 +2523,29 @@ describe("pagerCommit — app.ts's seam to the pager", () => {
       expect(ok).toBe(false)
       expect(nav.right).not.toHaveBeenCalled()
       expect(nav.left).not.toHaveBeenCalled()
+   })
+
+   it("refuses while the player VIEW is open over the reader — and Escape closes the view", async () => {
+      await boot()
+      // A steppable article, so the positive control at the end is meaningful
+      // (with no right neighbour → would ring the edge bell instead).
+      nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
+      hashTo("#2")
+      await flush()
+      ;(document.querySelector(".srr-player-dock") as HTMLButtonElement).click() // open the view
+      nav.right.mockClear()
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }))
+      await flush()
+      expect(nav.right).not.toHaveBeenCalled()
+      expect(await getCommit()("next")).toBe(false)
+      // Escape outside the view's own focus closes the view, not the reader.
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))
+      await flush()
+      const model = await import("./model") // app.ts's registry (boot() reset modules)
+      expect(model.focus()).toBe("reader")
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }))
+      await flush()
+      expect(nav.right).toHaveBeenCalled()
    })
 
    it("refuses while the picker overlay is open over the reader", async () => {

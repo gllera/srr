@@ -7,8 +7,8 @@ import { bindPressMenu, type MenuItem } from "../dropdown"
 import { el } from "../els"
 import { restartAnimation } from "../motion"
 import { batch, onChange } from "../signals"
-import { advance } from "./engine"
-import { active, isGifIdiom, mounted, QUEUE_MAX, queue, queuePos, unfolded, withoutEntry } from "./state"
+import { dropEntry, insertNext, playCursor, playEntry } from "./engine"
+import { active, isGifIdiom, mounted, QUEUE_MAX, queue, queuePos, unfolded, type QueueEntry } from "./state"
 import { setUnfolded } from "./view"
 
 // One chip, a glyph vocabulary: "+" add, the entry's 1-based queue POSITION
@@ -55,10 +55,10 @@ function pulseOnce(n: Element | null): void {
 }
 
 // Feedback at both ends of an add: the chip pops under the finger, and where
-// the episode went pulses — the Up next count, or the fold button.
+// the episode went pulses — the Up next count, or (folded) the dock.
 function pulseAdd(chip: Element | null): void {
    pulseOnce(chip)
-   pulseOnce(unfolded() ? el.playerCount : el.playerFab)
+   pulseOnce(unfolded() ? el.playerCount : el.playerDock)
 }
 
 // The FIRST entry into an idle player starts playing it (user call
@@ -68,17 +68,16 @@ function pulseAdd(chip: Element | null): void {
 // queued, e.g. a READY queue restored at boot) just waits its turn.
 function startIfIdle(): boolean {
    if (active() || queue().length !== 1) return false
-   advance(true)
+   playCursor()
    return true
 }
 
 // The chip's long-press menu — the power layer over the tap (append): "Play
-// next" puts the enclosure at the HEAD of the queue (the podcast verb the
-// list's reorder arrows only reach one step at a time; a queued entry MOVES,
-// never duplicates), "Play now" does the same and then advances onto it at
-// once — through the QUEUE, since the player plays nothing else; the entry is
-// consumed on the same tick, so it never grows the queue and stays the door
-// state's escape hatch at the cap. Items derive at open and RE-CHECK at action:
+// next" puts the enclosure right AFTER the current entry (the podcast verb the
+// list's reorder arrows only reach one step at a time; a listed entry MOVES,
+// never duplicates), "Play now" does the same and then plays it at once —
+// through the playlist, since the player plays nothing else. Items derive at
+// open and RE-CHECK at action:
 // showContextMenu outlives this tick, and an auto-advance or a navigation can
 // move the queue (or the article) under an open menu.
 function chipMenuItems(index: number): MenuItem[] {
@@ -91,18 +90,25 @@ function chipMenuItems(index: number): MenuItem[] {
       const now = mounted()
       return !now || now.mid !== mid || now.chron !== chron
    }
-   // Put the enclosure at the queue's head (a queued one MOVES). `now` lets
-   // it past the cap: advance() consumes it on the same tick.
-   const toHead = (now: boolean): { media: HTMLMediaElement; added: boolean } | null => {
+   // Put the enclosure right after the current entry (a listed one MOVES).
+   // A NEW entry at the cap is refused — the list is where to prune.
+   const toNext = (): { media: HTMLMediaElement; entry: QueueEntry; added: boolean } | null => {
       if (stale()) return null
       const media = mediaList(el.content)[index]
       const src = media?.getAttribute("src") ?? ""
       if (!src) return null
-      const pos = queuePos(mid, chron, index)
-      if (pos < 0 && queue().length >= QUEUE_MAX && !now) return null
-      const kind = media.tagName === "VIDEO" ? "video" : "audio"
-      queue.set([{ mid, chron, index, src, kind, title, feedId }, ...withoutEntry(mid, chron, index)])
-      return { media, added: pos < 0 }
+      if (queuePos(mid, chron, index) < 0 && queue().length >= QUEUE_MAX) return null
+      const listed = queue().find((e) => e.mid === mid && e.chron === chron && e.index === index)
+      const entry: QueueEntry = listed ?? {
+         mid,
+         chron,
+         index,
+         src,
+         kind: media.tagName === "VIDEO" ? "video" : "audio",
+         title,
+         feedId,
+      }
+      return { media, entry, added: insertNext(entry) }
    }
    return [
       {
@@ -110,7 +116,7 @@ function chipMenuItems(index: number): MenuItem[] {
          // A NEW head entry would breach the cap; a queued one just moves.
          disabled: queuePos(mid, chron, index) < 0 && queue().length >= QUEUE_MAX,
          action: () => {
-            const r = toHead(false)
+            const r = toNext()
             if (!r || startIfIdle()) return
             if (r.added) pulseAdd(r.media.nextElementSibling)
             else pulseOnce(r.media.nextElementSibling)
@@ -118,9 +124,13 @@ function chipMenuItems(index: number): MenuItem[] {
       },
       {
          label: "Play now",
+         // At the cap only an already-listed enclosure can play now (a new one
+         // would breach it); the chip's own door covers pruning.
+         disabled: queuePos(mid, chron, index) < 0 && queue().length >= QUEUE_MAX,
          action: () =>
             batch(() => {
-               if (toHead(true)) advance(true)
+               const r = toNext()
+               if (r) playEntry(r.entry, true)
             }),
       },
    ]
@@ -130,7 +140,8 @@ function toggleQueued(index: number): void {
    const at = mounted()
    if (!at) return
    const { mid, chron, title, feedId } = at
-   if (queuePos(mid, chron, index) >= 0) return queue.set(withoutEntry(mid, chron, index))
+   const listed = queue().find((e) => e.mid === mid && e.chron === chron && e.index === index)
+   if (listed) return dropEntry(listed)
    // The cap as a DOOR: a full queue unfolds the player, whose Up next list
    // is where to prune, instead of silently eating the tap (the chip already
    // reads ≡ / "Playlist full").

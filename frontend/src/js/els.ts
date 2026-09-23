@@ -51,21 +51,25 @@ export const el = {
    // one ref here that owns a node rather than just reading one.
    player: q(".srr-player"),
    playerMedia: q(".srr-player-media"),
+   // The fullscreen button over the video thumbnail (player/view.ts).
+   playerExpand: q<HTMLButtonElement>(".srr-player-expand"),
    playerTitle: q<HTMLButtonElement>(".srr-player-title"),
    playerSource: q(".srr-player-source"),
    playerName: q(".srr-player-name"),
    playerSeek: q(".srr-player-seek"),
    playerSeekFill: q(".srr-player-seek-fill"),
    playerToggle: q<HTMLButtonElement>(".srr-player-toggle"),
-   playerBack15: q<HTMLButtonElement>(".srr-player-back15"),
-   playerFwd15: q<HTMLButtonElement>(".srr-player-fwd15"),
+   playerBack: q<HTMLButtonElement>(".srr-player-back"),
+   playerFwd: q<HTMLButtonElement>(".srr-player-fwd"),
    playerRate: q<HTMLButtonElement>(".srr-player-rate"),
    playerTime: q(".srr-player-time"),
+   playerPrev: q<HTMLButtonElement>(".srr-player-prev"),
    playerNext: q<HTMLButtonElement>(".srr-player-next"),
    playerDuration: q(".srr-player-duration"),
    playerList: q(".srr-player-list"),
    playerCount: q(".srr-player-count"),
    playerEmpty: q(".srr-player-empty"),
    playerClose: q<HTMLButtonElement>(".srr-player-close"),
-   playerFab: q<HTMLButtonElement>(".srr-player-fab"),
+   // The player dock — the floating corner circle, the folded player (player/view.ts).
+   playerDock: q<HTMLButtonElement>(".srr-player-dock"),
 }

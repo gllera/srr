@@ -70,10 +70,12 @@ export interface Active extends MountedArticle {
 }
 export const active = signal<Active | null>(null)
 
-// The "up next" queue — strictly what plays AFTER the active episode, which is
-// never itself a member (playing an entry consumes it). Entries carry everything
-// needed to play with zero pack fetches: the Persisted shape plus mid, because a
-// queue outlives navigation and may hold episodes of articles that are no longer
+// The PLAYLIST (kept under its historical name `queue`): every episode added,
+// in order — and an entry STAYS after it plays (user call 2026-09-23: "don't
+// remove an element after played"), like a music playlist. The episode playing
+// now is a member; `cursor` says which. Entries carry everything needed to play
+// with zero pack fetches: the Persisted shape plus mid, because a playlist
+// outlives navigation and may hold episodes of articles that are no longer
 // rendered anywhere. Immutable: every write is a fresh array, so identity is the
 // change signal every effect keys on.
 export interface QueueEntry {
@@ -87,6 +89,17 @@ export interface QueueEntry {
 }
 export const queue = signal<readonly QueueEntry[]>([])
 export const QUEUE_MAX = 50
+
+// Which entry is CURRENT — the one playing, or (nothing playing) the one the
+// play button will start: the READY state. An entry KEY rather than an index,
+// so a reorder or a removal elsewhere in the list can never shift it onto a
+// different episode. Null: no current entry (the play button starts the first).
+export const cursor = signal<string | null>(null)
+export const entryKey = (e: { mid: string; chron: number; index: number }): string => `${e.mid}:${e.chron}:${e.index}`
+export function cursorIndex(): number {
+   const k = cursor()
+   return k === null ? -1 : queue().findIndex((e) => entryKey(e) === k)
+}
 
 // Whether the player is UNFOLDED to the full player. It starts folded — just the
 // corner button — and only that button (or a full-queue chip) unfolds it.

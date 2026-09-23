@@ -44,7 +44,7 @@ import { save, watchPersist } from "./player/persist"
 import { adoptFromContent, rehomeInto } from "./player/relocation"
 import { watchSession } from "./player/session"
 import { active, setDeps, setMounted, type MountedArticle, type PlayerDeps } from "./player/state"
-import { watchView } from "./player/view"
+import { isViewOpen, setUnfolded, watchView } from "./player/view"
 
 export type { MountedArticle, PlayerDeps }
 export { adoptFromContent, injectQueueChips, queueKey, rehomeInto, restorePersisted }
@@ -53,6 +53,13 @@ export { adoptFromContent, injectQueueChips, queueKey, rehomeInto, restorePersis
 // states, whose content host holds reader chrome rather than an article.
 export function noteMounted(info: MountedArticle | null): void {
    setMounted(info)
+}
+
+// The player VIEW — a full-viewport overlay like the filter picker. app.ts
+// gates its keymap on it and routes a stray Escape to closeView.
+export { isViewOpen }
+export function closeView(): void {
+   setUnfolded(false)
 }
 
 export function isActive(): boolean {

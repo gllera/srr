@@ -9,7 +9,7 @@ import { playerStateKey } from "../keys"
 import { lsSet } from "../storage"
 import { arrayEqual, diffed } from "../signals"
 import { URL_DENY } from "../urlish"
-import { active, QUEUE_MAX, queue, RATES, ratePref, type QueueEntry } from "./state"
+import { active, cursor, entryKey, QUEUE_MAX, queue, RATES, ratePref, type QueueEntry } from "./state"
 
 // What survives a reload. `src`/`kind`/`title`/`feedId` ride along so the player
 // can render at boot with ZERO pack fetches, preserving the reader's O(1) boot.
@@ -27,6 +27,9 @@ interface Persisted {
    title: string
    feedId: number
    queue?: Omit<QueueEntry, "mid">[]
+   // The current entry's position in `queue` while nothing plays (the READY
+   // state); with an episode playing, `chron`/`index` above name it instead.
+   c?: number
 }
 
 // timeupdate fires ~4x/second; persisting that often would write ~14k times an
@@ -40,9 +43,16 @@ export function save(): void {
    // store for a queue with nothing playing. Entries of another mount stay
    // in-memory only — a documented non-goal, not an accident.
    const mid = a?.mid ?? data.activeStore().mid
-   const qlist = queue()
-      .filter((e) => e.mid === mid)
-      .map((e) => ({ chron: e.chron, index: e.index, src: e.src, kind: e.kind, title: e.title, feedId: e.feedId }))
+   const mine = queue().filter((e) => e.mid === mid)
+   const qlist = mine.map((e) => ({
+      chron: e.chron,
+      index: e.index,
+      src: e.src,
+      kind: e.kind,
+      title: e.title,
+      feedId: e.feedId,
+   }))
+   const c = mine.findIndex((e) => entryKey(e) === cursor())
    let head: Omit<Persisted, "queue"> | null = null
    if (a) {
       const m = a.media
@@ -61,7 +71,11 @@ export function save(): void {
       if (!head.src || head.time <= 0) head = null
    }
    if (!head && !qlist.length) return clearSaved(mid)
-   const state = { ...(head ?? {}), ...(qlist.length ? { queue: qlist } : {}) }
+   const state = {
+      ...(head ?? {}),
+      ...(qlist.length ? { queue: qlist } : {}),
+      ...(!head && c >= 0 ? { c } : {}),
+   }
    // A full or blocked localStorage must never break playback — lsSet swallows.
    lsSet(playerStateKey(mid), JSON.stringify(state))
    lastSave = Date.now()
@@ -94,7 +108,7 @@ export function quietly(fn: () => void): void {
 // timeupdates between — moments, not a projection of state.
 export function watchPersist(): () => void {
    return diffed(
-      () => [queue(), ratePref()] as const,
+      () => [queue(), cursor(), ratePref()] as const,
       () => {
          if (!quiet) save()
       },
@@ -141,6 +155,8 @@ export function safeSrc(raw: string, base: URL): string | null {
 // the entries that survived validation, capped.
 export interface SavedState {
    queue: QueueEntry[] | null
+   // The READY cursor's index into `queue` (only meaningful without a head).
+   cursor: number | null
    head: {
       src: string
       chron: number
@@ -201,5 +217,6 @@ export function readSaved(store: { mid: string; base: URL }): SavedState | null 
               feedId: typeof saved.feedId === "number" ? saved.feedId : 0,
            }
          : null
-   return { queue: q, head }
+   const cur = typeof saved.c === "number" && Number.isInteger(saved.c) && saved.c >= 0 ? saved.c : null
+   return { queue: q, head, cursor: cur }
 }

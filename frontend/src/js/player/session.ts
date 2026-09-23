@@ -46,8 +46,9 @@ function bindHandlers(): void {
    } catch {}
 }
 
-// The lock screen gains real track buttons ONLY while a queue exists — with
-// one, nexttrack/previoustrack step QUEUE items; without one they stay unset so
+// The lock screen gains real track buttons ONLY while a playlist exists — with
+// one, nexttrack/previoustrack step through ITS entries (advance() is a no-op
+// past the last, prevTrack restarts at the first); without one they stay unset so
 // the platform greys them out (RDR16's original rule stands: they must never
 // map to prev/next ARTICLE and skip the listener out of an episode).
 function syncQueueHandlers(has: boolean): void {

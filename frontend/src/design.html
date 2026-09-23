@@ -205,13 +205,31 @@
                </button>
             </span>
          </nav>
-         <div class="srr-player" role="region" aria-label="Player" hidden>
-            <div class="srr-player-media"></div>
-            <div class="srr-player-body">
+         <div class="srr-player" role="region" aria-label="Player" tabindex="-1" hidden>
+            <div class="srr-player-head">
+               <button class="srr-player-close" aria-label="Hide player" title="Hide player">
+                  <svg class="srr-dismiss-icon" viewBox="0 0 24 24" aria-hidden="true">
+                     <path d="M6 9.5l6 6 6-6" />
+                  </svg>
+               </button>
+               <button class="srr-player-rate" aria-label="Playback speed">1×</button>
+            </div>
+            <div class="srr-player-now">
+               <div class="srr-player-media"></div>
+               <button class="srr-player-expand" aria-label="Watch full screen" title="Watch full screen">
+                  <svg class="srr-player-expand-icon" viewBox="0 0 24 24" aria-hidden="true">
+                     <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />
+                  </svg>
+               </button>
+               <div class="srr-player-cover" aria-hidden="true">
+                  <span></span><span></span><span></span><span></span><span></span>
+               </div>
                <button class="srr-player-title" aria-label="Go to this article">
                   <span class="srr-player-source"></span>
                   <span class="srr-player-name"></span>
                </button>
+            </div>
+            <div class="srr-player-body">
                <div
                   class="srr-player-seek"
                   role="slider"
@@ -227,22 +245,29 @@
                   <span class="srr-player-time"></span><span class="srr-player-duration"></span>
                </div>
             </div>
-            <button class="srr-player-close" aria-label="Close player">&times;</button>
             <div class="srr-player-controls">
-               <button class="srr-player-rate" aria-label="Playback speed">1×</button>
-               <button class="srr-player-back15" aria-label="Back 15 seconds">−15</button>
+               <button class="srr-player-prev" aria-label="Previous in playlist" hidden>«</button>
+               <button class="srr-player-back" aria-label="Back 10 seconds">−10</button>
                <button class="srr-player-toggle" aria-label="Play" aria-pressed="false"></button>
-               <button class="srr-player-fwd15" aria-label="Forward 15 seconds">+15</button>
+               <button class="srr-player-fwd" aria-label="Forward 10 seconds">+10</button>
                <button class="srr-player-next" aria-label="Play next in playlist" hidden>»</button>
             </div>
             <section class="srr-player-upnext" aria-labelledby="srr-player-upnext-head">
                <h2 class="srr-player-upnext-head" id="srr-player-upnext-head">
-                  Up next <span class="srr-player-count"></span>
+                  Playlist <span class="srr-player-count"></span>
                </h2>
                <div class="srr-player-list" role="list" aria-labelledby="srr-player-upnext-head"></div>
                <p class="srr-player-empty">Nothing queued. Tap + beside an episode to add it.</p>
             </section>
-            <button class="srr-player-fab" aria-expanded="false" aria-label="Show player" title="Show player">
+         </div>
+         <div class="srr-player-dock-lane">
+            <button
+               class="srr-player-dock"
+               aria-label="Open the player"
+               aria-expanded="false"
+               title="Open the player — hold to play or pause"
+               hidden
+            >
                <span class="srr-player-eq" aria-hidden="true"><span></span><span></span><span></span></span>
             </button>
          </div>

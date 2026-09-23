@@ -622,34 +622,29 @@ export function showReadingDialog(): void {
 // menu's status readout), set off by a rule (CSS .srr-ctxmenu-footer).
 export type MenuItem = { label: string; action: () => void; checked?: boolean; disabled?: boolean }
 
-// Wire an anchor to open a context menu on the SECONDARY gesture, cross-platform.
-// The menu's owner owns how a menu is summoned — the wiring encodes three
+// Wire an anchor's SECONDARY gesture, cross-platform. The wiring encodes three
 // platform facts that must not be re-discovered per anchor: desktop right-click,
 // Android long-press AND Shift+F10 / the menu key on a focused anchor all arrive
 // as `contextmenu`; iOS Safari fires none of them on non-links, so a 500ms
-// touch-hold timer covers it there; and `held` marks a timer-opened menu so the
+// touch-hold timer covers it there; and `held` marks a timer-fired act so the
 // click that follows the finger lift is swallowed (it would otherwise also run
 // the anchor's primary action) and a late native contextmenu (Android fires
-// both) doesn't reopen the menu it just opened — any new touch resets it.
-// `items` derives fresh per open; an empty list falls through to the browser's
-// own menu. Consumers: menus.ts's frontier menu, player.ts's queue-chip menu.
-export function bindPressMenu(anchor: HTMLElement, items: () => MenuItem[]): void {
+// both) doesn't fire it twice — any new touch resets it. `act` returns whether
+// it took the gesture; false falls through to the browser's own menu.
+// Consumers: bindPressMenu below, and the player dock (player/view.ts),
+// whose secondary act plays / pauses rather than opening a menu.
+export function bindSecondaryPress(anchor: HTMLElement, act: () => boolean): void {
    let hold = 0
    let held = false
-   const open = (): boolean => {
-      const list = items()
-      if (list.length > 0) showContextMenu(anchor, list)
-      return list.length > 0
-   }
    anchor.addEventListener("contextmenu", (e) => {
       clearTimeout(hold)
-      if (held || open()) e.preventDefault()
+      if (held || act()) e.preventDefault()
    })
    anchor.addEventListener("pointerdown", (e) => {
       if (e.pointerType !== "touch") return
       held = false
       clearTimeout(hold)
-      hold = window.setTimeout(() => (held = open()), 500)
+      hold = window.setTimeout(() => (held = act()), 500)
    })
    for (const ev of ["pointerup", "pointercancel", "pointerleave"])
       anchor.addEventListener(ev, () => clearTimeout(hold))
@@ -663,6 +658,17 @@ export function bindPressMenu(anchor: HTMLElement, items: () => MenuItem[]): voi
       },
       true,
    )
+}
+
+// Open a context menu on the secondary gesture. `items` derives fresh per open;
+// an empty list falls through to the browser's own menu. Consumers: menus.ts's
+// frontier menu, player/chips.ts's queue-chip menu.
+export function bindPressMenu(anchor: HTMLElement, items: () => MenuItem[]): void {
+   bindSecondaryPress(anchor, () => {
+      const list = items()
+      if (list.length > 0) showContextMenu(anchor, list)
+      return list.length > 0
+   })
 }
 
 export function showContextMenu(anchor: HTMLElement, items: MenuItem[], opts?: { footer?: HTMLElement }): void {

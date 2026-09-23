@@ -15,8 +15,10 @@ import { discardAdopted } from "./relocation"
 import {
    active,
    buffering,
+   cursor,
+   cursorIndex,
    deps,
-   entryOf,
+   entryKey,
    isGifIdiom,
    mounted,
    queue,
@@ -26,18 +28,13 @@ import {
    readRate,
    sample,
    unfolded,
-   withoutEntry,
    type Active,
    type QueueEntry,
 } from "./state"
 
-// One-deep history for the lock screen's previoustrack (the podcast convention:
-// early in an episode, "previous" means the one before). Deliberately not a
-// full history — a reader's queue is a to-listen list, not a DJ deck.
-let lastPlayed: QueueEntry | null = null
 // previoustrack past this many seconds restarts the episode instead.
 const PREV_RESTART_S = 3
-export const SKIP_SECONDS = 15
+export const SKIP_SECONDS = 10
 // The beat before an error retry reloads: an immediate reload would land inside
 // the same network blip that caused the error.
 const RETRY_DELAY_MS = 2000
@@ -80,10 +77,10 @@ export function onPlay(e: Event): void {
    batch(() => {
       releaseOutgoing()
       active.set({ ...at, index, media: m })
+      // The entry STAYS in the playlist (it is not consumed by playing); the
+      // cursor just moves onto it.
+      cursor.set(entryKey({ mid: at.mid, chron: at.chron, index }))
       pauseOthers(m)
-      // The claimed entry is now the active episode; leaving it queued would
-      // replay it later.
-      queue.set(withoutEntry(at.mid, at.chron, index))
       // Apply the device's standing speed preference, but only when it was
       // actually set: at the default 1 we leave the element alone so a rate FEB2
       // restored (or one set through native in-content controls) is not reset.
@@ -195,30 +192,23 @@ function onBufferClear(): void {
    buffering.set(false)
 }
 
-// The shared dismissal tail of ended/error: forget the episode wholesale —
-// release the claim, drop its persisted entry, take an adopted node out of the
-// player — then advance the playlist if there is one. One body, because the
-// release/clearSaved/discardAdopted ordering is load-bearing (release reads
-// active; discard only after the claim is gone; the clear before any advance,
-// whose own save must not be wiped after it).
-function dismissActive(): void {
-   const mid = active()?.mid
+// The shared tail of ended/error: move on through the playlist — the next
+// playable entry after the current one — or, at the end of the list, stop:
+// release the claim, take an adopted node out of the player, and re-save (the
+// blob's head was the episode that just finished). The playlist itself is
+// untouched either way: a finished entry STAYS, marked played, and the cursor
+// stays on it until something else plays.
+function finishCurrent(): void {
    batch(() => {
+      if (hasNext()) return advance(true)
       release()
-      if (mid) clearSaved(mid)
       discardAdopted()
-      if (queue().length) advance(true)
    })
+   save()
 }
 
 function onEnded(): void {
-   // A finished episode has nothing left to resume; drop it wholesale rather
-   // than leaving a player parked at the end — unless something is queued, in
-   // which case finishing is exactly when the playlist advances, with the
-   // finished episode as the prev-track target.
-   const a = active()
-   if (queue().length) lastPlayed = a ? entryOf(a) : null
-   dismissActive()
+   finishCurrent()
 }
 
 function onError(): void {
@@ -260,11 +250,10 @@ function onError(): void {
       return
    }
    // Old articles outlive their media hosts (the same reality collapseBrokenMedia
-   // exists for). An unplayable episode is not an app error: dismiss quietly —
-   // or, with a queue, skip to the next entry (each attempt consumes one, so a
-   // run of dead episodes terminates at the plain dismissal). The dead episode
-   // deliberately does NOT become the prev-track target.
-   dismissActive()
+   // exists for). An unplayable episode is not an app error: move on quietly —
+   // the next entry, or a plain stop at the end of the list. The dead entry
+   // stays listed (removing it is the listener's call, one ✕ away).
+   finishCurrent()
 }
 
 // ---------------------------------------------------------------------------
@@ -308,6 +297,7 @@ export function playEntry(entry: QueueEntry, autoplay: boolean): boolean {
          media: m,
       }
       active.set(claim)
+      cursor.set(entryKey(entry))
       finishClaim(m)
    })
    if (autoplay) void play()
@@ -334,61 +324,89 @@ function resumeRemembered(m: HTMLMediaElement, entry: QueueEntry): void {
    else m.addEventListener("loadedmetadata", apply, { once: true })
 }
 
-// Advance to the next playable queue entry. The outgoing active episode (if
-// still claimed — onEnded releases before calling this and sets lastPlayed
-// itself) becomes the prev-track target; unplayable entries are consumed and
-// skipped, so the loop terminates.
+// Is there an entry AFTER the current one? (With no current entry, the whole
+// list is "after".)
+export function hasNext(): boolean {
+   return cursorIndex() + 1 < queue().length
+}
+
+// Move to the next playable entry after the current one. Unplayable entries
+// are skipped (they stay listed); with nothing playable after it, nothing
+// happens — a nexttrack at the end of the list must not stop what is playing.
 export function advance(autoplay: boolean): void {
    batch(() => {
-      for (let q = queue(); q.length; q = queue()) {
-         const next = q[0]
-         queue.set(q.slice(1))
-         const a = active()
-         if (a) lastPlayed = entryOf(a) ?? lastPlayed
-         if (playEntry(next, autoplay)) break
-      }
+      const q = queue()
+      for (let j = cursorIndex() + 1; j < q.length; j++) if (playEntry(q[j], autoplay)) return
    })
 }
 
-// Remove one entry (the list's ✕ and swipe, a chip toggling off).
+// Play the current entry — the READY state's play button — or, with no current
+// entry, the first.
+export function playCursor(): void {
+   const q = queue()
+   const e = q[cursorIndex()] ?? q[0]
+   if (e) playEntry(e, true)
+}
+
+// Remove one entry (a row's ✕ or swipe, a chip toggling off). Removing the
+// CURRENT entry stops it if it is playing (removeCurrent); the cursor then
+// moves onto the entry that followed — READY, never starting by itself.
 export function dropEntry(entry: QueueEntry): void {
+   if (cursor() === entryKey(entry)) return removeCurrent()
    queue.set(queue().filter((e) => e !== entry))
 }
 
-// Play one queued entry now (a list row's play button).
+// Play one entry now (a row's play button). It stays in the playlist.
 export function playNow(entry: QueueEntry): void {
-   batch(() => {
-      dropEntry(entry)
-      playEntry(entry, true) // a false return just drops the dead entry
-   })
+   playEntry(entry, true)
+}
+
+// Put an entry right AFTER the current one (the chip menu's "Play next"); an
+// entry already listed MOVES there. Returns whether it was newly added.
+export function insertNext(entry: QueueEntry): boolean {
+   const key = entryKey(entry)
+   const listed = queue().some((e) => entryKey(e) === key)
+   if (cursor() === key) return false // already the current one
+   const rest = queue().filter((e) => entryKey(e) !== key)
+   const at = rest.findIndex((e) => entryKey(e) === cursor()) + 1 // 0 with no current
+   queue.set([...rest.slice(0, at), entry, ...rest.slice(at)])
+   return !listed
 }
 
 // Reorder one entry by one step. Returns the new index, or -1 at a dead end.
+// The cursor is a key, so the current entry is simply carried along.
 export function moveEntry(entry: QueueEntry, delta: -1 | 1): number {
-   const q = queue().slice()
-   const i = q.indexOf(entry)
-   const j = i + delta
-   if (i < 0 || j < 0 || j >= q.length) return -1
-   q.splice(i, 1)
-   q.splice(j, 0, entry)
-   queue.set(q)
-   return j
+   return moveEntryTo(entry, queue().indexOf(entry) + delta)
 }
 
-// The podcast convention: early in an episode "previous" means the one before;
-// past PREV_RESTART_S it means "start this one over". Stepping back pushes the
-// current episode onto the head of the queue, so ⏮ then ⏭ round-trips.
+// Move an entry to position `to` (the drag handle's drop). Returns where it
+// landed, or -1 when there was nothing to do.
+export function moveEntryTo(entry: QueueEntry, to: number): number {
+   const q = queue().slice()
+   const i = q.indexOf(entry)
+   if (i < 0 || to < 0 || to >= q.length || to === i) return -1
+   q.splice(i, 1)
+   q.splice(to, 0, entry)
+   queue.set(q)
+   return to
+}
+
+// The podcast convention: early in an episode "previous" means the entry before
+// it in the playlist; past PREV_RESTART_S (or at the top of the list) it means
+// "start this one over". With nothing playing (the READY state) it plays the
+// entry before the current one, the mirror of »'s advance.
+export function hasPrev(): boolean {
+   return active() !== null || cursorIndex() > 0
+}
 export function prevTrack(): void {
    const a = active()
-   if (!a) return
-   if (a.media.currentTime > PREV_RESTART_S || !lastPlayed) return seekTo(0)
-   const prev = lastPlayed
-   const cur = entryOf(a)
-   batch(() => {
-      if (!playEntry(prev, true)) return seekTo(0)
-      lastPlayed = null
-      if (cur) queue.set([cur, ...queue()])
-   })
+   const i = cursorIndex()
+   if (!a) {
+      if (i > 0) playEntry(queue()[i - 1], true)
+      return
+   }
+   if (a.media.currentTime > PREV_RESTART_S || i < 1) return seekTo(0)
+   if (!playEntry(queue()[i - 1], true)) seekTo(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -420,10 +438,7 @@ export function pause(): void {
 // head of the queue — a user gesture, so autoplay policy has nothing to refuse.
 export function toggle(): void {
    const a = active()
-   if (!a) {
-      if (queue().length) advance(true)
-      return
-   }
+   if (!a) return playCursor()
    if (a.media.paused) void play()
    else pause()
 }
@@ -467,9 +482,9 @@ export function close(): void {
    const mid = a?.mid ?? data.activeStore().mid
    a?.media.pause()
    const wasAdopted = a !== null && !el.content.contains(a.media)
-   lastPlayed = null
    batch(() => {
       queue.set([])
+      cursor.set(null)
       unfolded.set(false)
       release()
       clearSaved(mid)
@@ -477,10 +492,37 @@ export function close(): void {
    })
 }
 
+// Remove the CURRENT entry from the playlist (its row's ✕): the one way to drop
+// the episode playing now, since the view's ✕ only hides the view. It stops,
+// hands its position to FEB2 (the article stays resumable), and the entry that
+// followed becomes current in the READY state rather than starting by itself.
+// With the playlist empty the player, and its dock, go away.
+export function removeCurrent(): void {
+   const a = active()
+   const q = queue()
+   const i = cursorIndex()
+   if (a) a.media.pause()
+   const wasAdopted = !!a && !el.content.contains(a.media)
+   batch(() => {
+      if (a) release()
+      if (wasAdopted) discardAdopted()
+      if (i >= 0) {
+         const rest = [...q.slice(0, i), ...q.slice(i + 1)]
+         queue.set(rest)
+         // The follower becomes current — READY, not playing.
+         const follower = rest[i] ?? null
+         cursor.set(follower ? entryKey(follower) : null)
+      }
+   })
+   // The blob still names the removed episode as its head; rewrite it from
+   // what is left, or a reload would bring the episode back.
+   save()
+}
+
 // The title button: jump to the article that owns the episode (or, in the READY
 // state, the queue head's).
 export function openOwner(): void {
-   const a = active() ?? queue()[0]
+   const a = active() ?? queue()[cursorIndex()] ?? queue()[0]
    if (a) deps().openArticle(a.mid, a.chron)
 }
 
@@ -505,13 +547,40 @@ export function restorePersisted(): void {
    const store = data.activeStore()
    const saved = readSaved(store)
    if (!saved) return
-   // The queue half first — every entry validated by readSaved (localStorage is
-   // untrusted input), invalid ones dropped.
-   if (saved.queue) quietly(() => queue.set(saved.queue as QueueEntry[]))
+   // The playlist half first — every entry validated by readSaved
+   // (localStorage is untrusted input), invalid ones dropped.
+   const list: QueueEntry[] = saved.queue ? [...saved.queue] : []
    const head = saved.head
+   if (head) {
+      // The interrupted episode is a playlist member. A blob from before the
+      // playlist kept played entries held it OUTSIDE the list — put it back at
+      // the front, so it is not lost to the new model.
+      const hk = entryKey({ mid: store.mid, chron: head.chron, index: head.index })
+      if (!list.some((e) => entryKey(e) === hk))
+         list.unshift({
+            mid: store.mid,
+            chron: head.chron,
+            index: head.index,
+            src: head.src,
+            kind: head.kind,
+            title: head.title,
+            feedId: head.feedId,
+         })
+   }
+   const c = head
+      ? entryKey({ mid: store.mid, chron: head.chron, index: head.index })
+      : saved.cursor !== null && list[saved.cursor]
+        ? entryKey(list[saved.cursor])
+        : null
+   quietly(() =>
+      batch(() => {
+         queue.set(list)
+         cursor.set(c)
+      }),
+   )
    if (!head) {
-      // No restorable active half. A queue alone still presents the player (the
-      // READY state); nothing at all clears the entry, as before.
+      // No restorable active half. A playlist alone still presents the player
+      // (the READY state, on its saved cursor); nothing at all clears the blob.
       if (!queue().length) return clearSaved(store.mid)
       return save()
    }

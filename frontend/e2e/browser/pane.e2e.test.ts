@@ -257,10 +257,11 @@ describe("browser: split pane width + visibility", () => {
       await page.setViewport({ width: 1024, height: 900 })
       await page.goto(`${baseUrl}#!`, { waitUntil: "load" })
       await waitList(page)
-      // Raise the player: [hidden] is the only thing keeping it off screen, and
+      // Raise the snackbar: [hidden] is the only thing keeping it off screen, and
       // what is under test is where the box lands once it exists (the same move
-      // split.e2e.test.ts makes for the left-edge rules).
-      await page.evaluate(() => document.querySelector(".srr-player")!.removeAttribute("hidden"))
+      // split.e2e.test.ts makes for the left-edge rules). The snackbar, not the
+      // player: the player is a whole view over the window now, not a lane.
+      await page.evaluate(() => document.querySelector(".srr-snackbar")!.removeAttribute("hidden"))
 
       const m = await page.evaluate(() => {
          const b = (sel: string) => {
@@ -268,7 +269,7 @@ describe("browser: split pane width + visibility", () => {
             const r = n.getBoundingClientRect()
             return { left: r.left, right: r.right, width: r.width }
          }
-         return { pane: b(".srr-list"), col: b(".srr-container"), player: b(".srr-player") }
+         return { pane: b(".srr-list"), col: b(".srr-container"), lane: b(".srr-snackbar") }
       })
       // The measure must not be pinned against the pane: the page padding alone
       // gives 24px, and this asserts the column clamp adds a real gutter on top.
@@ -277,8 +278,14 @@ describe("browser: split pane width + visibility", () => {
       // percentages against the viewport, so without a rule of its own the bar
       // spans pane→edge: wider than the column it controls and touching the
       // pane's border.
-      expect(m.player.left, "player left vs column").toBeCloseTo(m.col.left, 0)
-      expect(m.player.right, "player right vs column").toBeCloseTo(m.col.right, 0)
+      // The snackbar is sized to its text, so it holds the measure by being
+      // CENTRED on the column and inside it, never spanning pane→edge.
+      expect((m.lane.left + m.lane.right) / 2, "snackbar centre vs column").toBeCloseTo(
+         (m.col.left + m.col.right) / 2,
+         0,
+      )
+      expect(m.lane.left, "snackbar inside the column (left)").toBeGreaterThanOrEqual(m.col.left - 1)
+      expect(m.lane.right, "snackbar inside the column (right)").toBeLessThanOrEqual(m.col.right + 1)
    })
 
    it("spans the window and lands each segment over its own pane", async () => {
