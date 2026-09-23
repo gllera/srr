@@ -62,6 +62,10 @@ export const el = {
    playerRate: q<HTMLButtonElement>(".srr-player-rate"),
    playerTime: q(".srr-player-time"),
    playerNext: q<HTMLButtonElement>(".srr-player-next"),
-   playerQueue: q<HTMLButtonElement>(".srr-player-queue"),
+   playerDuration: q(".srr-player-duration"),
+   playerList: q(".srr-player-list"),
+   playerCount: q(".srr-player-count"),
+   playerEmpty: q(".srr-player-empty"),
    playerClose: q<HTMLButtonElement>(".srr-player-close"),
+   playerFab: q<HTMLButtonElement>(".srr-player-fab"),
 }

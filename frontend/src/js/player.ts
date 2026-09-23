@@ -18,12 +18,11 @@
 //
 //   * RELOCATION is about SURVIVAL. The element moves only when its article
 //     stops being rendered, and moves back when you return to it.
-//   * THE BAR is about CONTROL. It shows whenever media is active and you
-//     cannot see it — either its article is not rendered, or it IS rendered but
-//     scrolled off-screen (the show-notes case: hit play, scroll down, the
-//     transport comes with you). The element does NOT relocate on scroll, which
-//     would make it leap out of the article under your eyes; only the bar
-//     appears, and its controls target the live element wherever it lives.
+//   * THE BAR is about CONTROL. It shows whenever an episode is active (or a
+//     queue is waiting), whatever article is on screen — the episode's own
+//     included — and its controls target the live element wherever it lives.
+//     The element never relocates while its article is rendered, so it does
+//     not leap out of the prose; only the bar follows you.
 //
 // The module imports neither `nav` nor `reader`: reader.ts imports THIS, and
 // what this needs from the router arrives through PlayerDeps — the same shape
@@ -104,16 +103,17 @@ const QUEUE_MAX = 50
 // previoustrack past this many seconds restarts the episode instead.
 const PREV_RESTART_S = 3
 
-// Whether the active element's own article is currently on screen and in view.
-// Only meaningful while the element sits in the content host; an adopted element
-// is by definition not visible in an article, so the bar always shows for it.
-let inView = false
-let observer: IntersectionObserver | null = null
-
 // Whether the active episode is stalled waiting on the network. Between play()
 // and audio actually flowing the bar otherwise looks frozen — the "is it
 // broken?" moment on a slow connection. Rendered as a spinner on the toggle.
 let buffering = false
+
+// Whether the bar is UNFOLDED. It starts folded — just the corner button that
+// says something is playing — and only the button unfolds it: the transport is
+// there when asked for, not whenever an episode leaves the screen. Deliberately
+// not persisted: every boot starts minimal, and ✕ folds it again for the next
+// episode.
+let unfolded = false
 
 // The speed ladder the rate button cycles. 1 is first so the cycle returns to
 // normal rather than dead-ending at 2x.
@@ -286,35 +286,52 @@ function isGifIdiom(m: HTMLMediaElement): boolean {
    return m.autoplay || (m.muted && m.loop)
 }
 
-// A `play` event claims its element as the active episode. `play` does not
-// bubble, but non-bubbling events still traverse the CAPTURE phase — the same
-// property fmt.ts's collapseBrokenMedia relies on for `error` — so one capture
-// listener on the document sees every media element in the page.
+// The player controls its QUEUE and nothing else (user call 2026-09-23): an
+// in-article element played directly stays the article's own — native controls,
+// no bar, and it stops when its article leaves the screen, as any page media
+// does. What a `play` event CAN still claim is an element whose episode is
+// queued: pressing play on it is "play that one from the playlist now".
+// `play` does not bubble, but non-bubbling events still traverse the CAPTURE
+// phase — the same property fmt.ts's collapseBrokenMedia relies on for
+// `error` — so one capture listener on the document sees every media element.
 function onPlay(e: Event): void {
    const m = e.target
    if (!(m instanceof HTMLMediaElement)) return
    if (active && active.media === m) {
       // Re-play of the episode we already own: nothing to re-derive.
+      pauseOthers(m)
       syncMediaSession()
       return syncBar()
    }
-   // The GIF idiom fires `play` on its own the moment it renders, so claiming
-   // it would let a decorative animation hijack the transport from a real episode.
+   // The GIF idiom fires `play` on its own the moment it renders, so it must
+   // neither claim nor silence anything — a decoration is not a second voice.
    if (isGifIdiom(m)) return
-   if (!el.content.contains(m) || !mounted) return
-   const index = mediaList(el.content).indexOf(m)
-   if (index < 0) return
+   const index = mounted && el.content.contains(m) ? mediaList(el.content).indexOf(m) : -1
+   if (!mounted || index < 0 || queuePos(mounted.mid, mounted.chron, index) < 0) {
+      // Outside media: not ours to control, but one thing audible at a time —
+      // the episode steps aside (paused, still claimed, one tap to resume).
+      if (active && !active.media.paused) active.media.pause()
+      return
+   }
    releaseOutgoing()
    active = { ...mounted, index, media: m }
-   // A manually played element that was sitting in the queue is now the active
-   // episode; leaving it queued would replay it later.
+   pauseOthers(m)
+   // The claimed entry is now the active episode; leaving it queued would
+   // replay it later.
    dropQueued(mounted.mid, mounted.chron, index)
    const rate = readRate()
    // Apply the device's standing speed preference, but only when it was actually
    // set: at the default 1 we leave the element alone so a rate FEB2 restored
    // (or one set through native in-content controls) is not silently reset.
    if (rate !== 1) m.playbackRate = rate
-   finishClaim(m, true)
+   finishClaim(m)
+}
+
+// The other half of "one thing audible at a time": the episode starting pauses
+// any outside media still playing (never the GIF idiom — decorations loop on).
+function pauseOthers(m: HTMLMediaElement): void {
+   for (const o of document.querySelectorAll<HTMLMediaElement>("audio, video"))
+      if (o !== m && !o.paused && !isGifIdiom(o)) o.pause()
 }
 
 // One episode at a time — the module's central invariant, in one place. Hand the
@@ -329,12 +346,10 @@ function releaseOutgoing(): void {
 }
 
 // The tail every claim ends with, whatever route reached it (a manual in-content
-// play, a queue entry, a boot restore in place or detached). `observeInView` is
-// for a LIVE element only — a detached one built in the bar host has no article
-// scroll position to watch. `active` must already be assigned: save() reads it.
-function finishClaim(m: HTMLMediaElement, observeInView: boolean): void {
+// play, a queue entry, a boot restore in place or detached). `active` must
+// already be assigned: save() reads it.
+function finishClaim(m: HTMLMediaElement): void {
    bindMedia(m)
-   if (observeInView) watch(m)
    bindMediaSession()
    syncMediaSession()
    syncBar()
@@ -351,9 +366,7 @@ function release(): void {
       rate: m.playbackRate,
    })
    unbindMedia(m)
-   observer?.unobserve(m)
    active = null
-   inView = false
    buffering = false
    if (retryTimer) {
       clearTimeout(retryTimer)
@@ -487,22 +500,6 @@ function onError(): void {
    dismissActive()
 }
 
-// The off-screen rule. Only the in-content case needs observing; while adopted
-// the element is not in an article at all.
-function watch(m: HTMLMediaElement): void {
-   inView = true
-   if (typeof IntersectionObserver !== "function") return
-   observer ??= new IntersectionObserver((entries) => {
-      for (const entry of entries) {
-         if (active && entry.target === active.media) {
-            inView = entry.isIntersecting
-            syncBar()
-         }
-      }
-   })
-   observer.observe(m)
-}
-
 // ---------------------------------------------------------------------------
 // Playlist — the "up next" queue
 // ---------------------------------------------------------------------------
@@ -531,11 +528,11 @@ function dropQueued(mid: string, chron: number, index: number): void {
 }
 
 // Every queue mutation funnels here: the chips, the lock-screen buttons, the
-// open panel, the count button and the persisted blob must all tell one story.
+// Up next list, its count and the persisted blob must all tell one story.
 function afterQueueChange(): void {
    syncChips()
    syncQueueHandlers()
-   renderPanel()
+   renderList()
    save()
    syncBar()
 }
@@ -577,7 +574,7 @@ function playEntry(entry: QueueEntry, autoplay: boolean): boolean {
       feedId: entry.feedId,
       media: m,
    }
-   finishClaim(m, !!live)
+   finishClaim(m)
    if (autoplay) void play()
    return true
 }
@@ -661,7 +658,7 @@ function queuePos(mid: string, chron: number, index: number): number {
 // One chip, a glyph vocabulary: "+" add, the entry's 1-based queue POSITION
 // while queued (every chip re-derives after every queue mutation via syncChips,
 // so the numeral can never lie), and "≡" when the queue is full — the door
-// state: toggleQueued opens the panel to prune instead of dead-ending, so the
+// state: toggleQueued unfolds the player (its Up next list) to prune instead of dead-ending, so the
 // cap never reads as a broken button. aria-pressed stays the toggle truth.
 function setChipState(chip: HTMLButtonElement, pos: number): void {
    const door = pos < 0 && queue.length >= QUEUE_MAX
@@ -701,11 +698,11 @@ function pulseOnce(n: Element | null): void {
 
 // The chip's long-press menu — the power layer over the tap (append): "Play
 // next" puts the enclosure at the HEAD of the queue (the podcast verb the
-// panel's reorder arrows only reach one step at a time; a queued entry MOVES,
-// never duplicates), "Play now" plays it outright through the element's own
-// play() — the capture-phase claim then consumes any queued copy, identical to
-// pressing play on the element, which also makes it the door state's escape
-// hatch (it never grows the queue, so it stays live at the cap). Items derive
+// list's reorder arrows only reach one step at a time; a queued entry MOVES,
+// never duplicates), "Play now" does the same and then advances onto it at
+// once — through the QUEUE, since the player plays nothing else; the entry is
+// consumed on the same tick, so it never grows the queue and stays the door
+// state's escape hatch at the cap. Items derive
 // at open and RE-CHECK at action: showContextMenu outlives this tick, and an
 // auto-advance or a navigation can move the queue (or the article) under an
 // open menu.
@@ -715,45 +712,37 @@ function chipMenuItems(index: number): MenuItem[] {
    if (!m?.getAttribute("src")) return []
    const { mid, chron, title, feedId } = mounted
    const stale = (): boolean => !mounted || mounted.mid !== mid || mounted.chron !== chron
+   // Put the enclosure at the queue's head (a queued one MOVES). `now` lets
+   // it past the cap: advance() consumes it on the same tick.
+   const toHead = (now: boolean): { media: HTMLMediaElement; added: boolean } | null => {
+      if (stale()) return null
+      const media = mediaList(el.content)[index]
+      const src = media?.getAttribute("src") ?? ""
+      if (!src) return null
+      const pos = queuePos(mid, chron, index)
+      if (pos < 0 && queue.length >= QUEUE_MAX && !now) return null
+      if (pos >= 0) queue.splice(pos, 1)
+      queue.unshift({ mid, chron, index, src, kind: media.tagName === "VIDEO" ? "video" : "audio", title, feedId })
+      return { media, added: pos < 0 }
+   }
    return [
       {
          label: "Play next",
          // A NEW head entry would breach the cap; a queued one just moves.
          disabled: queuePos(mid, chron, index) < 0 && queue.length >= QUEUE_MAX,
          action: () => {
-            if (stale()) return
-            const media = mediaList(el.content)[index]
-            const src = media?.getAttribute("src") ?? ""
-            if (!src) return
-            const pos = queuePos(mid, chron, index)
-            if (pos < 0 && queue.length >= QUEUE_MAX) return
-            if (pos >= 0) queue.splice(pos, 1)
-            queue.unshift({
-               mid,
-               chron,
-               index,
-               src,
-               kind: media.tagName === "VIDEO" ? "video" : "audio",
-               title,
-               feedId,
-            })
+            const r = toHead(false)
+            if (!r) return
             afterQueueChange()
-            pulseOnce(media.nextElementSibling)
-            if (pos < 0) pulseOnce(el.playerQueue)
+            if (startIfIdle()) return
+            pulseOnce(r.media.nextElementSibling)
+            if (r.added) pulseOnce(unfolded ? el.playerCount : el.playerFab)
          },
       },
       {
          label: "Play now",
          action: () => {
-            if (stale()) return
-            // `void` discards the promise but not its REJECTION: play() rejects
-            // on media whose bytes never arrive (and on an autoplay refusal),
-            // which surfaced as an unhandled rejection in the console. The
-            // element's own `error` handling owns the user-facing recovery, so
-            // the catch here is deliberately silent.
-            mediaList(el.content)
-               [index]?.play()
-               .catch(() => {})
+            if (toHead(true)) advance(true)
          },
       },
    ]
@@ -832,7 +821,7 @@ function pairAnchor(m: HTMLMediaElement, chip: HTMLElement, index: number): void
    chip.style.setProperty("position-anchor", name)
 }
 
-// Re-derive every rendered chip after a queue mutation (a panel removal, a
+// Re-derive every rendered chip after a queue mutation (a list removal, a
 // consume-on-play, ✕) so a pressed state never lies about membership.
 function syncChips(): void {
    if (!mounted) return
@@ -845,63 +834,51 @@ function syncChips(): void {
    }
 }
 
+// The FIRST entry into an idle player starts playing it (user call
+// 2026-09-23): with nothing claimed and the queue just gone from empty to one,
+// the add IS the "play this". The tap is a user gesture, so autoplay policy has
+// nothing to refuse. Anything added behind an episode (active or already
+// queued, e.g. a READY queue restored at boot) just waits its turn.
+function startIfIdle(): boolean {
+   if (active || queue.length !== 1) return false
+   advance(true)
+   return true
+}
+
 function toggleQueued(index: number): void {
    if (!mounted) return
    const { mid, chron, title, feedId } = mounted
    if (queuePos(mid, chron, index) >= 0) return dropQueued(mid, chron, index)
-   // The cap as a DOOR: a full queue opens the panel to prune instead of
-   // silently eating the tap (the chip already reads ≡ / "Playlist full").
-   // Edge accepted: with the bar hidden — an active on-screen episode — the
-   // panel (its child) can't show, and the tap stays a no-op like before.
-   if (queue.length >= QUEUE_MAX) return openPanel()
+   // The cap as a DOOR: a full queue unfolds the player, whose Up next list
+   // is where to prune, instead of silently eating the tap (the chip already
+   // reads ≡ / "Playlist full").
+   if (queue.length >= QUEUE_MAX) return setUnfolded(true)
    const m = mediaList(el.content)[index]
    const src = m?.getAttribute("src") ?? ""
    if (!src) return
    queue.push({ mid, chron, index, src, kind: m.tagName === "VIDEO" ? "video" : "audio", title, feedId })
    afterQueueChange()
-   // Feedback at both ends of the gesture: the chip pops under the finger, the
-   // bar's ≡ count pulses where the episode went.
+   if (startIfIdle()) return
+   // Feedback at both ends of the gesture: the chip pops under the finger, and
+   // where the episode went pulses — the Up next count, or the fold button.
    pulseOnce(m.nextElementSibling)
-   pulseOnce(el.playerQueue)
+   pulseOnce(unfolded ? el.playerCount : el.playerFab)
 }
 
 // ---------------------------------------------------------------------------
-// Queue panel
+// Up next list
 // ---------------------------------------------------------------------------
 
-let panel: HTMLElement | null = null
-
-function buildPanel(): HTMLElement {
-   const p = document.createElement("div")
-   p.className = "srr-player-panel"
-   p.setAttribute("role", "list")
-   p.setAttribute("aria-label", "Playlist")
-   p.tabIndex = -1
-   p.hidden = true
-   // Focused chrome: no key pressed over the panel may reach the global keymap
-   // (an unguarded 'd' would walk articles and re-render the surface under the
-   // open panel — the lightbox rule, scoped to a popover).
-   p.addEventListener("keydown", (e) => {
-      e.stopPropagation()
-      if (e.key === "Escape") {
-         e.preventDefault()
-         closePanel(true)
-      }
-   })
-   // A child of the bar: it inherits the scrub-gesture guard and the bar's
-   // hidden state, and positions above it with plain CSS.
-   el.player.appendChild(p)
-   return p
-}
-
-function renderPanel(): void {
-   if (!panel || panel.hidden) return
-   if (!queue.length) return closePanel()
-   panel.replaceChildren(
+// The Up next list is part of the full player, always rendered (not a popover):
+// the queue is the player's whole subject, so it is never one tap away.
+function renderList(): void {
+   el.playerCount.textContent = queue.length ? String(queue.length) : ""
+   el.playerEmpty.hidden = queue.length > 0
+   el.playerList.replaceChildren(
       ...queue.map((entry, i) => {
          const row = document.createElement("div")
          row.setAttribute("role", "listitem")
-         row.className = "srr-player-panel-row"
+         row.className = "srr-player-row"
          const play = document.createElement("button")
          play.type = "button"
          play.className = "srr-player-row-play"
@@ -916,9 +893,9 @@ function renderPanel(): void {
          play.setAttribute("aria-label", `Play now — ${entryLabel(entry.title)} · ${data.feedTitle(entry.feedId)}`)
          play.addEventListener("click", () => {
             queue = queue.filter((e) => e !== entry)
-            closePanel(true)
             playEntry(entry, true) // a false return just drops the dead entry
             afterQueueChange()
+            el.playerToggle.focus()
          })
          const remove = btn("srr-player-row-remove", `Remove from playlist — ${entryLabel(entry.title)}`, "×", () => {
             queue = queue.filter((e) => e !== entry)
@@ -951,16 +928,16 @@ function moveQueued(entry: QueueEntry, delta: -1 | 1): void {
    queue.splice(i, 1)
    queue.splice(j, 0, entry)
    afterQueueChange()
-   // The panel just re-rendered under the press: keep the keyboard on the row
+   // The list just re-rendered under the press: keep the keyboard on the row
    // that moved — the same-direction handle so repeated presses keep walking,
    // its opposite when the row just hit a dead end.
-   const row = panel?.querySelectorAll(".srr-player-panel-row")[j]
+   const row = el.playerList.querySelectorAll(".srr-player-row")[j]
    const same = row?.querySelector<HTMLButtonElement>(delta < 0 ? ".srr-player-row-up" : ".srr-player-row-down")
    if (same && !same.disabled) same.focus()
    else row?.querySelector<HTMLButtonElement>(delta < 0 ? ".srr-player-row-down" : ".srr-player-row-up")?.focus()
 }
 
-// The panel rows' swipe-to-remove. LOCAL touch handling on purpose, not a
+// The Up next rows' swipe-to-remove. LOCAL touch handling on purpose, not a
 // gestures.ts registration: the document machine declines any touch starting
 // inside .srr-player (the scrubber guard), so it can never reach these rows —
 // and that is right, a drag here must never read as a reader page turn. The
@@ -1002,7 +979,7 @@ function attachRowSwipe(row: HTMLElement, entry: QueueEntry): void {
          mode = "drag"
          row.style.transition = "none"
       }
-      // An engaged swipe owns the finger — the panel must not scroll under it.
+      // An engaged swipe owns the finger — the list must not scroll under it.
       e.preventDefault()
       row.style.transform = `translateX(${dx}px)`
    })
@@ -1034,32 +1011,14 @@ function attachRowSwipe(row: HTMLElement, entry: QueueEntry): void {
    )
 }
 
-function onOutsidePress(e: Event): void {
-   const t = e.target as Node
-   if (panel && !panel.hidden && !panel.contains(t) && !el.playerQueue.contains(t)) closePanel()
-}
-
-function openPanel(): void {
-   if (!queue.length) return
-   panel ??= buildPanel()
-   panel.hidden = false
-   el.playerQueue.setAttribute("aria-expanded", "true")
-   renderPanel()
-   document.addEventListener("pointerdown", onOutsidePress, true)
-   panel.focus()
-}
-
-function closePanel(refocus = false): void {
-   if (!panel || panel.hidden) return
-   panel.hidden = true
-   el.playerQueue.setAttribute("aria-expanded", "false")
-   document.removeEventListener("pointerdown", onOutsidePress, true)
-   if (refocus) el.playerQueue.focus()
-}
-
-function togglePanel(): void {
-   if (panel && !panel.hidden) closePanel(true)
-   else openPanel()
+// Fold / unfold the full player. Folding with focus inside hands it to the
+// fold button, so the keyboard never lands on a now-invisible control.
+function setUnfolded(open: boolean): void {
+   if (unfolded === open) return
+   unfolded = open
+   const f = document.activeElement
+   if (!open && f && f !== el.playerFab && el.player.contains(f)) el.playerFab.focus()
+   syncBar()
 }
 
 // ---------------------------------------------------------------------------
@@ -1088,8 +1047,6 @@ export function adoptFromContent(): void {
    // Custom chrome drives it in the bar; fmt.ts's forced `controls` would render
    // a full native widget inside a 3rem-tall strip.
    m.removeAttribute("controls")
-   observer?.unobserve(m)
-   inView = false
    syncBar()
 }
 
@@ -1123,7 +1080,6 @@ export function rehomeInto(mid: string, chron: number): void {
       if (!active.media.hasAttribute(a.name)) active.media.setAttribute(a.name, a.value)
    }
    active.media.setAttribute("controls", "")
-   watch(active.media)
    syncBar()
 }
 
@@ -1198,10 +1154,10 @@ function close(): void {
    const wasAdopted = active !== null && !el.content.contains(active.media)
    queue = []
    lastPlayed = null
+   unfolded = false
    release()
    clearSaved(mid)
    if (wasAdopted) discardAdopted()
-   closePanel()
    syncChips()
    syncQueueHandlers()
    syncMediaSession()
@@ -1226,7 +1182,8 @@ function syncTime(): void {
    if (!active) return
    const m = active.media
    const dur = m.duration
-   el.playerTime.textContent = Number.isFinite(dur) ? `${clock(m.currentTime)} / ${clock(dur)}` : clock(m.currentTime)
+   el.playerTime.textContent = clock(m.currentTime)
+   el.playerDuration.textContent = Number.isFinite(dur) ? clock(dur) : ""
    const pct = Number.isFinite(dur) && dur > 0 ? (m.currentTime / dur) * 100 : 0
    el.playerSeekFill.style.width = `${pct}%`
    el.playerSeek.setAttribute("aria-valuemax", String(Number.isFinite(dur) ? Math.floor(dur) : 0))
@@ -1234,15 +1191,13 @@ function syncTime(): void {
    el.playerSeek.setAttribute("aria-valuetext", clock(m.currentTime))
 }
 
-// The bar is shown when there IS an episode and you cannot see it playing: it is
-// adopted (its article is not rendered), or the article is hidden behind the list
-// surface, or it is scrolled out of view. With nothing claimed but a queue built
-// up, it shows in the READY state instead — a queue must be visible to be usable
-// at all, and ✕ is how it goes away.
+// The bar is shown whenever there IS an episode — whatever article is on screen,
+// the episode's own included (user call 2026-09-23: the player ignores what you
+// are reading; it used to hide while its element was on screen and in view).
+// With nothing claimed but a queue built up, it shows in the READY state instead
+// — a queue must be visible to be usable at all, and ✕ is how it goes away.
 function barVisible(): boolean {
-   if (!active) return queue.length > 0
-   const adopted = !el.content.contains(active.media)
-   return adopted || !!el.article.hidden || !inView
+   return active !== null || queue.length > 0
 }
 
 // The bar's identity/transport controls, one painter for both bar states: the
@@ -1257,6 +1212,9 @@ function paintBar(kind: "audio" | "video", feedId: number, title: string, paused
    el.playerToggle.setAttribute("aria-label", paused ? "Play" : "Pause")
    el.playerToggle.setAttribute("aria-pressed", String(!paused))
    el.playerToggle.classList.toggle("srr-player-playing", !paused)
+   // The folded button's bars move while it plays — the one signal left when
+   // the transport itself is folded away.
+   el.player.classList.toggle("srr-player-on", !paused)
    const rate = readRate()
    el.playerRate.textContent = `${rate}×`
    el.playerRate.setAttribute("aria-label", `Playback speed — ${rate}×`)
@@ -1267,19 +1225,21 @@ function syncBar(): void {
    el.player.hidden = !show
    // Drives the container's bottom padding so the last paragraph clears the bar.
    document.body.classList.toggle("srr-playing", show)
-   if (!show) closePanel()
+   // Folded is a class, never the `hidden` attribute: the bar may be holding a
+   // relocated <video>, which must stay rendered (see .srr-player-media).
+   el.player.classList.toggle("srr-player-folded", !unfolded)
+   el.playerFab.setAttribute("aria-expanded", String(unfolded))
+   const fabLabel = unfolded ? "Hide player" : "Show player"
+   el.playerFab.setAttribute("aria-label", fabLabel)
+   el.playerFab.title = fabLabel
    // The buffering spinner replaces the toggle glyph; aria-busy is the same
    // state for assistive tech (the accessible name stays Play/Pause).
    const stalled = buffering && active !== null
    el.playerToggle.classList.toggle("srr-player-buffering", stalled)
    el.playerToggle.setAttribute("aria-busy", String(stalled))
-   // The queue chrome lives in both bar states.
-   el.playerQueue.hidden = !queue.length
+   // » needs something to skip to (the Up next list keeps itself in step
+   // through afterQueueChange).
    el.playerNext.hidden = !queue.length
-   if (queue.length) {
-      el.playerQueue.textContent = `≡ ${queue.length}`
-      el.playerQueue.setAttribute("aria-label", `Playlist — ${queue.length} queued`)
-   }
    if (!active) {
       if (!queue.length) return
       // READY state: nothing claimed, something queued. The bar presents the
@@ -1289,6 +1249,7 @@ function syncBar(): void {
       const q0 = queue[0]
       paintBar(q0.kind, q0.feedId, q0.title, true)
       el.playerTime.textContent = ""
+      el.playerDuration.textContent = ""
       el.playerSeekFill.style.width = "0%"
       return
    }
@@ -1397,8 +1358,19 @@ export function setup(deps: PlayerDeps): void {
       if (active) d.openArticle(active.mid, active.chron)
       else if (queue.length) d.openArticle(queue[0].mid, queue[0].chron)
    })
-   el.playerQueue.addEventListener("click", togglePanel)
    el.playerNext.addEventListener("click", () => advance(true))
+   el.playerFab.addEventListener("click", () => setUnfolded(!unfolded))
+   // Escape folds the unfolded player — and is claimed, so it does not also
+   // drop the reader to the list. Every other key still reaches the global
+   // keymap: the player is a control you read beside, not a modal (a modal
+   // owns every key — lightbox.ts — a control only its own).
+   el.player.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !unfolded) return
+      e.preventDefault()
+      e.stopPropagation()
+      setUnfolded(false)
+   })
+   renderList()
    bindSeek()
    // A reload is the one exit we can still write through.
    window.addEventListener("pagehide", save)
@@ -1452,6 +1424,7 @@ export function restorePersisted(): void {
          }))
       syncChips()
       syncQueueHandlers()
+      renderList()
    }
    const src = typeof saved.src === "string" ? safeSrc(saved.src, store.base) : null
    if (!src || !(saved.chron >= 0) || !(saved.time > 0)) {
@@ -1492,7 +1465,7 @@ export function restorePersisted(): void {
       if (live) {
          active = { ...mounted, index, media: live }
          seek(live)
-         finishClaim(live, true)
+         finishClaim(live)
          return
       }
    }
@@ -1507,7 +1480,7 @@ export function restorePersisted(): void {
    seek(m)
    el.playerMedia.replaceChildren(m)
    active = { mid: store.mid, chron: saved.chron, index, title, feedId, media: m }
-   finishClaim(m, false)
+   finishClaim(m)
 }
 
 export function isActive(): boolean {

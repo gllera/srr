@@ -507,12 +507,13 @@ video {
    background: var(--hover);
 }
 
-/* Podcast mini-player (player.ts) — a second console row parked on the
-   toolbar's top edge, so player + toolbar read as ONE piece of bottom chrome
-   (same 680px column, same --bg fill, same hairline) rather than a card
-   hovering over it. It hosts the article's RELOCATED media element (see the
-   index.html comment), so the transport survives prev/next and follows you
-   down the show notes.
+/* Podcast player (player.ts). One element, two states. FOLDED (the default,
+   .srr-player-folded below) shows only the corner button. UNFOLDED it is the
+   FULL player: a sheet parked on the toolbar's top edge, in the reading
+   column's width — the episode (a real frame when it is a video), a proper
+   scrubber with both clocks, the transport around a large play button, and
+   the Up next list, always listed. It hosts the article's RELOCATED media
+   element (see the index.html comment), so playback survives prev/next.
 
    The 3.35rem in the offsets below is the toolbar's own box — its 0.3rem
    padding either side of a 2.75rem tap target — plus the 1px hairline it draws
@@ -530,22 +531,26 @@ video {
       pinned search bar (5), below the picker overlay (10) and the
       lightbox/popups (1000). */
    z-index: var(--z-toolbar);
-   /* media · body · controls on one row. The body track is the only flexible
-      one (minmax(0,1fr) — a free-space fraction, never its content), so a long
-      episode title ellipsizes inside its column instead of pushing the
-      transport off the bar. */
+   /* Stacked: frame, identity + scrubber, transport, Up next (✕ floats in the
+      corner, so the scrubber keeps the sheet's full width). The one track is
+      minmax(0,1fr) — a free-space fraction, never its content — so a long
+      title wraps inside the sheet instead of widening it. */
    display: grid;
-   grid-template-columns: auto minmax(0, 1fr) auto;
-   align-items: center;
-   gap: 0.5rem;
-   /* A floor, not a fixed height: the lane offsets under body.srr-playing
-      below (and the container's 7.5rem clearance) are stated against ~4rem, and
-      min-height keeps the bar from ever clipping its two-line body if the
-      reader's text scales up. */
-   min-height: 4rem;
-   padding: 0.35rem 0.5rem;
+   grid-template-columns: minmax(0, 1fr);
+   grid-template-areas:
+      "media"
+      "body"
+      "keys"
+      "next";
+   gap: 0.25rem;
+   padding: 0.9rem 1rem 0.5rem;
    background: var(--bg);
-   border-top: 1px solid var(--faint);
+   border: 1px solid var(--faint);
+   border-bottom: none;
+   border-radius: calc(var(--radius) * 2) calc(var(--radius) * 2) 0 0;
+   /* A sheet over the prose, so it casts upward; the toolbar under it stays
+      flush (no border-bottom), which keeps player + toolbar one piece. */
+   box-shadow: 0 -10px 28px color-mix(in srgb, var(--fg) 9%, transparent);
    /* It is chrome: a long-press belongs to the scrub gesture (player.ts stops
       touchstart propagation so gestures.ts can't read it as prev/next), never
       to a text selection of the title. */
@@ -592,6 +597,115 @@ body.srr-toolbar-hidden .srr-player {
    padding-bottom: calc(0.35rem + env(safe-area-inset-bottom));
 }
 
+/* The fold. An active player starts FOLDED (player.ts toggles the class): the
+   sheet is hidden and only .srr-player-fab below shows — a corner circle
+   over the toolbar. visibility, never display:none: the bar may be holding a
+   relocated <video>, which has to stay rendered, and a visible child of a
+   visibility:hidden parent still paints — which is how the button shows while
+   its bar does not. `animation: none` here is also what replays the bar's
+   srr-player-in rise on every unfold (the property changing back restarts it). */
+.srr-player.srr-player-folded {
+   visibility: hidden;
+   animation: none;
+}
+/* Unfolded, the button is a handle on the sheet's top edge (its foot lands on
+   the sheet's border-top, which it paints over, so tab and sheet read as one
+   piece) wearing a fold-down chevron. */
+.srr-player-fab {
+   position: absolute;
+   right: 0.5rem;
+   bottom: calc(100% - 1px);
+   visibility: visible;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   width: 2.75rem;
+   height: 1.5rem;
+   padding: 0;
+   border: 1px solid var(--faint);
+   border-bottom: none;
+   border-radius: var(--radius) var(--radius) 0 0;
+   background: var(--bg);
+   color: var(--muted);
+   cursor: pointer;
+   &:hover {
+      color: var(--fg);
+   }
+   &::before {
+      content: "";
+      width: 0.45rem;
+      height: 0.45rem;
+      margin-top: -0.2rem;
+      border-right: 2px solid currentColor;
+      border-bottom: 2px solid currentColor;
+      transform: rotate(45deg);
+   }
+}
+/* Folded: a 44px circle sitting just above the toolbar at the column's right
+   edge, tinted with the playing feed's source color (the bar's data-src). */
+.srr-player-folded .srr-player-fab {
+   bottom: 0.5rem;
+   height: 2.75rem;
+   border-bottom: 1px solid var(--faint);
+   border-radius: 999px;
+   color: var(--src, var(--accent));
+   box-shadow: 0 1px 6px color-mix(in srgb, var(--fg) 14%, transparent);
+   &::before {
+      display: none;
+   }
+}
+/* The toolbar slid away and the bar rode down into its strip: clear the home
+   indicator the same way the bar's own padding does. */
+body.srr-toolbar-hidden .srr-player-folded .srr-player-fab {
+   bottom: calc(0.5rem + env(safe-area-inset-bottom));
+}
+/* Three level bars — "something is playing here", with no insider glyph.
+   Still while paused, moving while .srr-player-on (player.ts, = not paused). */
+.srr-player-eq {
+   display: none;
+   align-items: flex-end;
+   gap: 2px;
+   height: 0.9rem;
+   & span {
+      width: 3px;
+      height: 100%;
+      border-radius: 1px;
+      background: currentColor;
+      transform-origin: bottom;
+   }
+   & span:nth-child(1) {
+      transform: scaleY(0.45);
+   }
+   & span:nth-child(3) {
+      transform: scaleY(0.7);
+   }
+}
+.srr-player-folded .srr-player-eq {
+   display: flex;
+}
+.srr-player-on .srr-player-eq span {
+   animation: srr-player-eq 0.9s ease-in-out infinite alternate;
+   &:nth-child(2) {
+      animation-delay: -0.3s;
+   }
+   &:nth-child(3) {
+      animation-delay: -0.6s;
+   }
+}
+@keyframes srr-player-eq {
+   from {
+      transform: scaleY(0.3);
+   }
+   to {
+      transform: scaleY(1);
+   }
+}
+@media (prefers-reduced-motion: reduce) {
+   .srr-player-on .srr-player-eq span {
+      animation: none;
+   }
+}
+
 /* Chrome coexistence, part 1: the reading surface. body.srr-playing is set for
    exactly as long as the bar is up (player.ts syncBar), and it buys the last
    paragraph — and any scroll-into-view landing — clearance over BOTH rows of
@@ -617,40 +731,48 @@ body.srr-playing .srr-pin-progress {
 
 /* The media host. The live element lands in here with its `controls` stripped
    (rehomeInto puts them back — fmt.ts force-sets controls on in-content audio),
-   so the custom transport to its right is the only chrome.
+   so the transport below is the only chrome.
 
    Collapsed by default, which covers data-kind="audio" (an <audio> has no
-   useful visual — the transport drives it) AND an unset kind, which must not
-   reserve a frame either. Zero-width rather than display:none: the element has
-   to stay RENDERED where the transport can reach it, and a collapsed box costs
-   nothing. */
+   useful visual — the transport drives it), an unset kind, and a video still
+   claimed IN its article (the host is then empty). Zero-size rather than
+   display:none: the element has to stay RENDERED where the transport can
+   reach it, and a collapsed box costs nothing. */
 .srr-player-media {
+   grid-area: media;
    width: 0;
+   height: 0;
    overflow: hidden;
 }
-/* Video keeps a thumbnail-sized frame: 4rem on a 16/9 box, cover-cropped, so
-   any source ratio fills it without letterbox bars in a 4rem bar. */
-.srr-player[data-kind="video"] .srr-player-media {
-   width: 4rem;
+/* A video in the full player gets a real frame: the sheet's whole width at
+   16/9, letterboxed (contain) so nothing of the picture is cropped away, and
+   capped so the sheet never outgrows a phone screen. */
+.srr-player[data-kind="video"] .srr-player-media:not(:empty) {
+   width: 100%;
+   height: auto;
    aspect-ratio: 16 / 9;
+   max-height: 38vh;
+   margin-bottom: 0.5rem;
    border-radius: var(--radius);
+   background: #000;
 }
 .srr-player[data-kind="video"] .srr-player-media video {
    /* Undo the in-content video rule near the top of this file: its attr()
       aspect-ratio and 85vh cap belong to a full-column player, not to a frame
-      whose box the bar dictates. */
+      whose box the sheet dictates. */
    width: 100%;
    height: 100%;
    max-height: none;
    aspect-ratio: auto;
-   object-fit: cover;
+   object-fit: contain;
 }
 
-/* Body — the episode identity over its seek rail. */
+/* Body — the episode identity over the scrubber and its two clocks. */
 .srr-player-body {
+   grid-area: body;
    display: flex;
    flex-direction: column;
-   gap: 0.15rem;
+   gap: 0.55rem;
    min-width: 0;
 }
 /* The title is a button (it jumps to the article that owns the playing media),
@@ -659,8 +781,9 @@ body.srr-playing .srr-pin-progress {
    display: flex;
    flex-direction: column;
    align-items: flex-start;
+   gap: 0.2rem;
    min-width: 0;
-   padding: 0;
+   padding: 0 2.25rem 0 0;
    border: none;
    background: none;
    font: inherit;
@@ -691,15 +814,18 @@ body.srr-playing .srr-pin-progress {
    text-overflow: ellipsis;
    white-space: nowrap;
 }
+/* The episode's name is the sheet's headline — the reader title's weight at
+   a step down, two lines before it clamps, never cut to a single line. */
 .srr-player-name {
    max-width: 100%;
-   font-size: 0.85rem;
-   font-weight: 600;
+   font-size: var(--text-lg);
+   font-weight: 700;
    line-height: 1.25;
    color: var(--fg);
    overflow: hidden;
-   text-overflow: ellipsis;
-   white-space: nowrap;
+   display: -webkit-box;
+   -webkit-line-clamp: 2;
+   -webkit-box-orient: vertical;
 }
 
 /* The seek rail — a 4px line with a thumb-sized hit area. content-box sizing is
@@ -711,7 +837,8 @@ body.srr-playing .srr-pin-progress {
 .srr-player-seek {
    box-sizing: content-box;
    height: 4px;
-   padding: 0.35rem 0;
+   padding: 0.45rem 0;
+   border-radius: 2px;
    background: var(--faint);
    background-clip: content-box;
    cursor: pointer;
@@ -728,38 +855,54 @@ body.srr-playing .srr-pin-progress {
 .srr-player-seek-fill {
    width: 0;
    height: 100%;
+   border-radius: 2px;
    background: var(--accent);
+}
+/* Elapsed at the left, length at the right — under the rail's two ends, where
+   they read as its scale. Metadata: muted, tabular, never a tap target. */
+.srr-player-times {
+   display: flex;
+   justify-content: space-between;
+   margin-top: -0.35rem;
+   font-family: var(--font-mono);
+   font-size: 0.68rem;
+   font-variant-numeric: tabular-nums;
+   line-height: 1.2;
+   color: var(--muted);
 }
 
 /* Controls — the transport, in the toolbar's icon-console voice: square-ish tap
    targets, mono labels, the play/pause toggle emphasized as the accent pill
    (the same "primary action" language the toolbar's next button speaks). */
 .srr-player-controls {
+   grid-area: keys;
    display: flex;
    align-items: center;
-   gap: 0.15rem;
+   justify-content: center;
+   gap: 0.9rem;
+   padding: 0.35rem 0 0.6rem;
 }
-/* player.ts drives » and the ≡ N chip with the `hidden` attribute, and the
-   display rule below would silently defeat the UA's [hidden]{display:none}
-   (author origin wins — the same cascade trap .srr-player[hidden] restates
-   above). This restatement is what actually blanks the playlist chrome while
-   the queue is empty; without it both buttons paint on every bar. */
+/* player.ts hides » with the `hidden` attribute while nothing is queued. It
+   keeps its SLOT (visibility, not display) so the play button stays dead
+   centre, balanced by the speed key on the other side — and the restatement is
+   needed at all because the author `display` below would otherwise defeat the
+   UA's [hidden]{display:none} (the cascade trap .srr-player[hidden] restates). */
 .srr-player-controls button[hidden] {
-   display: none;
+   visibility: hidden;
 }
 .srr-player-controls button {
    display: inline-flex;
    align-items: center;
    justify-content: center;
    flex-shrink: 0;
-   min-width: 2.2rem;
-   min-height: 2.2rem;
+   min-width: 2.75rem;
+   min-height: 2.75rem;
    padding: 0 0.2rem;
    border: none;
    border-radius: var(--radius);
    background: none;
    font-family: var(--font-mono);
-   font-size: 0.72rem;
+   font-size: 0.8rem;
    font-weight: 600;
    font-variant-numeric: tabular-nums;
    letter-spacing: 0.02em;
@@ -784,8 +927,10 @@ body.srr-playing .srr-pin-progress {
    triangle; playing = two bars from a box with only left/right borders. The
    .srr-player-playing class player.ts sets alongside aria-pressed selects the
    same glyph, so the two can never disagree. */
+/* The one large thing in the sheet: play is what you came here for. */
 .srr-player-controls .srr-player-toggle {
-   min-width: 2.2rem;
+   min-width: 3.5rem;
+   min-height: 3.5rem;
    border-radius: 999px;
    background: var(--accent);
    color: var(--bg);
@@ -801,16 +946,16 @@ body.srr-playing .srr-pin-progress {
       /* Optically centered: the triangle's own mass sits right of its box. */
       margin-left: 0.1rem;
       border-style: solid;
-      border-width: 0.38rem 0 0.38rem 0.62rem;
+      border-width: 0.55rem 0 0.55rem 0.9rem;
       border-color: transparent transparent transparent currentColor;
    }
 }
 .srr-player-toggle[aria-pressed="true"]::before,
 .srr-player-toggle.srr-player-playing::before {
-   width: 0.6rem;
-   height: 0.78rem;
+   width: 0.85rem;
+   height: 1.1rem;
    margin-left: 0;
-   border-width: 0 0.2rem;
+   border-width: 0 0.28rem;
    border-color: currentColor;
 }
 /* Buffering (player.ts sets it with aria-busy): the glyph becomes a spinner
@@ -818,8 +963,8 @@ body.srr-playing .srr-pin-progress {
    the playing rule on purpose — equal specificity, and a stalled episode is
    usually mid-playback, so this must win the ::before. */
 .srr-player-toggle.srr-player-buffering::before {
-   width: 0.62rem;
-   height: 0.62rem;
+   width: 0.95rem;
+   height: 0.95rem;
    margin-left: 0;
    border: 0.14rem solid currentColor;
    border-top-color: transparent;
@@ -837,69 +982,74 @@ body.srr-playing .srr-pin-progress {
       animation: none;
    }
 }
-/* Elapsed / duration — metadata, so it stays muted and NOT a tap target; it
-   collapses entirely until the element has reported a duration. */
-.srr-player-time {
-   flex-shrink: 0;
-   padding: 0 0.15rem;
-   font-family: var(--font-mono);
-   font-size: 0.68rem;
-   font-variant-numeric: tabular-nums;
-   letter-spacing: 0.02em;
-   /* line-height 1.1, not the inherited 1.6: it is a one-line readout, and on a
-      phone it wraps under the transport keys where every px is the bar's
-      height. */
-   line-height: 1.1;
+/* ✕ sits in the sheet's top-right corner — closing is not part of the
+   transport. The title keeps clear of it (padding on .srr-player-title). */
+.srr-player-close {
+   position: absolute;
+   top: 0.4rem;
+   right: 0.4rem;
+   display: inline-flex;
+   align-items: center;
+   justify-content: center;
+   width: 2.5rem;
+   height: 2.5rem;
+   border: none;
+   border-radius: var(--radius);
+   background: none;
+   font-size: 1.3rem;
+   line-height: 1;
    color: var(--muted);
-   white-space: nowrap;
-   &:empty {
-      display: none;
-   }
-}
-.srr-player-controls .srr-player-close {
-   font-size: 1.05rem;
-   color: var(--muted);
-   &:hover:not(:disabled) {
+   cursor: pointer;
+   &:hover {
       color: var(--fg);
-   }
-}
-/* The playlist's bar chrome rides the shared controls styling above: » plays
-   the next queued entry, and the count button (player.ts fills "≡ N") opens
-   the queue panel. Both are hidden while the queue is empty, so a queue-less
-   bar is byte-identical to the pre-playlist one. */
-.srr-player-controls .srr-player-next {
-   font-size: 0.95rem;
-}
-.srr-player-controls .srr-player-queue {
-   color: var(--muted);
-   white-space: nowrap;
-   &:hover:not(:disabled) {
-      color: var(--fg);
-   }
-   &[aria-expanded="true"] {
       background: var(--hover);
    }
 }
-/* The queue panel: a compact popover floating above the bar. A CHILD of
-   .srr-player on purpose (player.ts appends it there) — it inherits the bar's
-   hidden state and the scrub-gesture guard (gestures.ts declines touches
-   starting inside .srr-player), and anchors with plain absolute positioning. */
-.srr-player-panel {
-   position: absolute;
-   right: 0.5rem;
-   bottom: calc(100% + 0.35rem);
-   width: min(22rem, calc(100vw - 1rem));
-   max-height: 40vh;
-   overflow-y: auto;
-   background: var(--bg);
-   border: 1px solid var(--border);
-   border-radius: var(--radius);
-   box-shadow: var(--shadow);
+.srr-player-controls .srr-player-next {
+   font-size: 1.1rem;
 }
-.srr-player-panel[hidden] {
+/* Up next — the queue, always listed in the full player (it used to hide
+   behind a "≡ N" popover). The list scrolls on its own past a few rows so the
+   transport above never leaves the screen. */
+.srr-player-upnext {
+   grid-area: next;
+   min-width: 0;
+   padding-top: 0.5rem;
+   border-top: 1px solid var(--faint);
+}
+.srr-player-upnext-head {
+   display: flex;
+   align-items: baseline;
+   gap: 0.4rem;
+   margin: 0 0 0.25rem;
+   font-size: var(--text-sm);
+   font-weight: 700;
+   color: var(--fg-2);
+}
+.srr-player-count {
+   font-family: var(--font-mono);
+   font-size: 0.72rem;
+   font-weight: 600;
+   font-variant-numeric: tabular-nums;
+   color: var(--muted);
+}
+/* Pulled out by the rows' own inset so their text lines up with the heading
+   while their hover fill still reaches past it. */
+.srr-player-list {
+   margin: 0 -0.6rem;
+   max-height: min(15rem, 30vh);
+   overflow-y: auto;
+   overscroll-behavior: contain;
+}
+.srr-player-empty {
+   margin: 0.1rem 0 0.35rem;
+   font-size: var(--text-sm);
+   color: var(--muted);
+}
+.srr-player-empty[hidden] {
    display: none;
 }
-.srr-player-panel-row {
+.srr-player-row {
    display: flex;
    align-items: stretch;
    border-bottom: 1px solid var(--faint);
@@ -915,7 +1065,7 @@ body.srr-playing .srr-pin-progress {
    }
 }
 @media (prefers-reduced-motion: reduce) {
-   .srr-player-panel-row {
+   .srr-player-row {
       /* The drag still tracks the finger (direct manipulation); only the
          post-lift snap-back stops animating — the pager's settle rule. */
       transition: none;
@@ -999,7 +1149,7 @@ body.srr-playing .srr-pin-progress {
    height), so player + button read as one control cluster. States are a glyph
    vocabulary: "+" add, the entry's 1-based queue POSITION while queued (syncChips
    re-derives every chip after every queue mutation, so the numeral can't lie),
-   and "≡" when the queue is full — the door state, whose tap opens the panel to
+   and "≡" when the queue is full — the door state, whose tap unfolds the player to
    prune instead of dead-ending (player.ts toggleQueued). */
 /* `:not(.srr-broken)` is load-bearing, not defensive: this selector is (0,2,1)
    and .srr-content's own `.srr-broken { display: none }` is only (0,2,0), so
@@ -3560,71 +3710,12 @@ html:has(body.srr-view-list) {
    .srr-pager-page {
       padding: max(1.25rem, env(safe-area-inset-top)) 0.75rem 0;
    }
-   /* The mini-player on a phone: ONE line of chrome, nothing wraps. A wrapped
-      bar breaks the ~4rem arithmetic every fixed-bottom lane is stated
-      against (the 7.5rem body.srr-playing clearance, the snackbar and
-      pin-progress offsets), and the clock dropping to its own line under the
-      keys — the first cut of this layout — read as wrapping too and went
-      with it (user call, 2026-07-28). What a phone bar shows is the episode
-      identity, the seek rail under it, and the keys; everything else is one
-      title-tap away in the article.
-      So: the keys hold one nowrap row on a 2rem × 2.2rem target (secondary
-      transport keys inside a bar whose primary action is the accent toggle —
-      shrinking them is what pays for the title), and the CLOCK hides.
-      The transport track is stated OUTRIGHT (10.5rem — five 2rem buttons plus
-      slack) rather than left `auto`, so the column can never quietly grow to
-      its max-content width at the title's expense. */
+   /* The full player on a phone: the sheet spans the screen edge to edge, so
+      its sides drop the border and the radius steps down with the gutter. */
    .srr-player {
-      grid-template-columns: auto minmax(0, 1fr) 10.5rem;
-      padding-left: 0.35rem;
-      padding-right: 0.35rem;
-   }
-   /* The playlist amendment to "nothing is hidden": a non-empty queue adds »
-      and the ≡ N chip, and seven keys (~14.5rem unwrapped) can NEVER hold one
-      line in a phone bar — wrapping them is not an option (the one-row
-      argument above), and a 14.5rem track would starve the title. So the
-      phone trades » away — the panel's per-row play buttons, auto-advance and
-      the lock screen's nexttrack all cover "skip to next" — and widens the
-      track to 12.5rem, which the six remaining keys genuinely fit (12.2rem)
-      with the same slack the five-key track carries. Keyed off the ≡ chip's
-      own visibility so an empty-queue bar keeps the original geometry. */
-   .srr-player:has(.srr-player-queue:not([hidden])) {
-      grid-template-columns: auto minmax(0, 1fr) 12.5rem;
-   }
-   .srr-player-controls .srr-player-next {
-      display: none;
-   }
-   /* The phone declutter, same argument continued: the TITLE is the bar's
-      identity, and the video miniature (64px of cover-crop identifies
-      nothing — the real frame is one title-tap away, where rehome puts the
-      element back full-width) is traded for it. It collapses by WIDTH into
-      the same zero-width box audio already rides — never display:none, the
-      element must stay rendered for playback to survive (the base
-      .srr-player-media rule's argument) — which hands the title the
-      thumbnail plus its grid gap back. */
-   .srr-player[data-kind="video"] .srr-player-media {
-      width: 0;
-   }
-   /* The seek rail is deliberately NOT restyled here: it keeps desktop's
-      tappable rail under the title, and with the clock gone it is the
-      phone's one progress display. (A 2px read-only top-edge hairline was
-      built and rejected — user call, 2026-07-28: keep the progress bar as
-      before.) */
-   /* nowrap is the structural half of "nothing wraps": with the clock hidden
-      the keys are the column's only content, and a font or count that
-      overgrows the track must overflow invisibly rather than mint the second
-      row this block exists to forbid. */
-   .srr-player-controls {
-      flex-wrap: nowrap;
-      justify-content: flex-end;
-      gap: 0;
-   }
-   .srr-player-controls button {
-      min-width: 2rem;
-      padding: 0 0.1rem;
-   }
-   .srr-player-time {
-      display: none;
+      padding: 0.8rem 0.9rem 0.4rem;
+      border-left: none;
+      border-right: none;
    }
 }
 
@@ -3897,7 +3988,7 @@ html:has(body.srr-view-list) {
    forcing vocabulary is class-only — the design-shots screenshotter replays the
    same TRANSIENTS recipe inside the page, so a state that needed an attribute
    written would show in the panel and be blank in every shot. This class is
-   therefore the stand-in for "player.ts un-hid the bar and filled it": it wins
+   therefore the stand-in for "player.ts un-hid the player and filled it": it wins
    over .srr-player[hidden] on source order alone (equal specificity, and this
    block is last in the file) and supplies the two readouts the real bar sets
    through textContent. The episode title is NOT faked here — it rides the
@@ -3907,23 +3998,35 @@ html:has(body.srr-view-list) {
    ever adds this class. */
 .srr-player.srr-player-demo {
    display: grid;
+   /* The demo is the UNFOLDED full player, whatever fold state player.ts left. */
+   visibility: visible;
    /* The shutter would otherwise catch the entrance fade mid-flight. */
    animation: none;
+}
+/* …and so its fold button is the handle, not the folded circle (equal
+   specificity to the folded rules; this block is last in the file). */
+.srr-player-demo .srr-player-fab {
+   bottom: calc(100% - 1px);
+   height: 1.5rem;
+   border-bottom: none;
+   border-radius: var(--radius) var(--radius) 0 0;
+   color: var(--muted);
+   box-shadow: none;
+   &::before {
+      display: block;
+   }
+}
+.srr-player-demo .srr-player-eq {
+   display: none;
 }
 .srr-player-demo .srr-player-source::after {
    content: "podcast feed";
 }
-/* The fake clock only where the real layout SHOWS a clock: the ≤500px block
-   hides .srr-player-time outright (one-line bar), and this demo rule's higher
-   specificity would force it back — under nowrap that overflows the transport
-   track across the title, a state no real bar can reach. */
-@media (min-width: 501px) {
-   .srr-player-demo .srr-player-time {
-      display: inline;
-   }
-   .srr-player-demo .srr-player-time::after {
-      content: "12:04 / 41:37";
-   }
+.srr-player-demo .srr-player-time::after {
+   content: "12:04";
+}
+.srr-player-demo .srr-player-duration::after {
+   content: "41:37";
 }
 .srr-player-demo .srr-player-seek-fill {
    width: 38%;

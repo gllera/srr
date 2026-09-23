@@ -375,17 +375,22 @@ const SKELETON = `
          <div class="srr-player-body">
             <button class="srr-player-title"><span class="srr-player-source"></span><span class="srr-player-name"></span></button>
             <div class="srr-player-seek" role="slider" tabindex="0"><div class="srr-player-seek-fill"></div></div>
+            <div class="srr-player-times"><span class="srr-player-time"></span><span class="srr-player-duration"></span></div>
          </div>
+         <button class="srr-player-close"></button>
          <div class="srr-player-controls">
+            <button class="srr-player-rate"></button>
             <button class="srr-player-back15"></button>
             <button class="srr-player-toggle"></button>
             <button class="srr-player-fwd15"></button>
             <button class="srr-player-next" hidden></button>
-            <button class="srr-player-rate"></button>
-            <span class="srr-player-time"></span>
-            <button class="srr-player-queue" hidden></button>
-            <button class="srr-player-close"></button>
          </div>
+         <section class="srr-player-upnext">
+            <h2>Up next <span class="srr-player-count"></span></h2>
+            <div class="srr-player-list" role="list"></div>
+            <p class="srr-player-empty"></p>
+         </section>
+         <button class="srr-player-fab" aria-expanded="false"></button>
       </div>
       <div class="srr-pin-progress" hidden></div>
       <div class="srr-snackbar" hidden><span class="srr-snackbar-text"></span>
@@ -2152,6 +2157,8 @@ describe("reader media state survives prev/next", () => {
       const episode = content().querySelector("audio") as HTMLMediaElement
       Object.defineProperty(episode, "paused", { value: false, configurable: true })
       episode.currentTime = 30
+      // The player takes only queued episodes: queue it through its chip.
+      ;(episode.nextElementSibling as HTMLButtonElement).click()
       episode.dispatchEvent(new Event("play"))
 
       // Step away: the element must be MOVED to the player, not destroyed.
@@ -2177,6 +2184,8 @@ describe("reader media state survives prev/next", () => {
       await showAt(1, TWO)
       const [first, second] = [...content().querySelectorAll("audio")] as HTMLMediaElement[]
       Object.defineProperty(first, "paused", { value: false, configurable: true })
+      // The player takes only queued episodes: queue it through its chip.
+      ;(first.nextElementSibling as HTMLButtonElement).click()
       first.dispatchEvent(new Event("play"))
       first.currentTime = 10
       second.currentTime = 99
@@ -2228,6 +2237,8 @@ describe("reader media state survives prev/next", () => {
       await showAt(1, PODCAST)
       const episode = content().querySelector("audio") as HTMLMediaElement
       Object.defineProperty(episode, "paused", { value: false, configurable: true })
+      // The player takes only queued episodes: queue it through its chip.
+      ;(episode.nextElementSibling as HTMLButtonElement).click()
       episode.dispatchEvent(new Event("play"))
       await showAt(2, "<p>next article</p>") // adopted — the bar is up
       nav.goTo.mockClear()
@@ -2247,6 +2258,8 @@ describe("reader media state survives prev/next", () => {
       await showAt(1, PODCAST)
       const episode = content().querySelector("audio") as HTMLMediaElement
       Object.defineProperty(episode, "paused", { value: false, configurable: true })
+      // The player takes only queued episodes: queue it through its chip.
+      ;(episode.nextElementSibling as HTMLButtonElement).click()
       episode.dispatchEvent(new Event("play"))
       await showAt(2, "<p>next article</p>")
       // The stale state under test: search mode was on when the title was

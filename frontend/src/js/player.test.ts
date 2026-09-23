@@ -66,17 +66,22 @@ const SKELETON = `
       <div class="srr-player-body">
          <button class="srr-player-title"><span class="srr-player-source"></span><span class="srr-player-name"></span></button>
          <div class="srr-player-seek" role="slider" tabindex="0"><div class="srr-player-seek-fill"></div></div>
+         <div class="srr-player-times"><span class="srr-player-time"></span><span class="srr-player-duration"></span></div>
       </div>
+      <button class="srr-player-close"></button>
       <div class="srr-player-controls">
+         <button class="srr-player-rate"></button>
          <button class="srr-player-back15"></button>
          <button class="srr-player-toggle"></button>
          <button class="srr-player-fwd15"></button>
          <button class="srr-player-next" hidden></button>
-         <button class="srr-player-rate"></button>
-         <span class="srr-player-time"></span>
-         <button class="srr-player-queue" hidden></button>
-         <button class="srr-player-close"></button>
       </div>
+      <section class="srr-player-upnext">
+         <h2>Up next <span class="srr-player-count"></span></h2>
+         <div class="srr-player-list" role="list"></div>
+         <p class="srr-player-empty"></p>
+      </section>
+      <button class="srr-player-fab" aria-expanded="false"></button>
    </div>`
 
 type Player = typeof import("./player")
@@ -106,11 +111,55 @@ const putAudio = (n = 1) => {
 
 const MOUNTED = { mid: "0", chron: 42, title: "Episode 12", feedId: 7 }
 
-// Claim an element the way a real tap does: a `play` event, which player.ts
+// Claim an element the way a real tap does: queue it (the player controls its
+// queue only — see "outside media" below), then a `play` event, which player.ts
 // catches with a capture-phase document listener (`play` does not bubble).
+//
+// Into an IDLE player the add alone starts it (startIfIdle), which calls the
+// mocked play() — a mock that fires no `play` event, so press() stands in for
+// the one a real play() would dispatch. That play() call is the claim's own and
+// is cleared, so a test counts only what comes after.
 const claim = (m: HTMLMediaElement) => {
+   enqueue(m)
+   press(m)
+   vi.mocked(HTMLMediaElement.prototype.play).mockClear()
+}
+// An episode already playing, from another article (adopted into the bar):
+// adds after this only QUEUE, since just the first add into an idle player plays.
+const playElsewhere = () => {
+   player.noteMounted({ ...MOUNTED, chron: 99, title: "Elsewhere" })
+   claim(putAudio(1)[0])
+   player.adoptFromContent()
+   player.noteMounted(MOUNTED)
+}
+// A queue restored at boot with nothing claimed — the READY bar, the one way to
+// hold a queue while idle now that the first add plays at once.
+const seedQueue = (...entries: { chron: number; title: string }[]) => {
+   localStorage.setItem(
+      "srr-player",
+      JSON.stringify({
+         queue: entries.map((e) => ({
+            chron: e.chron,
+            index: 0,
+            src: `assets/aa/${e.chron}.mp3`,
+            kind: "audio",
+            title: e.title,
+            feedId: 7,
+         })),
+      }),
+   )
+   player.restorePersisted()
+}
+// A bare press of play — no queueing.
+const press = (m: HTMLMediaElement) => {
    playing(m)
    m.dispatchEvent(new Event("play"))
+}
+// Queue an in-content element through its own chip, as the user does.
+const enqueue = (m: HTMLMediaElement) => {
+   player.injectQueueChips()
+   const chip = m.nextElementSibling as HTMLButtonElement
+   if (chip.getAttribute("aria-pressed") !== "true") chip.click()
 }
 
 beforeEach(async () => {
@@ -147,12 +196,13 @@ describe("claiming an episode", () => {
       expect(bar().dataset.src).toBe("3")
    })
 
-   it("stays HIDDEN while the article is on screen and the element is in view", () => {
-      // The bar is about control, not survival: nothing to control while you can
-      // see the player in the article itself.
-      claim(putAudio()[0])
-      expect(bar().hidden).toBe(true)
-      expect(document.body.classList.contains("srr-playing")).toBe(false)
+   it("shows even while its own article is on screen — the bar ignores what you are reading", () => {
+      const [m] = putAudio()
+      claim(m)
+      // Claimed in place: the element stays in the prose, the bar shows anyway.
+      expect(content().contains(m)).toBe(true)
+      expect(bar().hidden).toBe(false)
+      expect(document.body.classList.contains("srr-playing")).toBe(true)
    })
 
    it("shows once the article surface is hidden behind the list", () => {
@@ -165,27 +215,111 @@ describe("claiming an episode", () => {
       expect(document.body.classList.contains("srr-playing")).toBe(true)
    })
 
+   it("shows FOLDED to its corner button until that button unfolds it", () => {
+      const [m] = putAudio()
+      claim(m)
+      q<HTMLElement>(".srr-reader").hidden = true
+      m.dispatchEvent(new Event("pause"))
+      const fab = q<HTMLButtonElement>(".srr-player-fab")
+      // Shown (so the element it may hold stays rendered), but folded — a class,
+      // never the hidden attribute.
+      expect(bar().hidden).toBe(false)
+      expect(bar().classList.contains("srr-player-folded")).toBe(true)
+      expect(fab.getAttribute("aria-expanded")).toBe("false")
+      expect(fab.getAttribute("aria-label")).toBe("Show player")
+      fab.click()
+      expect(bar().classList.contains("srr-player-folded")).toBe(false)
+      expect(fab.getAttribute("aria-expanded")).toBe("true")
+      expect(fab.getAttribute("aria-label")).toBe("Hide player")
+      fab.click()
+      expect(bar().classList.contains("srr-player-folded")).toBe(true)
+   })
+
+   it("the folded button's level bars follow play/pause", () => {
+      const [m] = putAudio()
+      claim(m)
+      q<HTMLElement>(".srr-reader").hidden = true
+      m.dispatchEvent(new Event("timeupdate"))
+      m.dispatchEvent(new Event("play"))
+      expect(bar().classList.contains("srr-player-on")).toBe(true)
+      playing(m, false)
+      m.dispatchEvent(new Event("pause"))
+      expect(bar().classList.contains("srr-player-on")).toBe(false)
+   })
+
+   it("✕ folds the bar again for the next episode", () => {
+      const [m] = putAudio()
+      claim(m)
+      q<HTMLElement>(".srr-reader").hidden = true
+      m.dispatchEvent(new Event("pause"))
+      q<HTMLButtonElement>(".srr-player-fab").click()
+      q<HTMLButtonElement>(".srr-player-close").click()
+      const [n] = putAudio()
+      claim(n)
+      n.dispatchEvent(new Event("pause"))
+      expect(bar().classList.contains("srr-player-folded")).toBe(true)
+   })
+
    it("ignores the GIF idiom — muted+loop+autoplay video must not hijack the transport", () => {
       // #embed / srr-x emit these for what used to be a GIF; they fire `play` on
       // their own the moment they render.
       content().innerHTML = `<video src="a.webm" autoplay muted loop></video>`
       const v = content().querySelector("video") as HTMLMediaElement
-      claim(v)
+      press(v)
       expect(player.isActive()).toBe(false)
    })
 
    it("ignores media outside the content host", () => {
       const stray = document.createElement("audio")
       document.body.appendChild(stray)
-      claim(stray)
+      press(stray)
       expect(player.isActive()).toBe(false)
    })
 
    it("does not claim when no article is mounted (an empty state)", () => {
       const [m] = putAudio()
       player.noteMounted(null)
-      claim(m)
+      press(m)
       expect(player.isActive()).toBe(false)
+   })
+
+   it("leaves an UNQUEUED in-content element alone — the player controls its queue only", () => {
+      const [m] = putAudio()
+      press(m)
+      expect(player.isActive()).toBe(false)
+      q<HTMLElement>(".srr-reader").hidden = true
+      m.dispatchEvent(new Event("pause"))
+      expect(bar().hidden).toBe(true)
+      // Navigating away does not adopt it: it is the article's, not the player's.
+      player.adoptFromContent()
+      expect(media().children).toHaveLength(0)
+   })
+
+   // The elements pause() was called on in THIS test's document: every earlier
+   // test's module instance (vi.resetModules) still holds its capture listener
+   // on `document`, and pauses its own long-detached elements.
+   const pausedHere = () =>
+      (HTMLMediaElement.prototype.pause as ReturnType<typeof vi.fn>).mock.contexts.filter(
+         (m) => (m as Node).isConnected,
+      )
+
+   it("outside media playing pauses the episode — one thing audible at a time", () => {
+      const [ep, other] = putAudio(2)
+      claim(ep)
+      press(other)
+      expect(pausedHere()).toEqual([ep])
+      // Still the player's episode, paused and one tap from resuming.
+      expect(player.isActive()).toBe(true)
+   })
+
+   it("the episode (re)starting pauses outside media still playing", () => {
+      const [ep, other] = putAudio(2)
+      claim(ep)
+      playing(ep, false)
+      press(other)
+      ;(HTMLMediaElement.prototype.pause as ReturnType<typeof vi.fn>).mockClear()
+      press(ep)
+      expect(pausedHere()).toEqual([other])
    })
 
    it("evicts an ADOPTED episode from the bar when a second one is claimed", () => {
@@ -434,9 +568,8 @@ describe("persistence", () => {
       expect(media().children.length).toBe(0)
       expect(content().querySelectorAll("audio").length).toBe(1)
       expect(content().querySelector("audio")).toBe(live)
-      // You can see it, so the bar stays down.
-      expect(bar().hidden).toBe(true)
-      expect(document.body.classList.contains("srr-playing")).toBe(false)
+      // The bar shows regardless of what is on screen.
+      expect(bar().hidden).toBe(false)
       // Still seeks, and still never autoplays.
       live.dispatchEvent(new Event("loadedmetadata"))
       expect(live.currentTime).toBe(75)
@@ -586,8 +719,10 @@ describe("persistence", () => {
 
 describe("playlist", () => {
    const chips = () => [...content().querySelectorAll<HTMLButtonElement>(".srr-queue-chip")]
-   const queueBtn = () => q<HTMLButtonElement>(".srr-player-queue")
-   const nextBtn = () => q<HTMLButtonElement>(".srr-player-next")
+   // The Up next count: "" while the queue is empty.
+   const count = () => q(".srr-player-count").textContent
+   // The Up next list lives in the full player, only reachable UNFOLDED.
+   beforeEach(() => q<HTMLButtonElement>(".srr-player-fab").click())
 
    it("injects a toggle chip per eligible element, skipping the GIF idiom and srcless media", () => {
       content().innerHTML =
@@ -604,6 +739,7 @@ describe("playlist", () => {
    })
 
    it("chips read the live queue position and renumber when an earlier entry leaves", () => {
+      playElsewhere()
       putAudio(2)
       player.injectQueueChips()
       expect(chips()[0].textContent).toBe("+")
@@ -618,7 +754,8 @@ describe("playlist", () => {
       expect(chips()[1].textContent).toBe("1")
    })
 
-   it("a full queue turns spare chips into the ≡ door, whose tap opens the panel instead of adding", () => {
+   it("a full queue turns spare chips into the ≡ door, whose tap unfolds the player instead of adding", () => {
+      playElsewhere()
       putAudio(51)
       player.injectQueueChips()
       for (const chip of chips().slice(0, 50)) chip.click()
@@ -628,14 +765,15 @@ describe("playlist", () => {
       expect(spare.getAttribute("aria-label")).toBe("Playlist full — open playlist")
       // Queued chips stay live toggles — removal must always work at the cap.
       expect(chips()[0].textContent).toBe("1")
+      q<HTMLButtonElement>(".srr-player-fab").click() // fold, so the door has something to open
       spare.click()
-      const panel = q<HTMLElement>(".srr-player-panel")
-      expect(panel.hidden).toBe(false)
+      expect(bar().classList.contains("srr-player-folded")).toBe(false)
       const saved = JSON.parse(localStorage.getItem("srr-player") as string)
       expect(saved.queue).toHaveLength(50)
    })
 
    it("long-press menu: Play next moves or inserts the enclosure at the queue head", () => {
+      playElsewhere()
       putAudio(3)
       player.injectQueueChips()
       chips()[0].click()
@@ -660,17 +798,21 @@ describe("playlist", () => {
    })
 
    it("long-press menu: Play now plays the element and never grows the queue", () => {
+      playElsewhere()
       putAudio(2)
       player.injectQueueChips()
       chips()[0].click()
       chips()[1].dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }))
       menuItems()[1].action()
       expect(HTMLMediaElement.prototype.play).toHaveBeenCalledTimes(1)
+      // Through the queue: an unqueued enclosure becomes the player's episode.
+      expect(player.isActive()).toBe(true)
       const saved = JSON.parse(localStorage.getItem("srr-player") as string)
       expect(saved.queue).toHaveLength(1)
    })
 
    it("at the cap the menu disables Play next but keeps Play now — the door's escape hatch", () => {
+      playElsewhere()
       putAudio(51)
       player.injectQueueChips()
       for (const chip of chips().slice(0, 50)) chip.click()
@@ -680,6 +822,7 @@ describe("playlist", () => {
    })
 
    it("queueKey (the p key) toggles the article's first enclosure", () => {
+      playElsewhere()
       putAudio(2)
       player.injectQueueChips()
       player.queueKey()
@@ -693,6 +836,7 @@ describe("playlist", () => {
    // collapsed (.srr-broken) and takes its chip with it, so keying DOM order
    // would queue an invisible dead enclosure ahead of the playable one below.
    it("queueKey skips an enclosure whose media is broken", () => {
+      playElsewhere()
       putAudio(2)
       player.injectQueueChips()
       content().querySelectorAll("audio")[0].classList.add("srr-broken")
@@ -734,103 +878,110 @@ describe("playlist", () => {
       expect(chip.classList.contains("srr-chip-offstage")).toBe(false)
    })
 
-   it("queueing while idle raises the READY bar — visible, head-labeled, never autoplaying", () => {
+   it("the FIRST add into an idle player plays it at once", () => {
       putAudio(1)
       player.injectQueueChips()
       chips()[0].click()
-      expect(chips()[0].getAttribute("aria-pressed")).toBe("true")
-      expect(player.isActive()).toBe(false)
-      expect(bar().hidden).toBe(false)
-      expect(q(".srr-player-name").textContent).toBe("Episode 12")
-      expect(queueBtn().hidden).toBe(false)
-      expect(queueBtn().textContent).toBe("≡ 1")
-      expect(nextBtn().hidden).toBe(false)
-      expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled()
-      // …and it survives a reload: the blob persists queue-only, no active half.
-      const saved = JSON.parse(localStorage.getItem("srr-player") as string)
-      expect(saved.queue).toHaveLength(1)
-      expect(saved.src).toBeUndefined()
-      // The chip is a toggle: a second tap unqueues and the bar goes away.
+      expect(HTMLMediaElement.prototype.play).toHaveBeenCalledTimes(1)
+      expect(player.isActive()).toBe(true)
+      // Claimed in place (its article is on screen) and consumed from the queue.
+      expect(media().children).toHaveLength(0)
+      expect(chips()[0].getAttribute("aria-pressed")).toBe("false")
+      expect(count()).toBe("")
+   })
+
+   it("an add behind a playing episode only queues", () => {
+      playElsewhere()
+      putAudio(1)
+      player.injectQueueChips()
       chips()[0].click()
-      expect(bar().hidden).toBe(true)
-      expect(localStorage.getItem("srr-player")).toBeNull()
+      expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled()
+      expect(chips()[0].getAttribute("aria-pressed")).toBe("true")
+      expect(count()).toBe("1")
+   })
+
+   it("an add to a restored READY queue only queues — it is not the first", () => {
+      seedQueue({ chron: 43, title: "Episode 13" })
+      putAudio(1)
+      player.injectQueueChips()
+      chips()[0].click()
+      expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled()
+      expect(player.isActive()).toBe(false)
+      expect(count()).toBe("2")
+      expect(q(".srr-player-name").textContent).toBe("Episode 13") // still the head
    })
 
    it("the ready bar's play button claims the head IN PLACE when its article is on screen", () => {
       putAudio(1)
       player.injectQueueChips()
-      chips()[0].click()
+      seedQueue({ chron: 42, title: "Episode 12" })
+      expect(bar().hidden).toBe(false)
+      expect(q(".srr-player-name").textContent).toBe("Episode 12")
       q<HTMLButtonElement>(".srr-player-toggle").click()
       expect(player.isActive()).toBe(true)
       expect(media().children).toHaveLength(0) // no second element
       expect(HTMLMediaElement.prototype.play).toHaveBeenCalled()
       // Consumed: playing an entry takes it out of the queue.
       expect(chips()[0].getAttribute("aria-pressed")).toBe("false")
-      expect(queueBtn().hidden).toBe(true)
+      expect(count()).toBe("")
    })
 
    it("ended advances to a queued entry of ANOTHER article as a detached element in the bar", () => {
-      // Build the queue on article 43…
-      player.noteMounted({ ...MOUNTED, chron: 43, title: "Episode 13" })
-      putAudio(1)
-      player.injectQueueChips()
-      chips()[0].click()
+      // A queue holding article 43's episode…
+      seedQueue({ chron: 43, title: "Episode 13" })
       // …then play an episode on article 42.
-      player.noteMounted(MOUNTED)
       const [m] = putAudio(1)
       player.injectQueueChips()
       claim(m)
-      expect(queueBtn().textContent).toBe("≡ 1")
+      expect(count()).toBe("1")
       m.dispatchEvent(new Event("ended"))
       expect(player.isActive()).toBe(true)
       const built = media().querySelector("audio") as HTMLAudioElement
       expect(built).toBeTruthy()
-      expect(built.src).toBe("https://cdn.example/store/assets/aa/0.mp3")
+      expect(built.src).toBe("https://cdn.example/store/assets/aa/43.mp3")
       expect(HTMLMediaElement.prototype.play).toHaveBeenCalled()
       expect(q(".srr-player-name").textContent).toBe("Episode 13")
       expect(bar().hidden).toBe(false)
-      expect(queueBtn().hidden).toBe(true) // drained
+      expect(count()).toBe("") // drained
    })
 
    it("ended advances to a same-article entry by claiming it in place", () => {
       const [a] = putAudio(2)
-      player.injectQueueChips()
-      chips()[1].click()
       claim(a)
+      chips()[1].click()
       a.dispatchEvent(new Event("ended"))
       expect(player.isActive()).toBe(true)
       expect(media().children).toHaveLength(0)
       expect(HTMLMediaElement.prototype.play).toHaveBeenCalled()
-      expect(queueBtn().hidden).toBe(true)
+      expect(count()).toBe("")
    })
 
    it("an erroring episode skips to the next queued entry once its retry is spent", () => {
       const [a] = putAudio(2)
-      player.injectQueueChips()
-      chips()[1].click()
       claim(a)
+      chips()[1].click()
       a.dispatchEvent(new Event("error")) // first: retry in place, nothing skipped
-      expect(queueBtn().hidden).toBe(false)
+      expect(count()).not.toBe("")
       a.dispatchEvent(new Event("error")) // second: give up, advance
       expect(player.isActive()).toBe(true)
-      expect(queueBtn().hidden).toBe(true)
+      expect(count()).toBe("")
    })
 
    it("manually playing a queued element consumes its entry — no replay later", () => {
+      playElsewhere()
       const [, b] = putAudio(2)
       player.injectQueueChips()
       chips()[1].click()
       expect(chips()[1].getAttribute("aria-pressed")).toBe("true")
       claim(b)
       expect(chips()[1].getAttribute("aria-pressed")).toBe("false")
-      expect(queueBtn().hidden).toBe(true)
+      expect(count()).toBe("")
    })
 
    it("the ✕ clears the queue with the episode — an explicit 'I am done'", () => {
       const [a] = putAudio(2)
-      player.injectQueueChips()
-      chips()[1].click()
       claim(a)
+      chips()[1].click()
       q<HTMLButtonElement>(".srr-player-close").click()
       expect(player.isActive()).toBe(false)
       expect(localStorage.getItem("srr-player")).toBeNull()
@@ -838,56 +989,55 @@ describe("playlist", () => {
       expect(bar().hidden).toBe(true)
    })
 
-   it("the panel lists the queue; ✕ removes a row, a row press plays it now", () => {
+   it("the Up next list always lists the queue; ✕ removes a row, a row press plays it now", () => {
+      const list = q<HTMLElement>(".srr-player-list")
+      const empty = q<HTMLElement>(".srr-player-empty")
+      expect(empty.hidden).toBe(false) // nothing queued yet: says how to add
+      playElsewhere()
       putAudio(2)
       player.injectQueueChips()
       chips()[0].click()
       chips()[1].click()
-      queueBtn().click()
-      const panel = q<HTMLElement>(".srr-player-panel")
-      expect(panel.hidden).toBe(false)
-      expect(queueBtn().getAttribute("aria-expanded")).toBe("true")
-      expect(panel.querySelectorAll(".srr-player-panel-row")).toHaveLength(2)
-      // Remove the first entry: the panel re-renders and the chip un-presses.
-      panel.querySelector<HTMLButtonElement>(".srr-player-row-remove")?.click()
-      expect(panel.querySelectorAll(".srr-player-panel-row")).toHaveLength(1)
+      // No button to open it: the rows are simply there.
+      expect(list.querySelectorAll(".srr-player-row")).toHaveLength(2)
+      expect(empty.hidden).toBe(true)
+      expect(count()).toBe("2")
+      // Remove the first entry: the list re-renders and the chip un-presses.
+      list.querySelector<HTMLButtonElement>(".srr-player-row-remove")?.click()
+      expect(list.querySelectorAll(".srr-player-row")).toHaveLength(1)
       expect(chips()[0].getAttribute("aria-pressed")).toBe("false")
-      // Play the remaining row: consumed, panel closed, playback started.
-      panel.querySelector<HTMLButtonElement>(".srr-player-row-play")?.click()
+      // Play the remaining row: consumed, playback started, the list now empty.
+      list.querySelector<HTMLButtonElement>(".srr-player-row-play")?.click()
       expect(player.isActive()).toBe(true)
-      expect(panel.hidden).toBe(true)
+      expect(list.querySelectorAll(".srr-player-row")).toHaveLength(0)
+      expect(empty.hidden).toBe(false)
       expect(HTMLMediaElement.prototype.play).toHaveBeenCalled()
    })
 
-   it("the panel owns its keys: Escape closes it, nothing leaks to the global keymap", () => {
+   it("Escape folds the full player and is claimed; other keys still reach the global keymap", () => {
+      playElsewhere()
       putAudio(1)
       player.injectQueueChips()
       chips()[0].click()
-      queueBtn().click()
-      const panel = q<HTMLElement>(".srr-player-panel")
+      const list = q<HTMLElement>(".srr-player-list")
+      const fab = q<HTMLButtonElement>(".srr-player-fab")
+      list.querySelector<HTMLButtonElement>(".srr-player-row-remove")?.focus()
       const globalKeymap = vi.fn()
       document.addEventListener("keydown", globalKeymap)
       try {
-         // 'd' is the reader's next-article key; under the open panel it must die here.
-         panel.dispatchEvent(new KeyboardEvent("keydown", { key: "d", bubbles: true }))
-         expect(globalKeymap).not.toHaveBeenCalled()
-         panel.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))
-         expect(globalKeymap).not.toHaveBeenCalled()
-         expect(panel.hidden).toBe(true)
-         expect(queueBtn().getAttribute("aria-expanded")).toBe("false")
+         // A control, not a modal: an unclaimed key goes on to the app.
+         list.dispatchEvent(new KeyboardEvent("keydown", { key: "d", bubbles: true }))
+         expect(globalKeymap).toHaveBeenCalledTimes(1)
+         // Escape folds — and must not ALSO drop the reader to the list.
+         list.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))
+         expect(globalKeymap).toHaveBeenCalledTimes(1)
+         expect(bar().classList.contains("srr-player-folded")).toBe(true)
+         expect(fab.getAttribute("aria-expanded")).toBe("false")
+         // Focus followed the fold onto the one control still visible.
+         expect(document.activeElement).toBe(fab)
       } finally {
          document.removeEventListener("keydown", globalKeymap)
       }
-   })
-
-   it("an outside press closes the panel", () => {
-      putAudio(1)
-      player.injectQueueChips()
-      chips()[0].click()
-      queueBtn().click()
-      expect(q<HTMLElement>(".srr-player-panel").hidden).toBe(false)
-      document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }))
-      expect(q<HTMLElement>(".srr-player-panel").hidden).toBe(true)
    })
 
    it("restores a persisted queue into the ready bar, dropping invalid entries", () => {
@@ -906,7 +1056,7 @@ describe("playlist", () => {
       player.restorePersisted()
       expect(player.isActive()).toBe(false)
       expect(bar().hidden).toBe(false)
-      expect(queueBtn().textContent).toBe("≡ 1")
+      expect(count()).toBe("1")
       expect(q(".srr-player-name").textContent).toBe("Episode 13")
       expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled()
       // The ready toggle then plays the head — a detached element, since chron
@@ -934,8 +1084,8 @@ describe("playlist", () => {
       )
       player.restorePersisted()
       expect(player.isActive()).toBe(true)
-      expect(queueBtn().hidden).toBe(false)
-      expect(queueBtn().textContent).toBe("≡ 1")
+      expect(count()).not.toBe("")
+      expect(count()).toBe("1")
    })
 
    it("caps a restored queue at 50 entries", () => {
@@ -953,7 +1103,7 @@ describe("playlist", () => {
          }),
       )
       player.restorePersisted()
-      expect(queueBtn().textContent).toBe("≡ 50")
+      expect(count()).toBe("50")
    })
 
    it("registers lock-screen next/prev ONLY while the queue is non-empty", () => {
@@ -966,10 +1116,16 @@ describe("playlist", () => {
       claim(a)
       const trackCalls = () =>
          setActionHandler.mock.calls.filter((c) => c[0] === "nexttrack" || c[0] === "previoustrack")
-      // A plain claim never registers them (RDR16's rule stands without a queue).
-      expect(trackCalls()).toHaveLength(0)
+      // Claiming the only queued entry empties the queue, which leaves them
+      // unset (RDR16's rule stands without a queue).
+      expect(trackCalls().at(-1)?.[1] ?? null).toBeNull()
       chips()[1].click()
-      expect(trackCalls().every((c) => typeof c[1] === "function")).toBe(true)
+      for (const a of ["nexttrack", "previoustrack"])
+         expect(
+            typeof trackCalls()
+               .filter((c) => c[0] === a)
+               .at(-1)?.[1],
+         ).toBe("function")
       chips()[1].click() // unqueue — back to unset, the platform greys them out
       const last = setActionHandler.mock.calls.filter((c) => c[0] === "nexttrack").at(-1)
       expect(last?.[1]).toBeNull()
@@ -981,10 +1137,9 @@ describe("playlist", () => {
       Object.defineProperty(navigator, "mediaSession", { value: ms, configurable: true })
 
       const [a, b] = putAudio(3)
-      player.injectQueueChips()
+      claim(a)
       chips()[1].click() // queue b
       chips()[2].click() // queue c — keeps the queue non-empty after one advance
-      claim(a)
       a.currentTime = 30
 
       const handler = (action: string) =>
@@ -995,20 +1150,20 @@ describe("playlist", () => {
       expect(player.isActive()).toBe(true)
       // Advance to b, then step back within the threshold.
       handler("nexttrack")?.()
-      expect(queueBtn().textContent).toBe("≡ 1")
+      expect(count()).toBe("1")
       b.currentTime = 1
       handler("previoustrack")?.()
       // Back on a, with b re-queued at the FRONT — ⏮ then ⏭ round-trips.
-      expect(queueBtn().textContent).toBe("≡ 2")
+      expect(count()).toBe("2")
       expect(chips()[1].getAttribute("aria-pressed")).toBe("true")
       expect(a.currentTime).toBe(0)
    })
 })
 
-describe("queue panel — reorder and swipe", () => {
-   const queueBtn = () => q<HTMLButtonElement>(".srr-player-queue")
-   const panel = () => q<HTMLElement>(".srr-player-panel")
-   const rows = () => [...panel().querySelectorAll<HTMLElement>(".srr-player-panel-row")]
+describe("Up next list — reorder and swipe", () => {
+   // The Up next list lives in the full player, only reachable UNFOLDED.
+   beforeEach(() => q<HTMLButtonElement>(".srr-player-fab").click())
+   const rows = () => [...q<HTMLElement>(".srr-player-list").querySelectorAll<HTMLElement>(".srr-player-row")]
    const names = () => rows().map((r) => r.querySelector(".srr-player-row-name")?.textContent)
    const up = (r: Element) => r.querySelector(".srr-player-row-up") as HTMLButtonElement
    const down = (r: Element) => r.querySelector(".srr-player-row-down") as HTMLButtonElement
@@ -1025,24 +1180,12 @@ describe("queue panel — reorder and swipe", () => {
       return e
    }
 
-   // Three distinct articles' episodes queued: titles B, C, D in queue order.
-   const queueThree = () => {
-      for (const [chron, title] of [
-         [43, "B"],
-         [44, "C"],
-         [45, "D"],
-      ] as const) {
-         player.noteMounted({ ...MOUNTED, chron, title })
-         putAudio(1)
-         player.injectQueueChips()
-         content().querySelector<HTMLButtonElement>(".srr-queue-chip")?.click()
-      }
-   }
+   // Three distinct articles' episodes in a restored queue: titles B, C, D in order.
+   const queueThree = () => seedQueue({ chron: 43, title: "B" }, { chron: 44, title: "C" }, { chron: 45, title: "D" })
 
    it("▲/▼ reorder the queue, persist the order, and re-label the ready head", () => {
       queueThree()
       expect(q(".srr-player-name").textContent).toBe("B") // READY head
-      queueBtn().click()
       expect(names()).toEqual(["B", "C", "D"])
       // The dead directions are disabled, the live ones are not.
       expect(up(rows()[0]).disabled).toBe(true)
@@ -1063,7 +1206,6 @@ describe("queue panel — reorder and swipe", () => {
 
    it("a horizontal swipe past the trigger removes the row", () => {
       queueThree()
-      queueBtn().click()
       const row = rows()[0]
       touch(row, "touchstart", 200, 100)
       touch(row, "touchmove", 160, 102) // engaged: horizontal past the slop
@@ -1076,7 +1218,6 @@ describe("queue panel — reorder and swipe", () => {
 
    it("a short drag snaps back, and its finger-lift click does not play the row", () => {
       queueThree()
-      queueBtn().click()
       const row = rows()[0]
       touch(row, "touchstart", 200, 100)
       touch(row, "touchmove", 170, 101) // engaged but under the trigger
@@ -1091,7 +1232,6 @@ describe("queue panel — reorder and swipe", () => {
 
    it("a vertical drag stays a scroll — the queue is untouched, taps unharmed", () => {
       queueThree()
-      queueBtn().click()
       const row = rows()[0]
       touch(row, "touchstart", 200, 100)
       touch(row, "touchmove", 202, 160) // vertical-dominant: vetoed for good
@@ -1264,16 +1404,10 @@ describe("buffering feedback", () => {
 })
 
 describe("queue resume — FEB2 positions", () => {
-   const chips = () => [...content().querySelectorAll<HTMLButtonElement>(".srr-queue-chip")]
-
    // Queue an episode of article 43 while it is mounted, then finish an episode
    // on article 42 so the auto-advance builds 43's element DETACHED in the bar.
    const advanceIntoDetached = () => {
-      player.noteMounted({ ...MOUNTED, chron: 43, title: "Episode 13" })
-      putAudio(1)
-      player.injectQueueChips()
-      chips()[0].click()
-      player.noteMounted(MOUNTED)
+      seedQueue({ chron: 43, title: "Episode 13" })
       const [m] = putAudio(1)
       claim(m)
       m.dispatchEvent(new Event("ended"))
@@ -1311,9 +1445,9 @@ describe("queue resume — FEB2 positions", () => {
       deps.readPosition.mockReturnValue({ time: 300, rate: 1 })
       const [a, b] = putAudio(2)
       player.injectQueueChips()
+      claim(a)
       const chipsNow = [...content().querySelectorAll<HTMLButtonElement>(".srr-queue-chip")]
       chipsNow[1].click() // queue b (same article)
-      claim(a)
       a.dispatchEvent(new Event("ended"))
       expect(player.isActive()).toBe(true)
       withDuration(b, 3600)
@@ -1343,11 +1477,14 @@ describe("media session", () => {
 
       // No previoustrack/nexttrack: the lock screen must not become a way to
       // skip out of the episode you are listening to.
+      // (Queueing the episode registered them for a moment; claiming it
+      // emptied the queue, so the LAST word on each is unset.)
       const actions = setActionHandler.mock.calls.map((c) => c[0])
       expect(actions).toContain("play")
       expect(actions).toContain("seekforward")
-      expect(actions).not.toContain("nexttrack")
-      expect(actions).not.toContain("previoustrack")
+      const lastFor = (a: string) => setActionHandler.mock.calls.filter((c) => c[0] === a).at(-1)?.[1] ?? null
+      expect(lastFor("nexttrack")).toBeNull()
+      expect(lastFor("previoustrack")).toBeNull()
 
       playing(m, false)
       m.dispatchEvent(new Event("pause"))
@@ -1440,10 +1577,12 @@ describe("the seek bar", () => {
       claim(m)
       m.currentTime = 65
       m.dispatchEvent(new Event("timeupdate"))
-      // duration is NaN on a cold element — no "/ --:--" noise.
+      // duration is NaN on a cold element — the length clock stays empty.
       expect(q(".srr-player-time").textContent).toBe("1:05")
+      expect(q(".srr-player-duration").textContent).toBe("")
       withDuration(m, 3725)
       m.dispatchEvent(new Event("timeupdate"))
-      expect(q(".srr-player-time").textContent).toBe("1:05 / 1:02:05")
+      expect(q(".srr-player-time").textContent).toBe("1:05")
+      expect(q(".srr-player-duration").textContent).toBe("1:02:05")
    })
 })

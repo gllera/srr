@@ -108,6 +108,20 @@ const settleUnder = (p: Page, host: string) =>
       .waitForFunction((sel) => !!document.querySelector(sel), { timeout: 3000 }, `${host} ${PROBE}`)
       .catch(() => undefined)
 
+// Open an article and tap its episode's queue chip. Into an idle player that
+// FIRST add plays it at once — the chip tap is the user gesture — so this waits
+// for the in-content clock to move, with no play() call anywhere.
+async function startFromChip(page: Page, title: string): Promise<void> {
+   await clickRow(page, title)
+   await waitTitle(page, title)
+   await page.waitForFunction(() => !!document.querySelector(".srr-content .srr-queue-chip"), { timeout: 20000 })
+   await page.click(".srr-content .srr-queue-chip")
+   await page.waitForFunction(
+      () => (document.querySelector(".srr-content audio") as HTMLAudioElement).currentTime > 0,
+      { timeout: 20000, polling: 300 },
+   )
+}
+
 // Turn a bare play() rejection into something actionable: what the element
 // resolved its src to, and what that URL answers.
 const srcDiagnosis = (p: Page, err: string): Promise<string> =>
@@ -202,6 +216,8 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
          const err = await page.evaluate(async () => {
             const a = document.querySelector(".srr-content audio") as HTMLAudioElement
             a.dataset.probe = "rdr16"
+            // The player takes only what is queued: queue it through its chip.
+            ;(a.nextElementSibling as HTMLButtonElement).click()
             try {
                await a.play()
                return ""
@@ -250,17 +266,18 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
          // article is no longer rendered.
          expect(moved!.controls).toBe(false)
          expect(moved!.barShown).toBe(true)
-         // The queue is empty here, so the playlist chrome must not PAINT. The
-         // `hidden` property alone cannot prove that: the author-origin
-         // `display: inline-flex` on `.srr-player-controls button` beats the UA
-         // sheet's [hidden]{display:none} (the same cascade trap .srr-player
-         // itself documents), so styles.css restates it per button — and only a
-         // computed-style read can see whether the restatement holds.
+         // The queue is empty here, so » must not PAINT (it keeps its slot so
+         // play stays centred). The `hidden` property alone cannot prove that:
+         // the author `display: inline-flex` on `.srr-player-controls button`
+         // beats the UA sheet's [hidden] rule, so styles.css restates it — and
+         // only a computed-style read can see whether the restatement holds.
+         // The Up next list says how to add instead of listing nothing.
          const chrome = await page.evaluate(() => ({
-            next: getComputedStyle(document.querySelector(".srr-player-next")!).display,
-            queue: getComputedStyle(document.querySelector(".srr-player-queue")!).display,
+            next: getComputedStyle(document.querySelector(".srr-player-next")!).visibility,
+            empty: getComputedStyle(document.querySelector(".srr-player-empty")!).display,
+            count: document.querySelector(".srr-player-count")?.textContent,
          }))
-         expect(chrome, "an empty-queue bar paints playlist chrome").toEqual({ next: "none", queue: "none" })
+         expect(chrome, "an empty queue paints playlist chrome").toEqual({ next: "hidden", empty: "block", count: "" })
          // And it is still PLAYING, not merely un-paused.
          const t1 = await waitAdvanced(page, Math.max(t0, moved!.time), "in the bar")
 
@@ -292,24 +309,31 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
    it("queues another article's episode via its chip and auto-advances into it on ended", async () => {
       const [page, close] = await openCtx(browser, baseUrl, waitList)
       try {
-         // ── queue the OTHER article's episode from its chip ────────────────
+         // ── the FIRST add plays: SHORT's chip starts it, no play() call ────
+         await startFromChip(page, SHORT)
+         // Paused so the queue can be built before its four seconds run out.
+         await page.evaluate(() => (document.querySelector(".srr-content audio") as HTMLAudioElement).pause())
+
+         // ── queue the OTHER article's episode behind it ────────────────────
+         await page.keyboard.press("Escape")
+         await waitList(page)
          await clickRow(page, QUEUED)
          await waitTitle(page, QUEUED)
          await page.waitForFunction(() => !!document.querySelector(".srr-content .srr-queue-chip"), { timeout: 20000 })
          await page.click(".srr-content .srr-queue-chip")
-         // The READY bar: visible, counting 1, nothing claimed, nothing playing.
-         const ready = await page.evaluate(() => ({
+         // Only queued (something is claimed): SHORT held in the bar, counting 1.
+         const queued = await page.evaluate(() => ({
             barShown: !(document.querySelector(".srr-player") as HTMLElement).hidden,
-            count: document.querySelector(".srr-player-queue")?.textContent,
-            pressed: document.querySelector(".srr-queue-chip")?.getAttribute("aria-pressed"),
-            held: !!document.querySelector(".srr-player-media audio"),
+            count: document.querySelector(".srr-player-count")?.textContent,
+            pressed: document.querySelector(".srr-content .srr-queue-chip")?.getAttribute("aria-pressed"),
+            contentPaused: (document.querySelector(".srr-content audio") as HTMLAudioElement).paused,
          }))
-         expect(ready.barShown).toBe(true)
-         expect(ready.count).toBe("≡ 1")
-         expect(ready.pressed).toBe("true")
-         expect(ready.held).toBe(false)
+         expect(queued.barShown).toBe(true)
+         expect(queued.count).toBe("1")
+         expect(queued.pressed).toBe("true")
+         expect(queued.contentPaused).toBe(true)
 
-         // ── play the SHORT episode and let it genuinely END ────────────────
+         // ── back to SHORT and let it genuinely END ─────────────────────────
          // No seek shortcut: the feed server answers no Range requests, so a
          // near-the-end seek clamps to the buffered edge and never ends. Four
          // real seconds of playback is what makes the `ended` the browser's own.
@@ -328,10 +352,6 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
             }
          })
          expect(err, "play() was refused").toBe("")
-         await page.waitForFunction(
-            () => (document.querySelector(".srr-content audio") as HTMLAudioElement).currentTime > 0,
-            { timeout: 20000, polling: 300 },
-         )
 
          // ── the advance: the queued episode starts in the bar, unaided ─────
          const handle = await page
@@ -352,7 +372,7 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
                      a
                         ? `t=${a.currentTime.toFixed(1)}/${a.duration.toFixed(1)} paused=${a.paused} ended=${a.ended} net=${a.networkState} err=${a.error?.code ?? "-"} src=${a.src.split("/").pop()}`
                         : "none"
-                  return `content[${fmt(c)}] bar[${fmt(b)}] count=${document.querySelector(".srr-player-queue")?.textContent}`
+                  return `content[${fmt(c)}] bar[${fmt(b)}] count=${document.querySelector(".srr-player-count")?.textContent}`
                })
                throw new Error(`${String(e)} — ${diag}`)
             })
@@ -361,11 +381,11 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
          const after = await page.evaluate(() => ({
             name: document.querySelector(".srr-player-name")?.textContent,
             barShown: !(document.querySelector(".srr-player") as HTMLElement).hidden,
-            queueHidden: (document.querySelector(".srr-player-queue") as HTMLElement).hidden,
+            count: document.querySelector(".srr-player-count")?.textContent,
          }))
          expect(after.name).toBe(QUEUED)
          expect(after.barShown).toBe(true)
-         expect(after.queueHidden).toBe(true) // drained
+         expect(after.count).toBe("") // drained
          // Still ADVANCING, not merely unpaused — the clock keeps moving.
          await page.waitForFunction(
             (t) => (document.querySelector(".srr-player-media audio") as HTMLAudioElement).currentTime > t,
@@ -377,95 +397,91 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
       }
    })
 
-   // Pure layout, no audio — jsdom has none, hence this layer. The transport
-   // must hold ONE row of keys at both widths: every fixed-bottom lane in
-   // styles.css (.srr-snackbar, .srr-pin-progress, the container's 7.5rem
-   // clearance) is stated against a ~4rem bar, so a wrapped transport doesn't
-   // just look broken, it breaks that arithmetic. The READY bar (chip-queued
-   // entry, nothing playing) shows the fullest chrome the bar ever carries.
-   it("keeps the transport keys on one row at phone width with the queue chrome up", async () => {
+   // Pure layout — jsdom has none, hence this layer. The FULL player (the
+   // unfolded state) at desktop and phone widths: the transport holds one row
+   // around the play button, the scrubber spans the sheet (✕ floats in the
+   // corner instead of taking a column), both clocks show, the Up next list is
+   // listed without any tap, and the whole sheet stays on screen.
+   it("lays the full player out at desktop and phone widths, queue listed", async () => {
       const [page, close] = await openCtx(browser, baseUrl, waitList)
       try {
+         // An episode claimed (SHORT, adopted into the player) with another
+         // queued behind it — the fullest the sheet gets.
+         await startFromChip(page, SHORT)
+         await page.evaluate(() => (document.querySelector(".srr-content audio") as HTMLAudioElement).pause())
+         await page.keyboard.press("Escape")
+         await waitList(page)
          await clickRow(page, QUEUED)
          await waitTitle(page, QUEUED)
          await page.waitForFunction(() => !!document.querySelector(".srr-content .srr-queue-chip"), {
             timeout: 20000,
          })
          await page.click(".srr-content .srr-queue-chip")
+         // Folded by default: only the corner button paints.
+         const folded = await page.evaluate(() => ({
+            sheet: getComputedStyle(document.querySelector(".srr-player")!).visibility,
+            fab: getComputedStyle(document.querySelector(".srr-player-fab")!).visibility,
+         }))
+         expect(folded).toEqual({ sheet: "hidden", fab: "visible" })
+         await page.click(".srr-player-fab")
 
          const layout = () =>
             page.evaluate(() => {
                const bar = document.querySelector(".srr-player") as HTMLElement
-               const keys = [...bar.querySelectorAll<HTMLElement>(".srr-player-controls button")].filter(
-                  (b) => getComputedStyle(b).display !== "none",
-               )
+               const keys = [...bar.querySelectorAll<HTMLElement>(".srr-player-controls button")]
                const seek = bar.querySelector(".srr-player-seek") as HTMLElement
+               const body = bar.querySelector(".srr-player-body") as HTMLElement
+               const shown = (sel: string) => getComputedStyle(bar.querySelector(sel)!).display !== "none"
                return {
-                  barShown: !bar.hidden,
-                  barHeight: bar.offsetHeight,
-                  // offsetTop, not getBoundingClientRect().top: the ≡ chip
-                  // PULSES when the queue grows (srr-chip-pop, a 0.22s scale
-                  // keyframe), and a rect read mid-pop sits a pixel high —
-                  // reading as a phantom second row whenever the measurement
-                  // lands inside the animation window (a timing flake). The
-                  // wrap question is about the LAYOUT box, which transforms
-                  // never move.
-                  rows: new Set(keys.map((b) => b.offsetTop)).size,
-                  next: getComputedStyle(bar.querySelector(".srr-player-next")!).display !== "none",
-                  queue: getComputedStyle(bar.querySelector(".srr-player-queue")!).display !== "none",
-                  time: getComputedStyle(bar.querySelector(".srr-player-time")!).display !== "none",
-                  seekH: seek.offsetHeight,
-                  seekW: seek.offsetWidth,
+                  visible: getComputedStyle(bar).visibility,
+                  // Vertical CENTRES (play is taller than its neighbours, so
+                  // tops differ by design), from offsetTop rather than a rect:
+                  // the count PULSES when the queue grows (a scale keyframe),
+                  // and a rect read mid-pop sits a pixel off.
+                  keyRows: new Set(keys.map((b) => Math.round(b.offsetTop + b.offsetHeight / 2))).size,
+                  seekFull: seek.offsetWidth >= body.offsetWidth - 1,
+                  time: shown(".srr-player-time"),
+                  duration: shown(".srr-player-duration"),
+                  rows: bar.querySelectorAll(".srr-player-list .srr-player-row").length,
+                  count: bar.querySelector(".srr-player-count")?.textContent,
+                  top: bar.getBoundingClientRect().top,
                }
             })
-
-         // The READY bar has no media, so the clock is empty and its `:empty`
-         // rule hides it regardless of viewport — fill it so the display
-         // checks below measure the LAYOUT's verdict, not emptiness.
+         // Fill the clocks (a paused-early episode may not know its length yet).
          await page.evaluate(() => {
-            ;(document.querySelector(".srr-player-time") as HTMLElement).textContent = "1:00 / 2:00"
+            ;(document.querySelector(".srr-player-time") as HTMLElement).textContent = "1:00"
+            ;(document.querySelector(".srr-player-duration") as HTMLElement).textContent = "2:00"
          })
 
-         // Desktop (the launcher's 800×600 default): the full seven keys on one
-         // line, playlist chrome included.
-         const wide = await layout()
-         expect(wide.barShown).toBe(true)
-         expect(wide.next).toBe(true)
-         expect(wide.queue).toBe(true)
-         expect(wide.time, "the desktop bar keeps its clock").toBe(true)
-         expect(wide.seekH, "the desktop bar keeps its tappable seek rail").toBeGreaterThanOrEqual(4)
-         expect(wide.rows, "desktop transport wrapped").toBe(1)
+         for (const vp of [null, { width: 390, height: 844 }]) {
+            if (vp) await page.setViewport(vp)
+            const l = await layout()
+            const at = vp ? "phone" : "desktop"
+            expect(l.visible, `unfolded at ${at}`).toBe("visible")
+            expect(l.keyRows, `transport wrapped at ${at}`).toBe(1)
+            expect(l.seekFull, `scrubber short of the sheet at ${at}`).toBe(true)
+            expect(l.time && l.duration, `a clock hidden at ${at}`).toBe(true)
+            expect(l.rows, `Up next not listed at ${at}`).toBe(1)
+            expect(l.count).toBe("1")
+            expect(l.top, `sheet ran off the top at ${at}`).toBeGreaterThanOrEqual(0)
+         }
 
-         // Phone: the ≤500px layout trades » away (the panel's per-row play
-         // buttons, auto-advance and Media Session all cover "next") for a
-         // track the six remaining keys genuinely fit on one line.
-         await page.setViewport({ width: 390, height: 844 })
-         const narrow = await layout()
-         expect(narrow.queue, "the queue chip must survive the phone layout").toBe(true)
-         expect(narrow.next, "» is traded away on the phone").toBe(false)
-         expect(narrow.rows, "phone transport wrapped onto a second row").toBe(1)
-         // ~4rem plus the hairline; anything near 90px is the wrapped bar.
-         expect(narrow.barHeight, "the bar outgrew the ~4rem the lane offsets assume").toBeLessThanOrEqual(72)
-
-         // The phone declutter: NOTHING wraps in the controls column (user
-         // call, 2026-07-28) — the clock hides rather than dropping to a
-         // second line, while the seek rail stays exactly the rail it is on
-         // desktop (user call too, after a 2px top-edge hairline round was
-         // rejected): under the title, tappable, the phone's one progress
-         // display. A video's miniature collapses to the same zero-width box
-         // audio already rides — the TITLE is the bar's identity, and the
-         // 64px thumbnail plus its gap was exactly the space it was missing.
-         // Width, not display, for the miniature: the element must stay
-         // rendered for playback to survive, the same argument the base
-         // .srr-player-media rule states.
-         expect(narrow.time, "the clock must not wrap under the keys on the phone").toBe(false)
-         expect(narrow.seekH, "the phone keeps the real seek rail").toBeGreaterThanOrEqual(4)
-         const mediaWidth = await page.evaluate(() => {
+         // A video gets a real frame the sheet's width; audio none. Width, not
+         // display, decides it: the element must stay rendered for playback to
+         // survive, the base .srr-player-media rule's argument.
+         const frame = await page.evaluate(() => {
             const bar = document.querySelector(".srr-player") as HTMLElement
+            const host = bar.querySelector(".srr-player-media") as HTMLElement
+            const audio = host.offsetWidth
             bar.dataset.kind = "video"
-            return (bar.querySelector(".srr-player-media") as HTMLElement).offsetWidth
+            return {
+               audio,
+               video: host.offsetWidth,
+               sheet: (bar.querySelector(".srr-player-body") as HTMLElement).offsetWidth,
+            }
          })
-         expect(mediaWidth, "the video miniature must collapse on the phone").toBe(0)
+         expect(frame.audio, "an audio episode reserves no frame").toBe(0)
+         expect(frame.video, "a video episode gets the full-width frame").toBe(frame.sheet)
       } finally {
          await close()
       }

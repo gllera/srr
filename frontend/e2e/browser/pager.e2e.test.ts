@@ -327,6 +327,8 @@ describe("browser: reader swipe pager", () => {
          const err = await p.evaluate(async () => {
             const a = document.querySelector(".srr-content audio") as HTMLAudioElement
             ;(a as unknown as Record<string, unknown>).__srrLive = true
+            // The player takes only what is queued: queue it through its chip.
+            ;(a.nextElementSibling as HTMLButtonElement).click()
             try {
                await a.play()
                return ""

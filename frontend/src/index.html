@@ -270,7 +270,7 @@
               data-kind ("audio"/"video") selects the media-host treatment and
               data-src carries the feed's source color, the same ramp the list
               rails and the reader masthead wear. -->
-         <div class="srr-player" role="region" aria-label="Now playing" hidden>
+         <div class="srr-player" role="region" aria-label="Player" hidden>
             <div class="srr-player-media"></div>
             <div class="srr-player-body">
                <button class="srr-player-title" aria-label="Go to this article">
@@ -280,17 +280,34 @@
                <div class="srr-player-seek" role="slider" tabindex="0" aria-label="Seek" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0">
                   <div class="srr-player-seek-fill"></div>
                </div>
+               <div class="srr-player-times"><span class="srr-player-time"></span><span class="srr-player-duration"></span></div>
             </div>
+            <button class="srr-player-close" aria-label="Close player">&times;</button>
             <div class="srr-player-controls">
+               <button class="srr-player-rate" aria-label="Playback speed">1×</button>
                <button class="srr-player-back15" aria-label="Back 15 seconds">−15</button>
                <button class="srr-player-toggle" aria-label="Play" aria-pressed="false"></button>
                <button class="srr-player-fwd15" aria-label="Forward 15 seconds">+15</button>
                <button class="srr-player-next" aria-label="Play next in playlist" hidden>»</button>
-               <button class="srr-player-rate" aria-label="Playback speed">1×</button>
-               <span class="srr-player-time"></span>
-               <button class="srr-player-queue" aria-label="Playlist" aria-expanded="false" hidden></button>
-               <button class="srr-player-close" aria-label="Close player">&times;</button>
             </div>
+            <section class="srr-player-upnext" aria-labelledby="srr-player-upnext-head">
+               <h2 class="srr-player-upnext-head" id="srr-player-upnext-head">Up next <span class="srr-player-count"></span></h2>
+               <div class="srr-player-list" role="list" aria-labelledby="srr-player-upnext-head"></div>
+               <p class="srr-player-empty">Nothing queued. Tap + beside an episode to add it.</p>
+            </section>
+            <!-- The fold. The bar starts FOLDED to this one button (player.ts
+                 toggles .srr-player-folded): a small corner circle over the
+                 toolbar whose bars move while something plays. Pressing it
+                 unfolds the full player — episode, transport and the Up next
+                 list — and it becomes the handle on the player's top edge that
+                 folds it away again. It is a CHILD of the bar on
+                 purpose — the folded bar is visibility:hidden, never
+                 display:none, so a relocated <video> stays rendered, and a
+                 visible child of a hidden parent still paints; it also rides
+                 every position rule the bar has (split view, toolbar-hidden). -->
+            <button class="srr-player-fab" aria-expanded="false" aria-label="Show player" title="Show player">
+               <span class="srr-player-eq" aria-hidden="true"><span></span><span></span><span></span></span>
+            </button>
          </div>
          <div class="srr-pin-progress" hidden></div>
          <!-- Transient snackbar: a report of something that already happened,
