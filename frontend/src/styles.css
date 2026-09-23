@@ -73,7 +73,7 @@ video {
 
 /* Layout */
 .srr-container {
-   max-width: 680px;
+   max-width: var(--column-w);
    margin: 0 auto;
    padding-bottom: 4rem;
 }
@@ -167,7 +167,9 @@ video {
 .srr-title {
    display: block;
    font-weight: 680;
-   font-size: 1.45rem;
+   /* Scales with the prose (1.45rem at the default 1.05rem), so a larger text
+      preference keeps the headline's proportion to the body. */
+   font-size: calc(var(--prose-size) * 1.381);
    letter-spacing: -0.022em;
    line-height: 1.22;
 }
@@ -201,6 +203,16 @@ video {
       background: var(--hover);
    }
 }
+/* The readout's "more" mark — three dots after the lane name, the universal
+   "this opens a menu" sign. Three radial gradients on one box, so it takes the
+   button's currentColor (and its source tint) with no icon asset. */
+.srr-feed-more {
+   flex-shrink: 0;
+   width: 1rem;
+   height: 0.3rem;
+   background: radial-gradient(circle, currentColor 0.11rem, transparent 0.12rem) 0 50% / 0.34rem 0.3rem repeat-x;
+   opacity: 0.8;
+}
 .srr-feed-name {
    min-width: 0;
    overflow: hidden;
@@ -229,9 +241,9 @@ video {
 /* Content — the prose voice is sans; headings stay sans but heavier, code and
    captions in the wire chrome's mono (set below). */
 .srr-content {
-   font-family: var(--font-sans);
-   font-size: 1.05rem;
-   line-height: 1.65;
+   font-family: var(--prose-font);
+   font-size: var(--prose-size);
+   line-height: var(--prose-leading);
    transition:
       opacity 0.25s ease-out,
       transform 0.25s ease-out;
@@ -437,7 +449,7 @@ video {
    left: 0;
    right: 0;
    bottom: 5.5rem;
-   max-width: 680px;
+   max-width: var(--column-w);
    margin: 0 auto;
    z-index: var(--z-searchbar);
    font-size: 0.75rem;
@@ -465,7 +477,7 @@ video {
    gap: 0.75rem;
    /* Shrink-to-fit, but never wider than the reading column or the viewport. */
    width: fit-content;
-   max-width: min(680px, calc(100% - 1.5rem));
+   max-width: min(var(--column-w), calc(100% - 1.5rem));
    padding: 0.5rem 0.9rem;
    font-size: var(--text-sm);
    color: var(--fg);
@@ -512,7 +524,7 @@ video {
    left: 0;
    right: 0;
    bottom: calc(3.35rem + 1px + env(safe-area-inset-bottom));
-   max-width: 680px;
+   max-width: var(--column-w);
    margin: 0 auto;
    /* The toolbar's layer: above the list's sticky day dividers (1) and the
       pinned search bar (5), below the picker overlay (10) and the
@@ -1156,7 +1168,7 @@ body.srr-playing .srr-pin-progress {
    left: 0;
    right: 0;
    bottom: 0;
-   max-width: 680px;
+   max-width: var(--column-w);
    margin: 0 auto;
    /* Above the list's sticky day dividers (z-index 1) and the sticky search bar
       (z-index 5) so the upward-opening filter/⋯ menus are never punched through by
@@ -1936,8 +1948,8 @@ body:not(.srr-split) .srr-pane-toggle {
 }
 /* The picker header's toggle pills — the Info stats mode and the unread-only
    view ("Show read", was the settings menu's checkbox). A compact wire-voice
-   pill: muted outline when off, accent-filled when pressed — the same
-   active-pill vocabulary as the reader's next button. */
+   pill: muted outline when off, accent-tinted when pressed — the same
+   vocabulary as a selected picker row. */
 .srr-picker-fav,
 .srr-picker-info,
 .srr-picker-showread {
@@ -1961,10 +1973,13 @@ body:not(.srr-split) .srr-pane-toggle {
       border-color: var(--border);
       color: var(--fg);
    }
+   /* Pressed wears the SELECTED-ROW tint (.srr-active below): these are
+      modes you are in, not actions to take, so they must not read as the
+      screen's one call to action the way a solid accent fill does. */
    &[aria-pressed="true"] {
-      background: var(--accent);
+      background: color-mix(in srgb, var(--accent) 14%, transparent);
       border-color: var(--accent);
-      color: var(--bg);
+      color: var(--accent);
    }
 }
 /* The Info and ★ toggles are icon-only (an ⓘ glyph in the toolbar icons'
@@ -2433,7 +2448,7 @@ body:not(.srr-split) .srr-pane-toggle {
       and the preview is not a gesture surface at all (pointer-events: none). */
    & .srr-reader {
       min-height: 0;
-      max-width: 680px;
+      max-width: var(--column-w);
       margin-inline: auto;
    }
 
@@ -2916,6 +2931,7 @@ html:has(body.srr-view-list) {
 .srr-backup-dialog,
 .srr-mounts-dialog,
 .srr-keys-dialog,
+.srr-reading-dialog,
 .srr-info-dialog {
    display: none;
    position: fixed;
@@ -2934,6 +2950,7 @@ html:has(body.srr-view-list) {
 .srr-backup-card,
 .srr-mounts-card,
 .srr-keys-card,
+.srr-reading-card,
 .srr-info-card {
    max-height: calc(100dvh - 2.5rem);
    overflow-y: auto;
@@ -2950,6 +2967,7 @@ html:has(body.srr-view-list) {
 .srr-backup-title,
 .srr-mounts-title,
 .srr-keys-title,
+.srr-reading-title,
 .srr-info-title {
    margin: 0 0 0.6rem;
    font-family: var(--font-mono);
@@ -3031,6 +3049,95 @@ html:has(body.srr-view-list) {
    display: flex;
    justify-content: flex-end;
    margin-top: 1.2rem;
+}
+
+/* Touch rows name a gesture, not a key: plain reading-voice text instead of
+   <kbd> chips, and allowed to wrap (a gesture's name is a phrase). */
+.srr-keys-keys.srr-keys-gesture {
+   white-space: normal;
+   font-size: var(--text-sm);
+   color: var(--fg);
+}
+
+/* The reading-preferences dialog (dropdown.ts showReadingDialog): a sample
+   paragraph that wears the live prose properties, then one segmented radio
+   group per preference. The radios are real inputs (visually folded into their
+   label) so arrow keys step within a group and Tab moves between groups. */
+.srr-reading-card {
+   width: min(26rem, 100%);
+}
+.srr-reading-preview {
+   font-family: var(--prose-font);
+   font-size: var(--prose-size);
+   line-height: var(--prose-leading);
+   color: var(--fg);
+   padding: 0.6rem 0.8rem;
+   margin-bottom: 1rem;
+   border: 1px solid var(--faint);
+   border-radius: var(--radius);
+   background: var(--bg);
+}
+.srr-reading-group {
+   border: none;
+   margin: 0 0 0.85rem;
+   padding: 0;
+   & legend {
+      padding: 0;
+      margin-bottom: 0.35rem;
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+   }
+}
+.srr-reading-seg {
+   display: flex;
+   border: 1px solid var(--border);
+   border-radius: var(--radius);
+   overflow: hidden;
+}
+.srr-reading-opt {
+   flex: 1 1 0;
+   position: relative;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   min-height: 2.5rem;
+   font-size: var(--text-sm);
+   color: var(--fg-2);
+   cursor: pointer;
+   transition:
+      background 0.15s,
+      color 0.15s;
+   & + & {
+      border-left: 1px solid var(--faint);
+   }
+   & input {
+      position: absolute;
+      opacity: 0;
+      inset: 0;
+      margin: 0;
+      cursor: pointer;
+   }
+   &:hover {
+      background: var(--hover);
+   }
+   &:has(input:checked) {
+      background: color-mix(in srgb, var(--accent) 14%, transparent);
+      color: var(--accent);
+      font-weight: 600;
+   }
+   &:has(input:focus-visible) {
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+   }
+}
+.srr-reading-actions {
+   display: flex;
+   justify-content: space-between;
+   margin-top: 1.1rem;
 }
 
 .srr-mounts-list {
@@ -3690,6 +3797,7 @@ html:has(body.srr-view-list) {
    .srr-sync-dialog,
    .srr-mounts-dialog,
    .srr-keys-dialog,
+   .srr-reading-dialog,
    .srr-info-dialog {
       display: none !important;
    }
@@ -3942,7 +4050,7 @@ body.srr-split {
       measure, so the text ran from html's page padding straight to the page
       edge with the pane's border at its shoulder. */
    & .srr-container {
-      max-width: min(680px, calc(100% - 3rem));
+      max-width: min(var(--column-w), calc(100% - 3rem));
    }
    /* Surface-transition chrome has no meaning when both surfaces are always on
       screen: back returns to a list that never left, open-article opens a
@@ -4028,7 +4136,7 @@ body.srr-split {
    & .srr-player,
    & .srr-snackbar,
    & .srr-pin-progress {
-      max-width: min(680px, calc(100% - var(--split-pane-w) - 6rem));
+      max-width: min(var(--column-w), calc(100% - var(--split-pane-w) - 6rem));
    }
    /* The arrivals pill is the LIST's affordance (a .srr-list child), so it goes
       the other way — pinned over the PANE. `right` on a fixed box resolves

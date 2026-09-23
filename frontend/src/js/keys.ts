@@ -94,3 +94,7 @@ export const SCHEMA_KEY = "srr-schema"
 // pane.ts applies on every read.
 export const PANE_WIDTH_KEY = "srr-pane-w"
 export const PANE_HIDDEN_KEY = "srr-pane-hidden"
+// The reader's typography preferences (reading.ts). GLOBAL and outside the
+// portable profile for the same reason as the pane width: text size and column
+// width are properties of this screen, not of any store.
+export const READING_KEY = "srr-reading"

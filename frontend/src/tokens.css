@@ -32,6 +32,19 @@
       is the "wire" voice (metadata/labels/code) that wraps the human prose. */
    --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
    --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+   /* Opt-in only (the reading preferences' "Serif" choice) — still a system
+      stack, so choosing it fetches nothing. Never a default voice. */
+   --font-serif: ui-serif, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+
+   /* The reading column and its prose. These are the DEFAULTS; reading.ts
+      overrides them inline on <html> from the reader's preferences, and every
+      rule that must line up with the column (the toolbar, the player, the
+      snackbar, the pager's preview page) reads --column-w rather than a
+      literal, so a wider column moves them together. */
+   --column-w: 680px;
+   --prose-size: 1.05rem;
+   --prose-leading: 1.65;
+   --prose-font: var(--font-sans);
 
    /* Type scale (1.125 ratio). em multipliers in .srr-content mirror these ratios. */
    --text-sm: 0.875rem;

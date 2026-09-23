@@ -20,6 +20,7 @@ import {
    showContextMenu,
    showImgProxyDialog,
    showMountsDialog,
+   showReadingDialog,
    showShortcutsDialog,
    showSyncDialog,
    type MenuItem,
@@ -188,12 +189,19 @@ function settingsMenuItems(): MenuItem[] {
       // (listed but disabled) while the meta index is still rebuilding.
       { label: "Search articles…", action: () => void enterSearch(), disabled: !nav.searchAvailable() },
    ]
+   // The visible home of the frontier menu's whole-backlog raise, which otherwise
+   // lives only behind a long-press on the READER's next pill — a gesture nobody
+   // finds, on a surface this menu isn't even on. Same function, same undo offer,
+   // same scope (the lane the list is showing); absent where it would do nothing.
+   if (!nav.lanePeek() && nav.filterFeeds().size > 0) items.push({ label: "Mark all as read", action: markAllRead })
    const pin = pinMenuEntry(d.showError)
    if (pin) items.push(pin)
    items.push(
+      { label: "Reading…", action: showReadingDialog },
       // The shortcuts card's pointer home (RDR10). `?` opens the same card, but a
-      // shortcut is the one place a keymap must not be the ONLY way in.
-      { label: "Keyboard shortcuts…", action: showShortcutsDialog },
+      // shortcut is the one place a keymap must not be the ONLY way in. It also
+      // lists the touch gestures, each of which is otherwise invisible.
+      { label: "Shortcuts and gestures…", action: showShortcutsDialog },
       { label: "Stores…", action: openMountsDialog },
       { label: "Image proxy…", action: showImgProxyDialog },
       { label: "Backup / Restore…", action: () => showBackupDialog() },

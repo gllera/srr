@@ -214,6 +214,11 @@
                </button>
                <button class="srr-feed" aria-haspopup="menu" aria-label="Settings" title="Settings">
                   <span class="srr-feed-name"></span>
+                  <!-- The visible "more" mark: the readout names the lane AND opens
+                       the settings menu, and without this nothing on screen said
+                       the second part. Drawn in CSS, so it inherits the readout's
+                       color (its source tint included). -->
+                  <span class="srr-feed-more" aria-hidden="true"></span>
                </button>
                <button class="srr-filter" aria-haspopup="dialog" aria-label="Filter by feed or tag" title="Filter by feed or tag">
                   <svg class="srr-filter-icon" viewBox="0 0 24 24" aria-hidden="true">

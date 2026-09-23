@@ -245,6 +245,7 @@ const dropdown = vi.hoisted(() => {
       showContextMenu: vi.fn(),
       showMountsDialog: vi.fn(),
       showShortcutsDialog: vi.fn(),
+      showReadingDialog: vi.fn(),
       // The real bindPressMenu opens through dropdown's own internal
       // showContextMenu binding, which the export spy above can't intercept —
       // so the mock re-wires the one contract these cases drive: contextmenu on
@@ -3408,7 +3409,8 @@ describe("settings menu — the now-viewing readout", () => {
       // moved to the filter picker's header (see the picker toggle tests).
       expect(items.map((i) => i.label)).toEqual([
          "Search articles…",
-         "Keyboard shortcuts…",
+         "Reading…",
+         "Shortcuts and gestures…",
          "Stores…",
          "Image proxy…",
          "Backup / Restore…",
@@ -3418,13 +3420,48 @@ describe("settings menu — the now-viewing readout", () => {
 
    // RDR10 — the shortcuts card must be reachable without already knowing the
    // shortcut that opens it.
-   it("'Keyboard shortcuts…' opens the shortcuts card", async () => {
+   it("'Shortcuts and gestures…' opens the shortcuts card", async () => {
       await boot()
       openMenu()
       menuCall()
-         .items.find((i) => i.label === "Keyboard shortcuts…")!
+         .items.find((i) => i.label === "Shortcuts and gestures…")!
          .action()
       expect(dropdown.showShortcutsDialog).toHaveBeenCalled()
+   })
+
+   it("'Reading…' opens the reading-preferences dialog", async () => {
+      await boot()
+      openMenu()
+      menuCall()
+         .items.find((i) => i.label === "Reading…")!
+         .action()
+      expect(dropdown.showReadingDialog).toHaveBeenCalled()
+   })
+
+   // The frontier menu's whole-backlog raise, given a visible home: the same
+   // action on the lane the list shows, absent wherever it would do nothing.
+   it("offers 'Mark all as read' on a lane with members, and runs the frontier raise", async () => {
+      await boot()
+      nav.isSearchFilter.mockReturnValue(false)
+      nav.filter.feeds = new Map([[1, 0]])
+      openMenu()
+      const row = menuCall().items.find((i) => i.label === "Mark all as read")
+      expect(row).toBeDefined()
+      nav.markAllRead.mockClear()
+      row!.action()
+      expect(nav.markAllRead).toHaveBeenCalledTimes(1)
+   })
+
+   it("omits 'Mark all as read' on a peek lane and on an empty lane", async () => {
+      await boot()
+      nav.isSearchFilter.mockReturnValue(false)
+      nav.filter.feeds = new Map([[1, 0]])
+      nav.lanePeek.mockReturnValueOnce(true)
+      openMenu()
+      expect(menuCall().items.map((i) => i.label)).not.toContain("Mark all as read")
+      nav.filter.feeds = new Map()
+      openMenu()
+      expect(menuCall().items.map((i) => i.label)).not.toContain("Mark all as read")
    })
 
    it("'Search articles…' leaves the menu for the list with search applied", async () => {
@@ -4291,6 +4328,41 @@ describe("surface-agnostic keys — / and ?", () => {
       picker.isOpen.mockReturnValue(true)
       key("?")
       expect(dropdown.showShortcutsDialog).not.toHaveBeenCalled()
+   })
+})
+
+describe("reader keymap — + / - (text size)", () => {
+   beforeEach(() => {
+      clearServiceWorker()
+      localStorage.removeItem("srr-reading")
+      document.documentElement.style.removeProperty("--prose-size")
+   })
+   const key = (k: string, mods: KeyboardEventInit = {}) => {
+      const e = new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, ...mods })
+      document.dispatchEvent(e)
+      return e
+   }
+
+   it("steps the prose size in the reader, = riding with +", async () => {
+      await boot()
+      hashTo("#3")
+      await flush()
+      expect(key("+").defaultPrevented).toBe(true)
+      expect(JSON.parse(localStorage.getItem("srr-reading")!).size).toBe(2)
+      key("=")
+      expect(JSON.parse(localStorage.getItem("srr-reading")!).size).toBe(3)
+      key("-")
+      key("-")
+      expect(localStorage.getItem("srr-reading")).toBeNull() // back at the default
+   })
+
+   it("leaves Ctrl/⌘ +/- to the browser's page zoom", async () => {
+      await boot()
+      hashTo("#3")
+      await flush()
+      expect(key("+", { ctrlKey: true }).defaultPrevented).toBe(false)
+      expect(key("-", { metaKey: true }).defaultPrevented).toBe(false)
+      expect(localStorage.getItem("srr-reading")).toBeNull()
    })
 })
 

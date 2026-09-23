@@ -1,5 +1,6 @@
 import { getImgProxy, isValidProxy, normalizeProxy, setImgProxy } from "./fmt"
 import { exportProfile, importProfile } from "./profile"
+import { DEFAULTS, SIZES, readPrefs, setPrefs, type ReadingPrefs } from "./reading"
 import { getSyncUrl, isValidSyncUrl, normalizeSyncUrl, setSyncUrl, syncNow } from "./sync"
 
 const imgProxyDialog = document.querySelector<HTMLElement>(".srr-imgproxy-dialog")
@@ -365,7 +366,11 @@ export function showMountsDialog(hooks: MountsDialogHooks): void {
 //
 // ⚠ This table is a hand-kept mirror of app.ts's keydown listener. A binding
 // added, removed or re-lettered there belongs here in the same commit.
-const SHORTCUT_GROUPS: ReadonlyArray<{ title: string; rows: ReadonlyArray<[string[], string]> }> = [
+// `touch` groups list GESTURES, not keys: their terms render as plain text
+// rather than <kbd> chips, because a swipe is not something you press. They are
+// here because every gesture below also has a visible or keyboard route, and
+// this card is where a touch user learns the faster one exists.
+const SHORTCUT_GROUPS: ReadonlyArray<{ title: string; touch?: boolean; rows: ReadonlyArray<[string[], string]> }> = [
    {
       title: "Anywhere",
       rows: [
@@ -397,6 +402,7 @@ const SHORTCUT_GROUPS: ReadonlyArray<{ title: string; rows: ReadonlyArray<[strin
          [["P"], "Add / remove the enclosure in the playlist"],
          [["U"], "Mark unread from here"],
          [["F"], "Open the original in a new tab"],
+         [["+", "-"], "Larger / smaller text"],
       ],
    },
    // Its own group rather than a fourth "Anywhere" row: `L` works on both
@@ -406,11 +412,24 @@ const SHORTCUT_GROUPS: ReadonlyArray<{ title: string; rows: ReadonlyArray<[strin
       title: "Desktop",
       rows: [[["L"], "Hide or show the list pane"]],
    },
+   {
+      title: "Touch",
+      touch: true,
+      rows: [
+         [["Swipe a row left"], "Mark it read / unread"],
+         [["Swipe a row right"], "Save / unsave it (★)"],
+         [["Pull the list down"], "Check for new articles"],
+         [["Swipe the article"], "Previous / next article"],
+         [["Two-finger swipe up / down"], "Previous / next filter"],
+         [["Hold the next button"], "Mark all read, or unread from here"],
+         [["Tap an image"], "Enlarge it; pinch to zoom"],
+      ],
+   },
 ]
 
 // The <h2> is the card's visible title AND its accessible name — a role=dialog
 // without one announces as an unnamed group.
-const ensureShortcutsDialog = lazyDialog("keys", "Keyboard shortcuts", "Keyboard shortcuts")
+const ensureShortcutsDialog = lazyDialog("keys", "Shortcuts and gestures", "Shortcuts and gestures")
 
 function shortcutsContent(close: () => void): DocumentFragment {
    const frag = document.createDocumentFragment()
@@ -426,17 +445,21 @@ function shortcutsContent(close: () => void): DocumentFragment {
       for (const [keys, what] of group.rows) {
          const dt = document.createElement("dt")
          dt.className = "srr-keys-keys"
-         keys.forEach((k, i) => {
-            if (i > 0) {
-               const or = document.createElement("span")
-               or.className = "srr-keys-or"
-               or.textContent = "or"
-               dt.appendChild(or)
-            }
-            const kbd = document.createElement("kbd")
-            kbd.textContent = k
-            dt.appendChild(kbd)
-         })
+         if (group.touch) {
+            dt.classList.add("srr-keys-gesture")
+            dt.textContent = keys.join(" / ")
+         } else
+            keys.forEach((k, i) => {
+               if (i > 0) {
+                  const or = document.createElement("span")
+                  or.className = "srr-keys-or"
+                  or.textContent = "or"
+                  dt.appendChild(or)
+               }
+               const kbd = document.createElement("kbd")
+               kbd.textContent = k
+               dt.appendChild(kbd)
+            })
          const dd = document.createElement("dd")
          dd.className = "srr-keys-what"
          dd.textContent = what
@@ -460,6 +483,123 @@ function shortcutsContent(close: () => void): DocumentFragment {
 export function showShortcutsDialog(): void {
    const dialog = ensureShortcutsDialog()
    openModal(dialog, dialog.querySelector<HTMLElement>(".srr-keys-body")!, shortcutsContent)
+}
+
+// ── Reading preferences dialog ────────────────────────────────────────────────
+// Text size, column width, line spacing and typeface (reading.ts owns the
+// model and writes the CSS properties). Every pick APPLIES immediately — the
+// article behind the scrim reflows as you choose — and persists at once, so
+// there is no Save: Done just closes, Reset returns to the defaults. The card
+// carries its own sample paragraph because on a phone the dialog opens from
+// the list, with no article behind it to judge the change by.
+const ensureReadingDialog = lazyDialog("reading", "Reading", "Reading preferences")
+
+type Choice<K extends keyof ReadingPrefs> = {
+   key: K
+   legend: string
+   options: ReadonlyArray<[ReadingPrefs[K], string]>
+}
+
+const READING_CHOICES: ReadonlyArray<Choice<keyof ReadingPrefs>> = [
+   {
+      key: "size",
+      legend: "Text size",
+      options: SIZES.map((_, i): [number, string] => [i, `${i + 1}`]),
+   },
+   {
+      key: "width",
+      legend: "Column width",
+      options: [
+         ["narrow", "Narrow"],
+         ["normal", "Normal"],
+         ["wide", "Wide"],
+      ],
+   },
+   {
+      key: "leading",
+      legend: "Line spacing",
+      options: [
+         ["compact", "Compact"],
+         ["normal", "Normal"],
+         ["relaxed", "Relaxed"],
+      ],
+   },
+   {
+      key: "font",
+      legend: "Typeface",
+      options: [
+         ["sans", "Sans"],
+         ["serif", "Serif"],
+      ],
+   },
+] as ReadonlyArray<Choice<keyof ReadingPrefs>>
+
+function readingContent(close: () => void): DocumentFragment {
+   const frag = document.createDocumentFragment()
+   const preview = divEl("srr-reading-preview")
+   preview.textContent =
+      "The quick brown fox jumps over the lazy dog. A longer sentence shows how lines wrap at this size and spacing, so the column reads the way an article will."
+   frag.appendChild(preview)
+
+   const groups: Array<() => void> = [] // each re-syncs its radios from storage
+   for (const choice of READING_CHOICES) {
+      const fs = document.createElement("fieldset")
+      fs.className = "srr-reading-group"
+      const legend = document.createElement("legend")
+      legend.textContent = choice.legend
+      const seg = divEl("srr-reading-seg")
+      const inputs: HTMLInputElement[] = []
+      for (const [value, label] of choice.options) {
+         const lab = document.createElement("label")
+         lab.className = "srr-reading-opt"
+         const input = document.createElement("input")
+         input.type = "radio"
+         input.name = `srr-reading-${choice.key}`
+         input.value = String(value)
+         input.addEventListener("change", () => {
+            if (input.checked) setPrefs({ ...readPrefs(), [choice.key]: value })
+         })
+         const span = document.createElement("span")
+         span.textContent = label
+         // The size options are sample glyphs at their own size, so the scale
+         // is legible without reading numbers; the number stays as its name.
+         if (choice.key === "size") {
+            span.textContent = "A"
+            span.style.fontSize = `${SIZES[value as number]}rem`
+            input.setAttribute("aria-label", `Size ${label} of ${SIZES.length}`)
+         }
+         inputs.push(input)
+         lab.append(input, span)
+         seg.appendChild(lab)
+      }
+      groups.push(() => {
+         const cur = String(readPrefs()[choice.key])
+         for (const i of inputs) i.checked = i.value === cur
+      })
+      fs.append(legend, seg)
+      frag.appendChild(fs)
+   }
+   const sync = () => groups.forEach((g) => g())
+   sync()
+
+   const actions = divEl("srr-reading-actions")
+   actions.append(
+      btn("srr-dialog-btn srr-reading-reset", "Reset reading preferences", "Reset", () => {
+         setPrefs({ ...DEFAULTS })
+         sync()
+      }),
+      btn("srr-dialog-btn srr-dialog-primary srr-reading-done", "Done", "Done", close),
+   )
+   frag.appendChild(actions)
+   // Land focus on the first group's checked option (the modal shell focuses
+   // nothing itself); the body is attached synchronously after build returns.
+   queueMicrotask(() => preview.parentElement?.querySelector<HTMLInputElement>("input:checked")?.focus())
+   return frag
+}
+
+export function showReadingDialog(): void {
+   const dialog = ensureReadingDialog()
+   openModal(dialog, dialog.querySelector<HTMLElement>(".srr-reading-body")!, readingContent)
 }
 
 // ── Anchored context menu ─────────────────────────────────────────────────────

@@ -24,6 +24,7 @@ import * as nav from "./nav"
 import * as pager from "./pager"
 import { initLayout, layout } from "./layout"
 import { appliedPaneW, initPane, togglePane } from "./pane"
+import { initReading, stepSize } from "./reading"
 import * as picker from "./picker"
 import * as pinUI from "./pin-ui"
 import * as player from "./player"
@@ -826,6 +827,12 @@ const KEY_ACTIONS: Record<string, () => void> = {
    // The unread rewind's direct power-user path (its pointer home is the
    // frontier menu); markUnreadFromHere no-ops without an article / in peek modes.
    u: () => menus.markUnreadFromHere(),
+   // Text size, one step of the reading preferences' scale (reading.ts; the
+   // pointer home is the settings menu's Reading… dialog). `=` rides with `+`
+   // because it is the same key unshifted on most layouts.
+   "+": () => stepSize(1),
+   "=": () => stepSize(1),
+   "-": () => stepSize(-1),
    f: () => {
       if (!el.titleRow.getAttribute("href")) return
       el.titleRow.dispatchEvent(
@@ -844,6 +851,10 @@ async function init() {
    // throws, and outside the try below on purpose: a migration failure is warned
    // internally, not a boot error the popup should offer to reload past.
    ensureSchema()
+   // The reading preferences write CSS properties the reader's first paint
+   // depends on, so they land before anything renders (a device-local read;
+   // it never throws).
+   initReading()
    // Read once the stored shape is settled (the HASH_KEY restore is one of its
    // readers) and before the layout's first paint: a hash that routes to the
    // reader boots with the READER holding focus, so a phone restoring a reading
@@ -1237,6 +1248,9 @@ async function init() {
             return
          }
       }
+      // Ctrl/⌘ with +/-/= is the browser's own page zoom — never the reader's
+      // text size, which would otherwise change both at once.
+      if ((e.ctrlKey || e.metaKey || e.altKey) && (e.key === "+" || e.key === "=" || e.key === "-")) return
       const action = KEY_ACTIONS[e.key]
       if (action) {
          e.preventDefault()

@@ -869,7 +869,7 @@ describe("keyboard shortcuts dialog", () => {
    it("lists BOTH surfaces' bindings, grouped", () => {
       dropdown.showShortcutsDialog()
       const groups = [...$dialog()!.querySelectorAll(".srr-keys-group-title")].map((e) => e.textContent)
-      expect(groups).toEqual(["Anywhere", "List", "Reader", "Desktop"])
+      expect(groups).toEqual(["Anywhere", "List", "Reader", "Desktop", "Touch"])
       const keys = [...$dialog()!.querySelectorAll("kbd")].map((e) => e.textContent)
       // A sample from each group — the card is the app's whole keymap, so a
       // binding that exists on only one surface (or only above the split
@@ -881,11 +881,21 @@ describe("keyboard shortcuts dialog", () => {
       expect(terms.length).toBeGreaterThan(10)
    })
 
+   it("lists the touch gestures as plain phrases, not <kbd> keys", () => {
+      dropdown.showShortcutsDialog()
+      const touch = [...$dialog()!.querySelectorAll(".srr-keys-group")].find(
+         (g) => g.querySelector(".srr-keys-group-title")!.textContent === "Touch",
+      )!
+      expect(touch.querySelectorAll("kbd").length).toBe(0)
+      const terms = [...touch.querySelectorAll("dt")].map((e) => e.textContent)
+      expect(terms).toEqual(expect.arrayContaining(["Swipe a row left", "Hold the next button"]))
+   })
+
    it("is a NAMED modal dialog (an unnamed role=dialog announces as a bare group)", () => {
       dropdown.showShortcutsDialog()
       expect($dialog()!.getAttribute("role")).toBe("dialog")
       expect($dialog()!.getAttribute("aria-modal")).toBe("true")
-      expect($dialog()!.getAttribute("aria-label")).toBe("Keyboard shortcuts")
+      expect($dialog()!.getAttribute("aria-label")).toBe("Shortcuts and gestures")
    })
 
    it("closes on Escape and on the Close button, restoring focus to the opener", () => {
@@ -918,5 +928,80 @@ describe("keyboard shortcuts dialog", () => {
       dropdown.showShortcutsDialog()
       expect(document.querySelector(".srr-mounts-dialog")!.classList.contains("srr-open")).toBe(false)
       expect(isOpen()).toBe(true)
+   })
+})
+
+// The reading-preferences dialog: every pick applies AND persists at once
+// (no Save), Reset returns to the defaults, and it rides the shared modal shell.
+describe("reading preferences dialog", () => {
+   let dropdown: Dropdown
+   const $dialog = () => document.querySelector<HTMLElement>(".srr-reading-dialog")
+   const isOpen = () => !!$dialog()?.classList.contains("srr-open")
+   const radio = (name: string, value: string) =>
+      $dialog()!.querySelector<HTMLInputElement>(`input[name="srr-reading-${name}"][value="${value}"]`)!
+   const pick = (name: string, value: string) => {
+      const r = radio(name, value)
+      r.checked = true
+      r.dispatchEvent(new Event("change", { bubbles: true }))
+   }
+   const root = document.documentElement
+
+   beforeEach(async () => {
+      localStorage.clear()
+      root.removeAttribute("style")
+      document.body.innerHTML = OPENER
+      vi.resetModules()
+      dropdown = await import("./dropdown")
+   })
+   afterEach(() => {
+      if (isOpen()) key(document.body, "Escape")
+      localStorage.clear()
+      root.removeAttribute("style")
+   })
+
+   it("is a named modal with one radio group per preference, seeded from storage", () => {
+      localStorage.setItem("srr-reading", JSON.stringify({ size: 3, width: "wide", leading: "normal", font: "serif" }))
+      dropdown.showReadingDialog()
+      expect($dialog()!.getAttribute("role")).toBe("dialog")
+      expect($dialog()!.getAttribute("aria-label")).toBe("Reading preferences")
+      const legends = [...$dialog()!.querySelectorAll("legend")].map((e) => e.textContent)
+      expect(legends).toEqual(["Text size", "Column width", "Line spacing", "Typeface"])
+      expect(radio("size", "3").checked).toBe(true)
+      expect(radio("width", "wide").checked).toBe(true)
+      expect(radio("font", "serif").checked).toBe(true)
+   })
+
+   it("applies and persists a pick immediately, without a Save", () => {
+      dropdown.showReadingDialog()
+      pick("width", "narrow")
+      pick("size", "4")
+      expect(root.style.getPropertyValue("--column-w")).toBe("580px")
+      expect(root.style.getPropertyValue("--prose-size")).toBe("1.4rem")
+      expect(JSON.parse(localStorage.getItem("srr-reading")!)).toMatchObject({ width: "narrow", size: 4 })
+   })
+
+   it("Reset returns every group to the defaults and clears the stored key", () => {
+      dropdown.showReadingDialog()
+      pick("leading", "relaxed")
+      pick("font", "serif")
+      $dialog()!.querySelector<HTMLButtonElement>(".srr-reading-reset")!.click()
+      expect(localStorage.getItem("srr-reading")).toBeNull()
+      expect(root.style.getPropertyValue("--prose-leading")).toBe("")
+      expect(root.style.getPropertyValue("--prose-font")).toBe("")
+      expect(radio("leading", "normal").checked).toBe(true)
+      expect(radio("font", "sans").checked).toBe(true)
+      expect(isOpen()).toBe(true) // Reset is not Done
+   })
+
+   it("Done and Escape close it, restoring focus to the opener", () => {
+      const opener = document.querySelector<HTMLButtonElement>(".srr-opener")!
+      opener.focus()
+      dropdown.showReadingDialog()
+      $dialog()!.querySelector<HTMLButtonElement>(".srr-reading-done")!.click()
+      expect(isOpen()).toBe(false)
+      expect(document.activeElement).toBe(opener)
+      dropdown.showReadingDialog()
+      key(document.body, "Escape")
+      expect(isOpen()).toBe(false)
    })
 })

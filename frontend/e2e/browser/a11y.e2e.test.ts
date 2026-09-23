@@ -221,6 +221,30 @@ describe("browser: a11y (axe-core)", () => {
       }
    })
 
+   // The reading-preferences dialog: JS-built like the shortcuts card, and its
+   // segmented controls are visually-folded radios whose names and grouping
+   // (fieldset/legend) only an automated pass reviews. Opened through the
+   // settings menu, the way a user reaches it.
+   it("the reading-preferences dialog has no serious/critical violations", async () => {
+      const [page, close] = await open()
+      try {
+         await page.click(".srr-feed")
+         await page.waitForSelector(".srr-ctxmenu")
+         const clicked = await page.evaluate(() => {
+            const row = [...document.querySelectorAll<HTMLElement>(".srr-ctxmenu [role=menuitem]")].find(
+               (e) => e.textContent === "Reading…",
+            )
+            row?.click()
+            return !!row
+         })
+         expect(clicked).toBe(true)
+         await page.waitForSelector(".srr-reading-dialog.srr-open")
+         await audit(page, "reading dialog")
+      } finally {
+         await close()
+      }
+   })
+
    // Split view is a different a11y surface, not a wider one: both panes are on
    // screen at once, the toolbar is a two-segment rail, and the resize grip is a
    // focusable role=separator — which axe holds to `aria-required-attr`
