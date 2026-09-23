@@ -169,6 +169,7 @@ function ensurePage(): { box: HTMLElement; refs: ArticleRefs } {
    kicker.append(source, desk, date)
    const title = document.createElement("h1")
    title.className = "srr-title"
+   title.dir = "auto" // as index.html's reader <h1>: an RTL headline must break the same way on both pages
    titleRow.append(kicker, title)
    const content = document.createElement("div")
    content.className = "srr-content"

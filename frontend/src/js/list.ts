@@ -592,6 +592,10 @@ export function rowEl(
    const age = el("time", "srr-row-age")
    head.append(source, age)
    const title = el("div", "srr-row-title")
+   // A headline takes its direction from its own first strong character, so an
+   // Arabic or Hebrew title lines up right beside Latin ones instead of
+   // inheriting the page's LTR (the reader's <h1> carries the same attribute).
+   title.dir = "auto"
    body.append(head, title)
    const star = el("span", "srr-row-star")
    star.setAttribute("role", "button")
