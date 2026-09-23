@@ -1,4 +1,4 @@
-.PHONY: verify verify-fe verify-be typecheck-fe check-coverage-test fuzz-be lint-fe format-check-fe format-fe test-fe build-fe smoke-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-race-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design design-shots build-cloud verify-cloud smoke-cloud deploy-cloud build-reader check-reader-config deploy-reader
+.PHONY: verify verify-fe verify-be typecheck-fe check-coverage-test fuzz-be lint-fe format-check-fe format-fe test-fe build-fe smoke-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-race-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design design-shots
 
 SHELL := /bin/bash -e
 
@@ -10,14 +10,6 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo deve
 
 # verify includes the fast jsdom e2e contract layer; the heavier headless-browser
 # layer (test-browser) is opt-in via test-e2e.
-#
-#
-# verify-cloud is deliberately NOT here, and that is not the same as ungated:
-# ci.yml runs it as its own step beside this one. release.yml gates every
-# release artifact on `make verify`, so folding the worker in would have made a
-# wrangler/workerd/vitest-pool-workers breakage block shipping the srr BINARY —
-# coupling the backend's release to a Cloudflare toolchain it does not use.
-# Keep this target the frontend+backend contract release.yml means by it.
 verify: verify-fe verify-be test-contract
 # smoke-fe runs the built bundle through a fast, Chrome-free boot check — it
 # fails if Parcel dropped a build-time define, the regression that shipped a
@@ -90,103 +82,6 @@ build-fe: frontend/node_modules/.package-lock.json
 # The boot smoke reads the build output, so it must run after build-fe (the
 # order-only prereq holds even under parallel make).
 smoke-fe: build-fe
-
-# --- SRR Cloud (cloud/worker) ---------------------------------------------
-# build-cloud stages the store-root reader bundle (dist/srrf, relative
-# PACK_BASE — the `srr frontend update` shell) as the Worker's static assets.
-# _headers is a Pages artifact; the Worker sets its own headers, so it is
-# dropped rather than served as a file.
-cloud/worker/node_modules/.package-lock.json: cloud/worker/package-lock.json
-	cd cloud/worker && npm ci
-
-# wrangler.toml is gitignored (one operator's hostname, zone and login URL), so
-# a fresh clone and CI get a placeholder copy of the committed example. NO
-# prerequisite on purpose: make runs this only when the file does not exist, so
-# editing the example can never clobber a real config.
-cloud/worker/wrangler.toml:
-	cp cloud/worker/wrangler.example.toml $@
-	@echo "note: created $@ from the example — edit it before deploying"
-
-# The env is set EXPLICITLY rather than inherited, and build-fe is invoked as a
-# sub-make rather than named as a prerequisite. Both are about the sibling
-# target below: build-reader stages the same bundle built the OPPOSITE way
-# (absolute cdn-url), and a shared prerequisite would run build-fe ONCE for
-# `make build-cloud build-reader` and stage identical bytes into both.
-#
-# SRR_CONFIG_INLINE='{}' (the idiom `generate` uses) is the other half: with
-# SRR_CDN_URL merely unset, resolve-cdn-url falls through to `cdn-url:` in the
-# HOST's ~/.config/srr/srr.yaml — so on an operator's box this staged an
-# absolute-CDN bundle while claiming to be the relative one.
-build-cloud:
-	SRR_CDN_URL= SRR_CONFIG_INLINE='{}' $(MAKE) build-fe
-	rm -rf cloud/worker/public
-	mkdir -p cloud/worker/public
-	cp -r dist/srrf/. cloud/worker/public/
-	rm -f cloud/worker/public/_headers
-
-# The two workers share a runtime envelope across two tracked config files, and
-# only ONE of them is ever exercised: the vitest pool loads wrangler.toml (made
-# from the example), never wrangler.reader.toml. So a compatibility_date bump —
-# which the comment beside it ties to the pinned vitest-pool version — or an
-# [assets] change applied to one and not the other ships a reader Worker running
-# semantics no test ever ran. Cheap to state, and it is the drift that survives
-# every other gate here.
-CLOUD_SHARED_TOML := '^(compatibility_date|workers_dev|html_handling|not_found_handling|run_worker_first)'
-verify-cloud: build-cloud cloud/worker/wrangler.toml cloud/worker/node_modules/.package-lock.json
-	@diff <(grep -E $(CLOUD_SHARED_TOML) cloud/worker/wrangler.example.toml) \
-	      <(grep -E $(CLOUD_SHARED_TOML) cloud/worker/wrangler.reader.toml) \
-	  || { echo "wrangler.reader.toml drifted from wrangler.example.toml (runtime pin / assets envelope)"; exit 1; }
-	cd cloud/worker && npm run check && npm run test
-
-# Opt-in end-to-end smoke: real srr store → local R2 → wrangler dev → HTTP
-# checks per route class. Needs the srr binary and the staged bundle.
-smoke-cloud: build-cloud build-be cloud/worker/wrangler.toml cloud/worker/node_modules/.package-lock.json
-	node cloud/e2e/smoke.mjs
-
-# DEPLOY IS MANUAL AND CURRENTLY DEFERRED — see the phase-1 plan's runbook.
-# The guard is not paranoia: verify-cloud materializes a placeholder config when
-# none exists, so without it a first-time deploy would happily publish a Worker
-# routed at example.com.
-# Comment lines are stripped first, deliberately: the example EXPLAINS this guard
-# and so mentions example.com itself, which would otherwise block a config whose
-# values are perfectly real.
-deploy-cloud: verify-cloud
-	@grep -v '^[[:space:]]*#' cloud/worker/wrangler.toml | grep -q "example\.com" \
-	   && { echo "refusing to deploy: cloud/worker/wrangler.toml still holds example.com placeholders"; exit 1; } || true
-	cd cloud/worker && npx wrangler deploy
-
-# --- the hosted reader Worker (cloud/worker, src/reader.ts) -----------------
-# The gate and the shell on ONE origin: this Worker serves the reader bundle as
-# its own assets, so there is no second address answering the same bytes around
-# the login. Config in cloud/worker/wrangler.reader.toml (tracked — it names no
-# hostname); the four runtime values are `wrangler secret put`.
-#
-# The bundle is built WITH an absolute cdn-url: the packs live on the CDN origin
-# and this reader fetches them cross-origin, which is the whole difference from
-# build-cloud's relative build above.
-build-reader:
-	@test -n "$(SRR_CDN_URL)" || { echo "build-reader needs SRR_CDN_URL — the pack origin this reader fetches from."; \
-	  echo "Without it the bundle resolves PACK_BASE relative to its own origin, where there are no packs."; exit 1; }
-	SRR_CDN_URL="$(SRR_CDN_URL)" $(MAKE) build-fe
-	rm -rf cloud/worker/public-reader
-	mkdir -p cloud/worker/public-reader
-	cp -r dist/srrf/. cloud/worker/public-reader/
-	rm -f cloud/worker/public-reader/_headers
-
-# Checked BEFORE verify-cloud so a missing value costs a second rather than two
-# frontend builds. Prerequisites run left to right (this repo never builds -j).
-check-reader-config:
-	@test -n "$(SRR_WORKER_ROUTE)" || { echo "refusing to deploy: SRR_WORKER_ROUTE is unset."; \
-	  echo "It is the route pattern this Worker answers (e.g. 'reader.example.com/*'); the zone is inferred from it."; \
-	  echo "It lives in CI secrets, not in this repo — see cloud/worker/wrangler.reader.toml."; exit 1; }
-	@test -n "$(SRR_CDN_URL)" || { echo "refusing to deploy: SRR_CDN_URL is unset (see build-reader)"; exit 1; }
-
-# DEPLOY: unlike deploy-cloud, this one is CI's — release.yml runs it on a tag,
-# because the reader must not lag its own release. verify-cloud is the package
-# gate (it type-checks and tests src/reader.ts along with everything else).
-deploy-reader: check-reader-config verify-cloud
-	$(MAKE) build-reader
-	cd cloud/worker && npx wrangler deploy -c wrangler.reader.toml --route "$(SRR_WORKER_ROUTE)"
 
 vet-be test-be:
 	cd backend && go $(@:-be=) ./...
