@@ -349,3 +349,42 @@ func TestFrontendUpdateWithoutListUsesSitemap(t *testing.T) {
 		t.Error("an untracked file cannot be discovered without a listing; it must be left alone")
 	}
 }
+
+// TestUploadOrder covers the two-entry-page bundle (index.html + admin.html):
+// every root-level *.html entry page must upload after every non-HTML file
+// (so it never lands ahead of the hashed bundle it references), and
+// index.html — the reader's own entry, which callers additionally rely on
+// finding at the end — must be the very last key of all.
+func TestUploadOrder(t *testing.T) {
+	in := []string{
+		"admin.html",
+		"admin.aaaaaaaa.js",
+		"admin.bbbbbbbb.css",
+		"frontend.cccccccc.js",
+		"frontend.dddddddd.css",
+		"index.html",
+		"manifest.webmanifest",
+	}
+	out := uploadOrder(in)
+
+	if got, want := len(out), len(in); got != want {
+		t.Fatalf("uploadOrder dropped/added keys: got %d, want %d (%v)", got, want, out)
+	}
+	pos := make(map[string]int, len(out))
+	for i, k := range out {
+		pos[k] = i
+	}
+	if pos["index.html"] != len(out)-1 {
+		t.Errorf("index.html at position %d, want last (%d): %v", pos["index.html"], len(out)-1, out)
+	}
+	for _, html := range []string{"admin.html", "index.html"} {
+		for _, k := range in {
+			if strings.HasSuffix(k, ".html") {
+				continue
+			}
+			if pos[html] < pos[k] {
+				t.Errorf("%s (pos %d) uploads before non-HTML file %s (pos %d): %v", html, pos[html], k, pos[k], out)
+			}
+		}
+	}
+}

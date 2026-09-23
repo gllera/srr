@@ -34,8 +34,8 @@ const (
 	// summaries (idx/h<N>, meta/s<N>) are write-once names — never rewritten
 	// after the db.gz commit that publishes them; assets/ keys are
 	// content-hashed. The CDN/client may cache them all forever. Exported so
-	// serve's embedded admin-UI cache layer stamps its hashed bundle assets
-	// with the same directive.
+	// `srr frontend update` stamps its hashed bundle assets with the same
+	// directive.
 	CacheImmutable = "public, max-age=31536000, immutable"
 	// cacheRevalidate stamps db.gz: the store's only mutable key (the
 	// consistency root naming the current L<seq> generation), rewritten every
@@ -177,10 +177,10 @@ func cacheControlForKey(key string) string {
 		// on every fetch cycle. Must-revalidate so clients always see the
 		// latest window. Not in PackSeries/packKeyRe — NOT immutable.
 		return cacheRevalidate
-	case key == "index.html" || key == "manifest.webmanifest" || key == "sitemap.txt":
+	case key == "index.html" || key == "admin.html" || key == "manifest.webmanifest" || key == "sitemap.txt":
 		// The self-hosted frontend's mutable root files (`srr frontend update`):
-		// the SPA entry point, its manifest, and the sitemap manifest are
-		// rewritten on every upgrade, so revalidate.
+		// the SPA entry point, the admin shell, its manifest, and the sitemap
+		// manifest are rewritten on every upgrade, so revalidate.
 		return cacheRevalidate
 	case strings.HasPrefix(key, "assets/") || packKeyRe.MatchString(key) || feHashedRe.MatchString(key):
 		return CacheImmutable

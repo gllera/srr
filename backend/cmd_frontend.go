@@ -384,17 +384,28 @@ func union(a, b []string) []string {
 	return slices.Sorted(maps.Keys(s))
 }
 
-// uploadOrder keeps the (already sorted) keys but moves index.html to the end.
+// uploadOrder keeps the (already sorted) keys but moves every root-level
+// entry page (a *.html file at the bundle root, e.g. index.html or admin.html)
+// to the end, after every non-HTML file — so a page never lands ahead of the
+// hashed bundle it references and a reader mid-update never sees a page
+// pointing at a missing script or stylesheet. index.html, the reader's own
+// entry, stays the very last key of all (existing callers/tests pin that).
 func uploadOrder(keys []string) []string {
 	out := make([]string, 0, len(keys))
+	var htmlPages []string
 	hasIndex := false
 	for _, k := range keys {
 		if k == "index.html" {
 			hasIndex = true
 			continue
 		}
+		if strings.HasSuffix(k, ".html") && !strings.Contains(k, "/") {
+			htmlPages = append(htmlPages, k)
+			continue
+		}
 		out = append(out, k)
 	}
+	out = append(out, htmlPages...)
 	if hasIndex {
 		out = append(out, "index.html")
 	}
