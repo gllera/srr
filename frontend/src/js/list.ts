@@ -1219,21 +1219,31 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    relabelDividers()
    if (anchoredMid && anchorNow) reassertAnchor(seed)
 
-   // Land-once for a fresh anchor: content-visibility rows paint taller and web
-   // fonts reflow AFTER the fill, so scrolling now would land short and then bump as
-   // the rows grow. Instead CONVERGE THE MEASUREMENT without moving: each frame
-   // re-pin every row's current true height (so even off-screen rows reserve their
-   // real size) and compute where the seed WOULD scroll to (centered — the same
-   // mid-screen anchor as the reader return); once that target stops changing for
-   // two frames, the layout has settled — scroll there a single time and only now
-   // start the observer. Bounded so a never-settling layout can't spin; abandoned
-   // if the user scrolls first. No requestAnimationFrame (jsdom) → land
-   // synchronously.
-   // Nothing deferred to land: the observer is already live (it was started
-   // above), so this is the whole of render's tail.
-   if (!landOnceMode) return
+   // Both anchored modes finish by CONVERGING THE MEASUREMENT over frames:
+   // content-visibility rows paint taller and web fonts reflow AFTER the fill,
+   // and an off-screen row reports the size the browser last REMEMBERED for it
+   // (contain-intrinsic-size: auto) until the next rendering update — so a
+   // centring measured in the fill's own task lands short, by hundreds of pixels
+   // when the rows above are tall. Each frame re-pins every row's current true
+   // height (so even off-screen rows reserve their real size) and computes where
+   // the seed centres; once that target has held for two frames the layout has
+   // settled. Bounded so a never-settling layout can't spin; abandoned if the
+   // user scrolls first. No requestAnimationFrame (jsdom) → settle synchronously.
+   //
+   // - Land-once (a fresh anchor: boot/filter change) measures WITHOUT moving and
+   //   scrolls a single time at the end: scrolling onto still-growing rows and
+   //   then correcting is exactly the visible "bump". Only then does the observer
+   //   start.
+   // - The immediate anchor (anchorNow: returning from the reader, and a split
+   //   view's cold build beside an open article) is already on screen, so it
+   //   FOLLOWS the target each frame it moves, keeping the row in view.
+   // Anything else (the newest-default -1) has nothing to land: the observer is
+   // already live (started above), so this is the whole of render's tail.
+   const immediate = anchoredMid && anchorNow
+   if (!landOnceMode && !immediate) return
    const allRows = (): HTMLElement[] => (rowsEl ? [...rowsEl.querySelectorAll<HTMLElement>("a.srr-row")] : [])
    const commit = (): void => {
+      if (!landOnceMode) return // the immediate anchor followed as it went; its observer is live
       // The list and the reader share the window scroll. This scroll is DEFERRED
       // (fonts.ready + a settle loop), so a row opened meanwhile — layout.ts's effect
       // sets container.hidden (el.listView.hidden) once focus moves to the reader —
@@ -1266,6 +1276,7 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
          else {
             stable = 0
             lastTarget = target
+            if (immediate && target >= 0) sc.to(target)
          }
          if (stable >= 2 || tries++ > 20) return commit()
          requestAnimationFrame(tick)
@@ -1274,6 +1285,7 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
       void fontsReady.then(() => requestAnimationFrame(tick))
    } else {
       pinHeights(allRows())
+      if (immediate) reassertAnchor(seed)
       commit()
    }
 }

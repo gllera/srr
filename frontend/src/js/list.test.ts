@@ -579,6 +579,66 @@ describe("list", () => {
       }
    })
 
+   it("an immediate anchor follows its row as the rows above it settle to their real heights", async () => {
+      // The immediate anchor (returning from the reader, and a split view's cold
+      // build beside a deep-linked article) centres its row during the fill. With
+      // content-visibility:auto, an off-screen row reports the size the browser
+      // last REMEMBERED until the next frame, so that centring can be measured on
+      // rows that turn out hundreds of pixels taller a frame later — the deep-linked
+      // row then sat off the bottom of the split pane. The settle loop must follow
+      // the row until its position holds. Rows here "grow" after the first frame:
+      // the seed measures at 100px during the fill and at 1200px from then on.
+      setIndex(10)
+      nav._setAnchor(5) // anchoredMid + anchorNow → the immediate path
+      const rafCbs: FrameRequestCallback[] = []
+      vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => rafCbs.push(cb))
+      vi.stubGlobal("cancelAnimationFrame", () => {})
+      let frames = 0
+      const drain = async (): Promise<void> => {
+         for (let i = 0; i < 6; i++) await Promise.resolve()
+         while (rafCbs.length) {
+            frames++
+            rafCbs.shift()!(0)
+         }
+      }
+      const rect = (top: number, bottom: number) =>
+         ({
+            top,
+            bottom,
+            height: bottom - top,
+            left: 0,
+            right: 0,
+            width: 0,
+            x: 0,
+            y: top,
+            toJSON: () => ({}),
+         }) as DOMRect
+      const real = HTMLElement.prototype.getBoundingClientRect
+      HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+         if (this.dataset.chron !== "5") return real.call(this)
+         return frames ? rect(1200, 1250) : rect(100, 150)
+      }
+      const scrollSpy = window.scrollTo as unknown as ReturnType<typeof vi.fn>
+      try {
+         await list.render(true)
+         // During the fill it centred on the stale measurement (clamped to the top).
+         expect(scrollSpy).toHaveBeenLastCalledWith(0, 0)
+         await drain()
+         // …and followed the row once it settled: 1200 + 50/2 − innerHeight/2.
+         expect(scrollSpy).toHaveBeenLastCalledWith(0, 1225 - window.innerHeight / 2)
+         // A user scroll during the settle wins over the follow.
+         await list.render(true)
+         frames = 0
+         const n = scrollSpy.mock.calls.length
+         document.dispatchEvent(new Event("wheel"))
+         await drain()
+         expect(scrollSpy.mock.calls.length).toBe(n)
+      } finally {
+         HTMLElement.prototype.getBoundingClientRect = real
+         vi.unstubAllGlobals()
+      }
+   })
+
    it("propagates a fill failure so the app can surface it (no silent permanent skeleton)", async () => {
       setIndex(3)
       data.loadMeta.mockImplementation(async (chron: number) => {
