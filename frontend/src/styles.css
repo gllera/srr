@@ -2477,11 +2477,13 @@ body:not(.srr-split) .srr-pane-toggle {
       the glyph stays put while the content slides off it. */
    position: relative;
    /* Offscreen rows skip layout/paint — virtualization without manual windowing.
-      The intrinsic-size hint keeps the scrollbar honest before they render.
+      The intrinsic-size hint keeps the scrollbar honest before they render: every
+      row is one height (the title reserves two lines, below), and 3.75rem is its
+      content box at the default type size — list.ts's pinHeights makes it exact.
       content-visibility also applies PAINT containment, which is what clips the
       swiped content at the row's own edges instead of spilling over neighbours. */
    content-visibility: auto;
-   contain-intrinsic-size: auto 4rem;
+   contain-intrinsic-size: auto 3.75rem;
    &:hover {
       background: var(--hover);
    }
@@ -2537,11 +2539,9 @@ body:not(.srr-split) .srr-pane-toggle {
    background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 /* Progressive render: a row whose meta card hasn't arrived yet. Shimmer bars
-   stand in for source/age/title; the row reserves ~a 2-line height so the fill
-   barely shifts layout. Static under reduced motion. */
-.srr-row-skeleton {
-   contain-intrinsic-size: auto 4.75rem;
-}
+   stand in for source/age/title; the title's two reserved lines (.srr-list
+   .srr-row-title) make a skeleton exactly as tall as the row it becomes, so the
+   fill shifts no layout. Static under reduced motion. */
 .srr-row-skeleton .srr-row-source,
 .srr-row-skeleton .srr-row-age,
 .srr-row-skeleton .srr-row-title {
@@ -2631,6 +2631,20 @@ body:not(.srr-split) .srr-pane-toggle {
 .srr-row-unread .srr-row-title {
    color: var(--fg);
    font-weight: 600;
+}
+/* Every list row is the same height: the title is clamped to two lines and
+   always reserves two, so a one-line headline and a paragraph-long one (a
+   titleless microblog item) take the same space. That makes the list a regular
+   rhythm to scan, and makes a row's height known before it fills — a skeleton
+   reserves exactly what its card will take. Scoped to the list: the picker
+   reuses .srr-row-title for rows of its own. */
+.srr-list .srr-row-title {
+   display: -webkit-box;
+   -webkit-box-orient: vertical;
+   -webkit-line-clamp: 2;
+   line-clamp: 2;
+   overflow: hidden;
+   min-height: calc(2em * 1.32); /* two lines of the title's line-height */
 }
 /* Matched search terms (RDR8, list.ts paintTitle). The UA's default <mark> is a
    flat yellow the palette has no room for, so it becomes a tinted underlay in the

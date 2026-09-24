@@ -770,15 +770,17 @@ function trimWindow(side: "top" | "bottom"): void {
 let rowChrome = -1
 
 // Pin each row's REAL height as its content-visibility intrinsic size. Rows are
-// virtualized with `content-visibility: auto; contain-intrinsic-size: auto 4rem`
-// (styles.css) — but a real row is 1- or 2-line (≈60 vs 80px), so the 4rem (64px)
-// placeholder is wrong for every row. With the list's browser scroll anchoring
-// off (overflow-anchor:none, for Safari parity), nothing absorbs a placeholder→
-// real correction happening ABOVE the viewport: the moment a skipped row renders
-// (scrolled into view, or swept past by a prepend's compensation scroll) its size
-// jumps and shoves the viewport — the upward-scroll jump. Measuring each row once
-// and pinning its true height makes the reserved space exact, so a row's size
-// never changes when it later renders or skips, on any engine. Called at every
+// virtualized with `content-visibility: auto; contain-intrinsic-size: auto 3.75rem`
+// (styles.css). Every row is one height (the title always reserves two lines)
+// and the placeholder is that height — but only at the default type size, zoom
+// and fonts; anything else makes it wrong for every row. With the list's browser
+// scroll anchoring off (overflow-anchor:none, for Safari parity), nothing
+// absorbs a placeholder→real correction happening ABOVE the viewport: the
+// moment a skipped row renders (scrolled into view, or swept past by a
+// prepend's compensation scroll) its size jumps and shoves the viewport — the
+// upward-scroll jump. Measuring each row once and pinning its true height
+// makes the reserved space exact, so a row's size never changes when it later
+// renders or skips, on any engine. Called at every
 // insertion path so the invariant "every loaded row's intrinsic size is its real
 // height" holds, keeping the fetchNewer prepend compensation exact. One forced
 // layout per batch (the offsetHeight read); the rows stay virtualized afterward.
