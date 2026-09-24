@@ -112,9 +112,18 @@ function ensureOverlay(): HTMLElement {
    x.type = "button"
    x.className = "srr-lightbox-close"
    x.setAttribute("aria-label", "close image viewer")
-   x.textContent = "✕"
+   // ⌄ at the top left, the full-screen views' shared dismiss (the player's and
+   // the picker's); first in the DOM so Tab order follows what is seen.
+   const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg")
+   icon.setAttribute("class", "srr-dismiss-icon")
+   icon.setAttribute("viewBox", "0 0 24 24")
+   icon.setAttribute("aria-hidden", "true")
+   const chev = document.createElementNS("http://www.w3.org/2000/svg", "path")
+   chev.setAttribute("d", "M6 9.5l6 6 6-6")
+   icon.append(chev)
+   x.append(icon)
 
-   d.append(s, x)
+   d.append(x, s)
    // Wired once, at build time — the viewer is hidden (display:none) whenever it
    // is closed, so these can never fire between opens.
    d.addEventListener("click", (e) => {

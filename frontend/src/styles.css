@@ -591,8 +591,9 @@ video {
    animation: none;
 }
 /* ⌄ — HIDES the view (it never stops or clears anything; emptying the
-   playlist is what takes the player away). A chevron, not ✕, because ✕ means
-   "remove" in the rows below. */
+   playlist is what takes the player away). The full-screen views' shared
+   close (.srr-dismiss-icon); a chevron also keeps it apart from the rows' ✕,
+   which means "remove". */
 .srr-player-close {
    flex: none;
    display: inline-flex;
@@ -614,8 +615,10 @@ video {
 .srr-player-close {
    margin-left: -0.6rem;
 }
-/* The dismiss chevron (⌄) — the player view's close, at its top left: it
-   lowers the view back to the dock. */
+/* The dismiss chevron (⌄) — the close control of every FULL-SCREEN view: the
+   player, the filter picker and the image viewer, always at the top left
+   (user call 2026-09-23). Small boxes over the page (the info card, the error
+   popup) keep ✕ at their top right. */
 .srr-dismiss-icon {
    display: block;
    width: 1.6rem;
@@ -2294,8 +2297,9 @@ body:not(.srr-split) .srr-pane-toggle {
    z-index: var(--z-sticky);
    display: flex;
    align-items: center;
-   /* The title's auto right-margin pushes the ★ + Info + Show-read toggles + ✕
-      close to the right edge, sitting together (the gap spaces them). Wrapping
+   /* ⌄ close first at the left edge (the full-screen views' shared dismiss),
+      then the title, whose auto right-margin pushes the ★ + Info + Show-read
+      toggles to the right edge, sitting together (the gap spaces them). Wrapping
       is what puts the row-search on its own full-width line below them (and
       lets the pills drop a line before they crush on a narrow phone) — the
       search rides INSIDE the header so it sticks with it as the rows scroll. */
@@ -2387,14 +2391,23 @@ body:not(.srr-split) .srr-pane-toggle {
    stroke-linejoin: round;
 }
 .srr-picker-close {
-   background: none;
-   border: none;
-   color: var(--fg);
-   font-size: 1.6rem;
-   line-height: 1;
+   display: inline-flex;
+   align-items: center;
+   justify-content: center;
    min-width: 2.75rem;
    min-height: 2.75rem;
+   /* The chevron's ink lines up with the rows' left edge below it. */
+   margin-left: -0.6rem;
+   padding: 0;
+   border: none;
+   border-radius: var(--radius);
+   background: none;
+   color: var(--muted);
    cursor: pointer;
+   &:hover {
+      color: var(--fg);
+      background: var(--hover);
+   }
 }
 /* List surface — a scannable feed of headline rows. The list is a bidirectional
    infinite window anchored at the reader's position: newer ("next") rows page in
@@ -3991,10 +4004,12 @@ html:has(body.srr-view-list) {
    max-height: calc(100dvh - 4rem);
    transition: transform 0.18s ease;
 }
+/* ⌄ at the top left — the full-screen views' shared dismiss (.srr-dismiss-icon),
+   on a raised disc so it reads over any image. */
 .srr-lightbox-close {
    position: absolute;
    top: 0.75rem;
-   right: 0.75rem;
+   left: 0.75rem;
    width: 2.25rem;
    height: 2.25rem;
    display: flex;
@@ -4017,6 +4032,10 @@ html:has(body.srr-view-list) {
       border-color: var(--fg);
       background: var(--hover);
    }
+}
+.srr-lightbox-close .srr-dismiss-icon {
+   width: 1.3rem;
+   height: 1.3rem;
 }
 
 /* Focus */

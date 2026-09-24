@@ -246,11 +246,20 @@ describe("image lightbox", () => {
          }
       })
 
-      it("traps Tab between the stage and the ✕", () => {
+      it("traps Tab between the ⌄ and the stage", () => {
          seed(`<img src="http://cdn.test/pic.png">`).click()
-         // Focus opens on the ✕ (the last focusable) — Tab wraps to the stage.
+         // Focus opens on the ⌄ — first in the DOM, as it is first on screen
+         // (top left) — and Tab order follows it to the stage.
          expect(document.activeElement).toBe($close())
-         key("Tab", $close())
+         const [first, last] = [...document.querySelectorAll(".srr-lightbox button")]
+         expect([first, last]).toEqual([$close(), $stage()])
+         // Tab from the last wraps to the first; Shift+Tab from the first to the last.
+         $stage().focus()
+         key("Tab", $stage())
+         expect(document.activeElement).toBe($close())
+         $close().dispatchEvent(
+            new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true, cancelable: true }),
+         )
          expect(document.activeElement).toBe($stage())
       })
    })
