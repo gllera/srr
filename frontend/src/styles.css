@@ -2419,6 +2419,12 @@ body:not(.srr-split) .srr-pane-toggle {
    padding-bottom: 1rem;
    overflow-anchor: none;
 }
+/* A split pane's cold build settling onto its row (list.ts veil): laid out and
+   measured, not painted. visibility, not display/hidden — the settle loop
+   measures row heights and scroll targets through it. */
+.srr-list.srr-list-settling {
+   visibility: hidden;
+}
 /* The split pane's resize grip exists in the markup at every width, so its
    RESTING state is "not here at all" — display:none, not a zero-height box.
    The difference is the tab order: pane.ts stamps tabindex="0" unconditionally

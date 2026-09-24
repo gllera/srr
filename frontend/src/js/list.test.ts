@@ -639,6 +639,48 @@ describe("list", () => {
       }
    })
 
+   it("a split pane's cold immediate build stays unpainted until its settle commits", async () => {
+      // Reloading a `#pos` link at desktop width builds the pane cold on the
+      // immediate path, which scrolls onto still-settling rows and follows the seed
+      // frame by frame. Painted, each of those scrolls is a flicker (on the prod
+      // store the highlighted row swept ~1700px out of the pane and back). The pane
+      // is veiled until the settle commits, and only in split — the narrow reader
+      // return keeps painting.
+      setIndex(10)
+      nav._setAnchor(5)
+      const rafCbs: FrameRequestCallback[] = []
+      vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => rafCbs.push(cb))
+      vi.stubGlobal("cancelAnimationFrame", () => {})
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+      const drain = async (): Promise<void> => {
+         for (let i = 0; i < 6; i++) await Promise.resolve()
+         while (rafCbs.length) rafCbs.shift()!(0)
+      }
+      const veiled = (): boolean => container.classList.contains("srr-list-settling")
+      try {
+         await list.render(true) // narrow: never veiled
+         expect(veiled()).toBe(false)
+         await drain()
+
+         model.split.set(true)
+         await list.render(true)
+         expect(veiled()).toBe(true) // mounted, positioned, not painted
+         await drain()
+         expect(veiled()).toBe(false) // settled → shown once, on its row
+
+         // A settle that never commits (here: no frame ever runs) still lifts it.
+         await list.render(true)
+         expect(veiled()).toBe(true)
+         vi.advanceTimersByTime(2000)
+         expect(veiled()).toBe(false)
+         rafCbs.length = 0
+      } finally {
+         model.split.set(false)
+         vi.useRealTimers()
+         vi.unstubAllGlobals()
+      }
+   })
+
    it("propagates a fill failure so the app can surface it (no silent permanent skeleton)", async () => {
       setIndex(3)
       data.loadMeta.mockImplementation(async (chron: number) => {

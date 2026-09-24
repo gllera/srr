@@ -828,6 +828,24 @@ function bailEmpty(onInteractive?: () => void): void {
    onInteractive?.()
 }
 
+// The settle veil (see render). Every exit of the settle loop commits, which
+// lifts it; the timeout is the backstop for the exits that never reach commit —
+// a build superseded mid-fill, a rejected meta load, a fonts.ready that never
+// resolves — so no failure can leave the pane blank.
+const VEIL_CLASS = "srr-list-settling"
+const VEIL_MAX_MS = 1500
+let veilTimer = 0
+function veil(my: object): void {
+   container.classList.add(VEIL_CLASS)
+   veilTimer = window.setTimeout(() => {
+      if (my === tok) unveil()
+   }, VEIL_MAX_MS)
+}
+function unveil(): void {
+   clearTimeout(veilTimer)
+   container.classList.remove(VEIL_CLASS)
+}
+
 // Re-assert the anchor after a progressive fill changed row heights, unless the
 // user has scrolled (then their position wins). Only meaningful for an
 // anchoredMid seed (rows above it can grow/shrink); a newest-top anchor is at
@@ -1075,6 +1093,7 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    dayMemo.clear() // bounded to one build's timestamps, not a whole archive walk's
    rowChrome = -1 // re-sample once per build (a zoom or font change between builds)
    grownRunway = false
+   unveil() // a superseded build's settle veil must not outlive it
    container.replaceChildren()
 
    if (data.db.total_art === 0) {
@@ -1147,6 +1166,16 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    const savedSet = savedNow()
 
    const rows = chronsDesc.map((c) => rowEl(c, null, seen, savedSet)) // skeletons, in order
+   // A split pane built cold beside an open article (a reload of a `#pos` link)
+   // takes the immediate anchor below, which scrolls onto rows whose heights are
+   // still settling and follows the seed frame by frame — every one of those
+   // scrolls painted is a flicker, the highlighted row swept out of the pane and
+   // back. The pane is veiled (visibility:hidden: layout and measurement still
+   // run, and it is not the `hidden` bail the settle loop reads) from the mount
+   // until the settle commits, so it appears once, already on its row. The narrow
+   // reader return keeps painting as it goes: there the list IS the page, and a
+   // blank page reads worse than a settling one.
+   if (anchoredMid && anchorNow && isSplit()) veil(my)
    mountRows(rows)
 
    // Position the surface, then hand it over (interactive) before the fills land.
@@ -1243,6 +1272,7 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    if (!landOnceMode && !immediate) return
    const allRows = (): HTMLElement[] => (rowsEl ? [...rowsEl.querySelectorAll<HTMLElement>("a.srr-row")] : [])
    const commit = (): void => {
+      unveil()
       if (!landOnceMode) return // the immediate anchor followed as it went; its observer is live
       // The list and the reader share the window scroll. This scroll is DEFERRED
       // (fonts.ready + a settle loop), so a row opened meanwhile — layout.ts's effect
