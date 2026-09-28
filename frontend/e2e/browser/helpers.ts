@@ -1,7 +1,7 @@
 // Puppeteer setup shared by the browser e2e suites (the design screenshotter
 // borrows launchBrowser too): the one Chromium launch recipe, the shared
 // packsDir clear, the wait/read helpers each suite used to duplicate, and the
-// fresh-incognito-context open().
+// fresh-incognito-context open() and withPage().
 
 import { readdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
@@ -84,4 +84,15 @@ export async function open(
    await page.goto(url, { waitUntil: "load" })
    await wait(page)
    return [page, async () => ctx.close()]
+}
+
+// Fresh incognito context per scenario, like open(), but fn drives the page
+// itself (viewport, navigation, waits) and the context closes however fn exits.
+export async function withPage(browser: Browser, fn: (p: Page) => Promise<void>): Promise<void> {
+   const ctx = await browser.createBrowserContext()
+   try {
+      await fn(await ctx.newPage())
+   } finally {
+      await ctx.close()
+   }
 }

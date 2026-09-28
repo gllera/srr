@@ -4,7 +4,7 @@ import type { Browser, Page } from "puppeteer"
 
 import { feedServer, srr, type FeedServer } from "../harness"
 import { nItems, rssFeed } from "../fixtures"
-import { clearDir, launchBrowser, waitList, waitReader } from "./helpers"
+import { clearDir, launchBrowser, waitList, waitReader, withPage } from "./helpers"
 
 // The split view's two panes when the list pane is built OUTSIDE a list command:
 // a window widened across the breakpoint (the resting pane's probe settles while
@@ -51,17 +51,8 @@ describe("split view — panes built outside a list command", () => {
       await feeds?.close()
    })
 
-   const withPage = async (fn: (p: Page) => Promise<void>) => {
-      const ctx = await browser.createBrowserContext()
-      try {
-         await fn(await ctx.newPage())
-      } finally {
-         await ctx.close()
-      }
-   }
-
    it("widening the narrow list paints the resting pane beside it", () =>
-      withPage(async (page) => {
+      withPage(browser, async (page) => {
          await page.setViewport({ width: 420, height: 900 })
          await page.goto(`${baseUrl}#!`, { waitUntil: "load" })
          await waitList(page)
@@ -72,7 +63,7 @@ describe("split view — panes built outside a list command", () => {
       }))
 
    it("widening after a narrow store switch shows the resting pane, not the other store's article", () =>
-      withPage(async (page) => {
+      withPage(browser, async (page) => {
          await page.setViewport({ width: 420, height: 900 })
          await page.goto(`${baseUrl}#!`, { waitUntil: "load" })
          await page.evaluate((peer) => {
@@ -118,7 +109,7 @@ describe("split view — panes built outside a list command", () => {
       }))
 
    it("a split reload onto a caught-up reading position still builds the list pane", () =>
-      withPage(async (page) => {
+      withPage(browser, async (page) => {
          await page.setViewport({ width: 1280, height: 900 })
          await page.goto(`${baseUrl}#!`, { waitUntil: "load" })
          await waitList(page)
@@ -142,7 +133,7 @@ describe("split view — panes built outside a list command", () => {
       }))
 
    it("a search deep link booted at split shows the pane's search bar", () =>
-      withPage(async (page) => {
+      withPage(browser, async (page) => {
          await page.setViewport({ width: 1280, height: 900 })
          await page.goto(`${baseUrl}#!`, { waitUntil: "load" })
          await page.evaluate(() => localStorage.setItem("srr-unread-only", "0"))

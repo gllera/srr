@@ -22,6 +22,7 @@ import {
    waitList,
    waitReader,
    waitTitle,
+   withPage,
 } from "./helpers"
 
 // Drives the REAL built SPA in headless Chrome against real srr packs: proves
@@ -442,9 +443,7 @@ describe("browser: real SPA over real packs", () => {
    // head-in-db.gz refinement. (The meta/ fetch path for windows beyond the head
    // is covered at the contract layer: summary/metafallback e2e.)
    it("list boot renders rows from db.gz head with no data/ fetch until a row is opened", async () => {
-      const ctx = await browser.createBrowserContext()
-      const page = await ctx.newPage()
-      try {
+      await withPage(browser, async (page) => {
          const requested: string[] = []
          page.on("request", (req) => {
             const url = new URL(req.url())
@@ -467,9 +466,7 @@ describe("browser: real SPA over real packs", () => {
 
          // Now a data/ pack must have been fetched.
          expect(requested.some((p) => /\/packs\/data\//.test(p))).toBe(true)
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // Saved articles: the reader's ★ toggle adds the current article to the
@@ -574,9 +571,7 @@ describe("browser: real SPA over real packs", () => {
    // Deep-links to the reader (#5) so the offline assertions are about pack/SW
    // behavior, not the surface.
    it("serves the reader offline after one online visit", async () => {
-      const ctx = await browser.createBrowserContext()
-      const page = await ctx.newPage()
-      try {
+      await withPage(browser, async (page) => {
          // Cold load: the SW registers, activates (skipWaiting), and claims control.
          await page.goto(baseUrl + "#5", { waitUntil: "load" })
          await waitReader(page)
@@ -615,9 +610,7 @@ describe("browser: real SPA over real packs", () => {
          await page.keyboard.press("ArrowLeft")
          await waitTitle(page, "sport title 0")
          expect(await $popupOpen(page)).toBe(false)
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // Installability: a linked, valid web app manifest plus the SW's fetch handler
@@ -688,9 +681,7 @@ describe("browser: real SPA over real packs", () => {
    // order. The manifest reconciliation does not interfere: it only runs when
    // the generation MOVES, and this test never advances the store.
    it("bounds the pack and asset caches, evicting oldest entries first", async () => {
-      const ctx = await browser.createBrowserContext()
-      const page = await ctx.newPage()
-      try {
+      await withPage(browser, async (page) => {
          await page.goto(baseUrl, { waitUntil: "load" })
          await waitBoot(page)
          await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
@@ -761,9 +752,7 @@ describe("browser: real SPA over real packs", () => {
          expect(state.assetPaths).toHaveLength(500)
          expect(state.assetPaths[0].endsWith("/000000000000000a.webp")).toBe(true)
          expect(state.assetPaths[499].endsWith("/00000000000001fd.webp")).toBe(true)
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // ── Offline-pin (PINNED bucket) ─────────────────────────────────────────────
@@ -777,9 +766,7 @@ describe("browser: real SPA over real packs", () => {
    // store-replacing "purges stale finalized packs" test is ordered AFTER them below.
 
    it("caches named packs into srr-pinned-v1 on a 'pin' message", async () => {
-      const ctx = await browser.createBrowserContext()
-      const page = await ctx.newPage()
-      try {
+      await withPage(browser, async (page) => {
          await page.goto(baseUrl, { waitUntil: "load" })
          await waitBoot(page)
          await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
@@ -822,15 +809,11 @@ describe("browser: real SPA over real packs", () => {
          expect(result.progress.length).toBeGreaterThanOrEqual(2)
          expect(result.progress[result.progress.length - 1].done).toBe(2)
          expect(result.progress[result.progress.length - 1].total).toBe(2)
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    it("pinned packs survive enforceCacheBounds (eviction-exempt)", async () => {
-      const ctx = await browser.createBrowserContext()
-      const page = await ctx.newPage()
-      try {
+      await withPage(browser, async (page) => {
          await page.goto(baseUrl, { waitUntil: "load" })
          await waitBoot(page)
          await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
@@ -876,9 +859,7 @@ describe("browser: real SPA over real packs", () => {
             return (await pinned.keys()).map((k) => new URL(k.url).pathname)
          })
          expect(pinnedKeys.some((k) => k.endsWith(`/packs/${idxKey}`))).toBe(true)
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // An offline-pinned pack is served from srr-pinned-v1 even when it has been
@@ -889,9 +870,7 @@ describe("browser: real SPA over real packs", () => {
    // NOTE: requires navigator.serviceWorker.controller (same sandbox limit as the
    // other pinned-bucket tests above — see the block comment above this suite).
    it("reads a pinned pack from srr-pinned-v1 after it is absent from srr-packs-v4 (offline)", async () => {
-      const ctx = await browser.createBrowserContext()
-      const page = await ctx.newPage()
-      try {
+      await withPage(browser, async (page) => {
          // Cold load: SW registers, claims, caches db.gz + pack into PACKS.
          await page.goto(baseUrl + "#5", { waitUntil: "load" })
          await waitReader(page)
@@ -953,9 +932,7 @@ describe("browser: real SPA over real packs", () => {
          expect(await $title(page)).toBe("sport title 1")
          expect(await $content(page)).toContain("sport body 1")
          expect(await $popupOpen(page)).toBe(false)
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // The "unpin" SW message is the user-facing "Remove offline copy": it deletes
@@ -965,9 +942,7 @@ describe("browser: real SPA over real packs", () => {
    // SW-controller sandbox limit as the pin tests above (see the block comment
    // there).
    it("removes named pins on 'unpin'", async () => {
-      const ctx = await browser.createBrowserContext()
-      const page = await ctx.newPage()
-      try {
+      await withPage(browser, async (page) => {
          await page.goto(baseUrl, { waitUntil: "load" })
          await waitBoot(page)
          await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
@@ -1019,9 +994,7 @@ describe("browser: real SPA over real packs", () => {
          // Only the named entry was removed — the sibling pin survives.
          expect(afterUnpin.some((k) => k.endsWith(`/packs/${dataKey}`))).toBe(false)
          expect(afterUnpin.some((k) => k.endsWith(`/packs/${idxKey}`))).toBe(true)
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // isPinnableName closes the cache-key surface: a "pin" name that is neither a
@@ -1031,9 +1004,7 @@ describe("browser: real SPA over real packs", () => {
    // simply does not exist in this 6-article store, so it 404s and caches
    // nothing — either way srr-pinned-v1 gains no such entry.
    it("drops non-pinnable pin names (isPinnableName) — no cache-key injection", async () => {
-      const ctx = await browser.createBrowserContext()
-      const page = await ctx.newPage()
-      try {
+      await withPage(browser, async (page) => {
          await page.goto(baseUrl, { waitUntil: "load" })
          await waitBoot(page)
          await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
@@ -1066,9 +1037,7 @@ describe("browser: real SPA over real packs", () => {
          expect(result.last.cached).toBe(0)
          // No injected/invalid name landed in the eviction-exempt bucket.
          expect(result.keys).toHaveLength(0)
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // A store rebuild used to need an invalidation signal: it reused finalized
@@ -1091,9 +1060,7 @@ describe("browser: real SPA over real packs", () => {
       const firstData = tailKey(packsDir, "data")
       const firstM = storeM(packsDir)
 
-      const ctx = await browser.createBrowserContext()
-      const page = await ctx.newPage()
-      try {
+      await withPage(browser, async (page) => {
          // Cold load at chron 0, wait for the SW to claim, then reload so db.gz
          // and this generation's tail packs are cached through it.
          await page.goto(baseUrl + "#0", { waitUntil: "load" })
@@ -1142,9 +1109,7 @@ describe("browser: real SPA over real packs", () => {
          expect(after.some((k) => k.endsWith(`/packs/${liveIdx}`))).toBe(true)
          expect(after.some((k) => k.endsWith("/packs/db.gz"))).toBe(true)
          expect(await $popupOpen(page)).toBe(false)
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // PWA5 — periodic background sync. Everything else in this file needs a page
@@ -1169,9 +1134,7 @@ describe("browser: real SPA over real packs", () => {
       const firstM = storeM(packsDir)
 
       const origin = new URL(baseUrl).origin
-      const ctx = await browser.createBrowserContext()
-      const page = await ctx.newPage()
-      try {
+      await withPage(browser, async (page) => {
          await page.goto(baseUrl, { waitUntil: "load" })
          await waitList(page)
          await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
@@ -1267,9 +1230,7 @@ describe("browser: real SPA over real packs", () => {
          await waitList(page)
          expect(await $rowTitles(page)).toContain("warm title 4")
          expect(await $popupOpen(page)).toBe(false)
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // PWA5's ORDERING, which is the actual feature: cache the objects, THEN flip
@@ -1291,9 +1252,7 @@ describe("browser: real SPA over real packs", () => {
       const firstM = storeM(packsDir)
 
       const origin = new URL(baseUrl).origin
-      const ctx = await browser.createBrowserContext()
-      const page = await ctx.newPage()
-      try {
+      await withPage(browser, async (page) => {
          await page.goto(baseUrl, { waitUntil: "load" })
          await waitList(page)
          await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
@@ -1371,9 +1330,7 @@ describe("browser: real SPA over real packs", () => {
             { timeout: 20000 },
             nextM,
          )
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // Regression heir: enabling "unread only" once froze the tab — the toggle then
@@ -1391,9 +1348,7 @@ describe("browser: real SPA over real packs", () => {
       await srr(packsDir, "feed", "add", "-t", "Bulk", "-u", `${feeds.url}/bulk.xml`)
       await srr(packsDir, "fetch")
 
-      const ctx = await browser.createBrowserContext()
-      const page = await ctx.newPage()
-      try {
+      await withPage(browser, async (page) => {
          await page.goto(baseUrl, { waitUntil: "load" })
          await waitList(page)
          // [ALL] boots anchored at the oldest unread row (chron 0) — a live anchor
@@ -1413,8 +1368,6 @@ describe("browser: real SPA over real packs", () => {
          const rows = await page.$$eval(".srr-list a.srr-row", (els) => els.length)
          expect(rows).toBeGreaterThan(0) // it DID rerender (initial batch loaded)
          expect(rows).toBeLessThanOrEqual(45) // ~BATCH, NOT all 100
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 })

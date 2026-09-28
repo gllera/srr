@@ -3,7 +3,7 @@ import type { Browser, Page } from "puppeteer"
 
 import { feedServer, srr, type FeedServer } from "../harness"
 import { nItems, pubDate, rssFeed } from "../fixtures"
-import { clearDir, clickRow, launchBrowser, waitList, waitReader } from "./helpers"
+import { clearDir, clickRow, launchBrowser, waitList, waitReader, withPage } from "./helpers"
 
 // The two-pane split view (body.srr-split, ≥1000px), driven through the real
 // SPA in real Chrome: the breakpoint stamp, the blank-right-pane v1 contract on
@@ -201,9 +201,7 @@ describe("browser: split view (two-pane desktop)", () => {
       // the opened row must still sit inside the pane well after the settle
       // window. Fresh context — the shared page carries the ordered sequence's
       // history.
-      const ctx = await browser.createBrowserContext()
-      try {
-         const p = await ctx.newPage()
+      await withPage(browser, async (p) => {
          await p.setViewport({ width: 1280, height: 900 })
          await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
          await waitList(p)
@@ -218,9 +216,7 @@ describe("browser: split view (two-pane desktop)", () => {
             return r.top >= 0 && r.bottom <= pane.clientHeight
          })
          expect(ok).toBe(true)
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // The layout regression this suite originally shipped without. Reserving the
@@ -234,9 +230,7 @@ describe("browser: split view (two-pane desktop)", () => {
    // SEGMENT on the column instead of moving its own edge, so the box measured
    // for it below is that segment.
    it("aligns every fixed bar with the reader column and clears the pane", async () => {
-      const ctx = await browser.createBrowserContext()
-      try {
-         const p = await ctx.newPage()
+      await withPage(browser, async (p) => {
          for (const width of [1000, 1280, 1440, 1920]) {
             await p.setViewport({ width, height: 900 })
             await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
@@ -321,18 +315,14 @@ describe("browser: split view (two-pane desktop)", () => {
             // way: over the pane, never over the reader.
             if (m.pill) expect(m.pill.right).toBeLessThanOrEqual(m.pane.right)
          }
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    it("hides the queue chip of a video whose bytes are gone", async () => {
       // A display:none anchor makes the corner chip's anchor() top/right invalid,
       // so the still-absolutely-positioned chip would fall back to its STATIC
       // position — a loose circle sitting on top of the prose.
-      const ctx = await browser.createBrowserContext()
-      try {
-         const p = await ctx.newPage()
+      await withPage(browser, async (p) => {
          await p.setViewport({ width: 1280, height: 900 })
          await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
          await waitList(p)
@@ -360,18 +350,14 @@ describe("browser: split view (two-pane desktop)", () => {
             return (document.querySelector(".srr-content .srr-queue-chip") as HTMLElement)?.getAttribute("aria-pressed")
          })
          expect(queuedAfterKey).toBe("false")
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    it("stands the pager drag down under split", async () => {
       // The reader is in normal flow, so its drag transform paints above the
       // z-auto fixed pane with nothing to clip it — the article would slide
       // straight across the list. gestures.ts declines the gesture instead.
-      const ctx = await browser.createBrowserContext()
-      try {
-         const p = await ctx.newPage()
+      await withPage(browser, async (p) => {
          await p.setViewport({ width: 1280, height: 900 })
          await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
          await waitList(p)
@@ -410,9 +396,7 @@ describe("browser: split view (two-pane desktop)", () => {
          expect(previewShown).toBe(false)
          // And the drag committed no step.
          expect(await p.evaluate(() => location.hash)).toBe(hashBefore)
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    it("brings the reader pane along when a lane change moves the cursor", async () => {
@@ -423,9 +407,7 @@ describe("browser: split view (two-pane desktop)", () => {
       // question the list just anchored on (nav.listAnchor) and lands the pane on
       // that answer, unrecorded; without it the pane would keep showing a news
       // article while Next stepped from an invisible sport position.
-      const ctx = await browser.createBrowserContext()
-      try {
-         const p = await ctx.newPage()
+      await withPage(browser, async (p) => {
          await p.setViewport({ width: 1280, height: 900 })
          await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
          await waitList(p)
@@ -465,9 +447,7 @@ describe("browser: split view (two-pane desktop)", () => {
                document.querySelector(".srr-title")?.textContent,
             { timeout: 20_000 },
          )
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // model.cursor is ONE cursor for two surfaces. A rebuild of the list — a Show-read
@@ -476,9 +456,7 @@ describe("browser: split view (two-pane desktop)", () => {
    // the reader showed another, and the toolbar arrows stepped from the
    // highlight (measured: Next from a displayed chron 20 landed on 25).
    it("a list rebuild leaves the cursor with the article the pane is showing", async () => {
-      const ctx = await browser.createBrowserContext()
-      try {
-         const p = await ctx.newPage()
+      await withPage(browser, async (p) => {
          await p.setViewport({ width: 1280, height: 900 })
          await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
          await waitList(p)
@@ -507,18 +485,14 @@ describe("browser: split view (two-pane desktop)", () => {
          await p.evaluate(() => document.querySelector<HTMLButtonElement>(".srr-next")?.click())
          await p.waitForFunction((h) => location.hash !== h, { timeout: 20_000 }, before)
          expect(Number((await p.evaluate(() => location.hash)).slice(1).split("!")[0])).toBe(chron + 1)
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // Typing a query is the same rebuild from the other direction — and it used to
    // leave the toolbar arrows DEAD as well as desynced, because nav's cursor had
    // moved to a hit while the reader still showed the article behind it.
    it("keeps the reader steppable while a search query rebuilds the pane", async () => {
-      const ctx = await browser.createBrowserContext()
-      try {
-         const p = await ctx.newPage()
+      await withPage(browser, async (p) => {
          await p.setViewport({ width: 1280, height: 900 })
          await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
          await waitList(p)
@@ -565,9 +539,7 @@ describe("browser: split view (two-pane desktop)", () => {
          // door under split: a pinned bar the key could no longer dismiss.
          await p.keyboard.press("/")
          await p.waitForFunction(() => !document.body.classList.contains("srr-searching"), { timeout: 20_000 })
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // A `#pos` deep link (a shared link, a restored session) is the one entry
@@ -576,9 +548,7 @@ describe("browser: split view (two-pane desktop)", () => {
    // Nothing covered that seam, so a pane that failed to build behind an open
    // article would have gone unnoticed.
    it("builds the list pane beside a #pos deep link", async () => {
-      const ctx = await browser.createBrowserContext()
-      try {
-         const p = await ctx.newPage()
+      await withPage(browser, async (p) => {
          await p.setViewport({ width: 1280, height: 900 })
          await p.goto(`${baseUrl}#7`, { waitUntil: "load" })
          await waitReader(p)
@@ -588,9 +558,7 @@ describe("browser: split view (two-pane desktop)", () => {
             () => document.querySelector(".srr-list .srr-row-current")?.getAttribute("data-chron") === "7",
             { timeout: 20_000 },
          )
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // A breakpoint crossing must re-assert the LAYOUT without re-routing: the
@@ -598,9 +566,7 @@ describe("browser: split view (two-pane desktop)", () => {
    // re-evaluates width queries against the page box while printing, so Ctrl-P
    // fires a crossing and its undo).
    it("keeps the open article and its scroll across a breakpoint crossing", async () => {
-      const ctx = await browser.createBrowserContext()
-      try {
-         const p = await ctx.newPage()
+      await withPage(browser, async (p) => {
          await p.setViewport({ width: 1280, height: 900 })
          await p.goto(`${baseUrl}#7`, { waitUntil: "load" })
          await waitReader(p)
@@ -630,9 +596,7 @@ describe("browser: split view (two-pane desktop)", () => {
          expect(after.split).toBe(true)
          expect(after.listShown).toBe(true) // the pane is back, not left hidden
          expect(after.y).toBeGreaterThan(0) // …and the article did not jump to the top
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // The same crossing made from the LIST surface, which is where it broke. The
@@ -642,9 +606,7 @@ describe("browser: split view (two-pane desktop)", () => {
    // a reader holding a perfectly good one, and the resting paint replaced it
    // with "Not started".
    it("keeps the open article — and its chrome — when the LIST surface re-enters split", async () => {
-      const ctx = await browser.createBrowserContext()
-      try {
-         const p = await ctx.newPage()
+      await withPage(browser, async (p) => {
          await p.setViewport({ width: 1280, height: 900 })
          await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
          await waitList(p)
@@ -671,9 +633,7 @@ describe("browser: split view (two-pane desktop)", () => {
          // Byte-for-byte the state it left with: the crossing re-asserts the
          // layout, it does not re-decide what the reader is showing.
          expect(await chrome()).toEqual(before)
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // Under split the reader never leaves the screen, so Escape back into it is a
@@ -681,9 +641,7 @@ describe("browser: split view (two-pane desktop)", () => {
    // scrolled it to the top: glance at the list and come back, and you had lost
    // your place in an article that was visible the whole time.
    it("re-entering the reader keeps the mounted article and its scroll", async () => {
-      const ctx = await browser.createBrowserContext()
-      try {
-         const p = await ctx.newPage()
+      await withPage(browser, async (p) => {
          await p.setViewport({ width: 1280, height: 700 })
          await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
          await waitList(p)
@@ -717,9 +675,7 @@ describe("browser: split view (two-pane desktop)", () => {
                y: Math.round(scrollY),
             })),
          ).toEqual({ kept: true, title: "news title 5", y: scrolled })
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // The row tap is the same act as Escape above, through the other affordance —
@@ -728,9 +684,7 @@ describe("browser: split view (two-pane desktop)", () => {
    // leave the URL naming the article: a focus-only re-entry that skips the hash
    // write is what makes Escape, Escape, reload land on an empty resting pane.
    it("tapping the row the pane already shows keeps its scroll, and names it in the URL", async () => {
-      const ctx = await browser.createBrowserContext()
-      try {
-         const p = await ctx.newPage()
+      await withPage(browser, async (p) => {
          await p.setViewport({ width: 1280, height: 700 })
          await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
          await waitList(p)
@@ -763,9 +717,7 @@ describe("browser: split view (two-pane desktop)", () => {
                stored: (localStorage.getItem("srr-hash") ?? "").slice(1).split("!")[0],
             })),
          ).toEqual({ kept: true, y: scrolled, pos: "5", stored: "5" })
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // ONE saved set, TWO paints on screen at once — and each toggle path repainted
@@ -774,9 +726,7 @@ describe("browser: split view (two-pane desktop)", () => {
    // opposite things about one article, and a second toggle composed them into a
    // state neither showed.
    it("the row's ★ and the reader's save button agree, both ways", async () => {
-      const ctx = await browser.createBrowserContext()
-      try {
-         const p = await ctx.newPage()
+      await withPage(browser, async (p) => {
          await p.setViewport({ width: 1280, height: 900 })
          await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
          await waitList(p)
@@ -814,9 +764,7 @@ describe("browser: split view (two-pane desktop)", () => {
             timeout: 10_000,
          })
          expect(await state()).toEqual({ rowStar: false, rowAria: "false", button: false })
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // The resting pane's Next is the "start reading" affordance its own copy
@@ -825,9 +773,7 @@ describe("browser: split view (two-pane desktop)", () => {
    // its anchor — so the step landed one PAST it, opening the backlog's second
    // article and marking the first read behind you.
    it("starts reading at the article the list highlights, from the resting pane", async () => {
-      const ctx = await browser.createBrowserContext()
-      try {
-         const p = await ctx.newPage()
+      await withPage(browser, async (p) => {
          await p.setViewport({ width: 1280, height: 900 })
          await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
          await waitList(p)
@@ -843,9 +789,7 @@ describe("browser: split view (two-pane desktop)", () => {
          // The panel offered the backlog; it must open the article it was
          // pointing at, not the one after it.
          expect(await p.evaluate(() => document.querySelector(".srr-title")?.textContent)).toBe(highlighted)
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // A lane change made from the READER surface lands on the armed "not started"
@@ -854,9 +798,7 @@ describe("browser: split view (two-pane desktop)", () => {
    // toolbar readout naming the new one. Row COUNT is the discriminator: [ALL]
    // has 31 here, Sport 15.
    it("re-filters the list pane when the lane changes from the reader surface", async () => {
-      const ctx = await browser.createBrowserContext()
-      try {
-         const p = await ctx.newPage()
+      await withPage(browser, async (p) => {
          await p.setViewport({ width: 1280, height: 900 })
          await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
          await waitList(p)
@@ -885,9 +827,7 @@ describe("browser: split view (two-pane desktop)", () => {
          expect(after.view).toBe("reader")
          expect(after.rows).toBeLessThan(all)
          expect(after.titles.every((t) => t.startsWith("sport"))).toBe(true)
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // Below the breakpoint the list is the ONLY surface, so its rebuild
@@ -896,9 +836,7 @@ describe("browser: split view (two-pane desktop)", () => {
    // has never shown: the arrows stepped from an invisible row while the reader
    // showed something else. Crossing INTO split hands the cursor to the pane.
    it("hands the cursor back to the pane when re-entering split", async () => {
-      const ctx = await browser.createBrowserContext()
-      try {
-         const p = await ctx.newPage()
+      await withPage(browser, async (p) => {
          await p.setViewport({ width: 1280, height: 900 })
          await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
          await waitList(p)
@@ -932,18 +870,14 @@ describe("browser: split view (two-pane desktop)", () => {
                next: document.querySelector(".srr-next-count")?.textContent,
             })),
          ).toEqual(before)
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // Printing re-evaluates the breakpoint against the PAGE box: Chrome fires a
    // crossing, then — after print media has stopped matching — its undo. The
    // screen layout must come back exactly as it was, and stay.
    it("comes back from printing with the two-pane layout intact", async () => {
-      const ctx = await browser.createBrowserContext()
-      try {
-         const p = await ctx.newPage()
+      await withPage(browser, async (p) => {
          await p.setViewport({ width: 1280, height: 900 })
          await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
          await waitList(p)
@@ -954,15 +888,11 @@ describe("browser: split view (two-pane desktop)", () => {
          await clickRow(p, "news title 0")
          await waitReader(p)
          expect(await p.evaluate(() => document.body.classList.contains("srr-split"))).toBe(true)
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    it("stays single-surface below the breakpoint (regression)", async () => {
-      const ctx = await browser.createBrowserContext()
-      try {
-         const p = await ctx.newPage()
+      await withPage(browser, async (p) => {
          await p.setViewport({ width: 420, height: 900 })
          await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
          await waitList(p)
@@ -972,9 +902,7 @@ describe("browser: split view (two-pane desktop)", () => {
          await waitReader(p)
          // Narrow: opening the reader hides the list, exactly as before.
          expect(await visible(p, ".srr-list")).toBe(false)
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    it("a live viewport crossing rewires both directions", async () => {
@@ -984,9 +912,7 @@ describe("browser: split view (two-pane desktop)", () => {
       // by invalidate), and crossing back must bring both panes up with the
       // cursor row highlighted — and leave the mutex/nav live, proven by a
       // keyboard step actually advancing the hash afterwards.
-      const ctx = await browser.createBrowserContext()
-      try {
-         const p = await ctx.newPage()
+      await withPage(browser, async (p) => {
          await p.setViewport({ width: 1280, height: 900 })
          await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
          await waitList(p)
@@ -1017,9 +943,7 @@ describe("browser: split view (two-pane desktop)", () => {
          const before = await p.evaluate(() => Number(location.hash.slice(1).split("!")[0]))
          await p.keyboard.press("ArrowRight")
          await p.waitForFunction((b) => Number(location.hash.slice(1).split("!")[0]) > b, { timeout: 20_000 }, before)
-      } finally {
-         await ctx.close()
-      }
+      })
    })
    // A lane change made from the READER surface goes through nav.switchFilter,
    // which answers a never-opened lane with its "not started" placeholder. Under
@@ -1031,9 +955,7 @@ describe("browser: split view (two-pane desktop)", () => {
    // are asserted: what the pane shows, and that the first article is still
    // unconsumed when it does.
    it("lands the pane on the new lane's first unread instead of blanking, without consuming it", async () => {
-      const ctx = await browser.createBrowserContext()
-      try {
-         const p = await ctx.newPage()
+      await withPage(browser, async (p) => {
          await p.setViewport({ width: 1280, height: 900 })
          await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
          await waitList(p)
@@ -1065,9 +987,7 @@ describe("browser: split view (two-pane desktop)", () => {
          await p.waitForFunction(() => document.querySelector(".srr-title")?.textContent === "sport title 1", {
             timeout: 20_000,
          })
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 
    // A row swipe's mark-read moves the frontier the pane's pending pill counts
@@ -1075,9 +995,7 @@ describe("browser: split view (two-pane desktop)", () => {
    // fixed itself on its next arrival; under split there is no arrival, so the
    // pill sat on its pre-swipe number beside rows that had visibly changed.
    it("re-derives the reader's pending pill when a row swipe marks one read", async () => {
-      const ctx = await browser.createBrowserContext()
-      try {
-         const p = await ctx.newPage()
+      await withPage(browser, async (p) => {
          await p.setViewport({ width: 1280, height: 900, hasTouch: true })
          await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
          await waitList(p)
@@ -1114,8 +1032,6 @@ describe("browser: split view (two-pane desktop)", () => {
             String(before),
          )
          expect(Number(await pill())).toBe(before - 1)
-      } finally {
-         await ctx.close()
-      }
+      })
    })
 })
