@@ -493,6 +493,13 @@ type ApplyCmd struct {
 // stdin-or-file convention the `--file` commands share is spelled — including
 // the scope-sensitive Close, which is the part a fourth copy gets subtly wrong.
 func readInput(seam io.Reader, path string) ([]byte, error) {
+	return readInputCapped(seam, path, 0)
+}
+
+// readInputCapped is readInput refusing more than maxBytes of input (0 = no
+// cap): it reads one byte past the cap, so an over-cap input is an error
+// rather than a silent truncation.
+func readInputCapped(seam io.Reader, path string, maxBytes int64) ([]byte, error) {
 	src := seam
 	if src == nil {
 		if path == "" || path == "-" {
@@ -506,9 +513,15 @@ func readInput(seam io.Reader, path string) ([]byte, error) {
 			src = f
 		}
 	}
+	if maxBytes > 0 {
+		src = io.LimitReader(src, maxBytes+1)
+	}
 	data, err := io.ReadAll(src)
 	if err != nil {
 		return nil, fmt.Errorf("read input: %w", err)
+	}
+	if maxBytes > 0 && int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("payload exceeds %d bytes", maxBytes)
 	}
 	return data, nil
 }

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"regexp"
 	"strings"
 
@@ -121,24 +120,9 @@ func (o *SyndicatePushCmd) Run() error {
 			return fmt.Errorf("syndication output %q is managed (generated from selectors each fetch cycle); a pushed file would be overwritten — recreate it with --external", o.Name)
 		}
 
-		src := o.in
-		if src == nil {
-			src = os.Stdin
-		}
-		if o.Path != "" && o.Path != "-" {
-			f, err := os.Open(o.Path)
-			if err != nil {
-				return fmt.Errorf("open %s: %w", o.Path, err)
-			}
-			defer f.Close()
-			src = f
-		}
-		payload, err := io.ReadAll(io.LimitReader(src, maxOutPayload+1))
+		payload, err := readInputCapped(o.in, o.Path, maxOutPayload)
 		if err != nil {
-			return fmt.Errorf("read payload: %w", err)
-		}
-		if int64(len(payload)) > maxOutPayload {
-			return fmt.Errorf("payload exceeds %d bytes", maxOutPayload)
+			return err
 		}
 		if len(payload) == 0 {
 			return fmt.Errorf("empty payload — a generator with nothing to publish should not push")
