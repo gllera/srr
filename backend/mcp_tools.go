@@ -351,11 +351,17 @@ type updateFeedIn struct {
 	DedupTitle *bool     `json:"dedup_title,omitempty" jsonschema:"Also dedup by folded title. Omit to keep the current value."`
 }
 
-// mcpUpdateFeed loads the feed's current view, overlays only the fields the
-// call actually supplied (see overlayUpdateFeed), and runs the very same
-// two-phase save as mcpAddFeed.
+// mcpUpdateFeed runs the very same two-phase save as mcpAddFeed over the
+// merge-on-absent view updateFeedBuild produces.
 func mcpUpdateFeed(ctx context.Context, _ *mcp.CallToolRequest, in updateFeedIn) (*mcp.CallToolResult, feedOut, error) {
-	return mcpSaveFeedView(ctx, func(db *DB) (*feedView, error) {
+	return mcpSaveFeedView(ctx, updateFeedBuild(in))
+}
+
+// updateFeedBuild is saveFeedTwoPhase's build step for a partial update, shared
+// by srr_update_feed and `srr feed upd`: it loads the feed's current view and
+// overlays only the fields in actually supplies (see overlayUpdateFeed).
+func updateFeedBuild(in updateFeedIn) func(db *DB) (*feedView, error) {
+	return func(db *DB) (*feedView, error) {
 		ch, err := db.FeedByID(in.ID)
 		if err != nil {
 			return nil, err
@@ -363,7 +369,7 @@ func mcpUpdateFeed(ctx context.Context, _ *mcp.CallToolRequest, in updateFeedIn)
 		v := viewOf(ch) // non-nil ID ⇒ update
 		overlayUpdateFeed(v, in)
 		return v, nil
-	})
+	}
 }
 
 // overlayUpdateFeed applies srr_update_feed's MERGE-ON-ABSENT semantics onto

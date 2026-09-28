@@ -113,7 +113,7 @@ func validateIngest(name string) (string, error) {
 }
 
 // validateFeedFields runs the DB-independent field validations (expire bounds,
-// ingest/pipe tokens, tag) shared by normalizeFeed and the AddCmd/UpdCmd/serve
+// ingest/pipe tokens, tag) shared by normalizeFeed and resolveFeedViewURL's
 // pre-flight, so bad input is rejected BEFORE the subscribe-time network probe
 // rather than after a wasted round-trip. Pure check, no mutation. The recipe-ref
 // check is separate — it needs the recipes map and already runs inside
@@ -219,7 +219,7 @@ func (o *AddCmd) Run() error {
 	if o.URL == "" {
 		return fmt.Errorf("--url is required")
 	}
-	v := &feedView{
+	v := &feedView{ // nil ID ⇒ create
 		Title:      o.Title,
 		URL:        o.URL,
 		Tag:        o.Tag,
@@ -231,20 +231,10 @@ func (o *AddCmd) Run() error {
 		DedupDays:  o.DedupDays,
 		DedupTitle: o.DedupTitle,
 	}
-	// Offline field checks before the store lock and the subscribe-time probe, so
-	// bad input never triggers a wasted fetch (the recipe ref is checked inside
-	// resolveFeedProbe, also before any network I/O).
-	if err := validateFeedFields(v.ExpireDays, v.DedupDays, v.Ingest, v.Pipe, v.Tag); err != nil {
-		return err
-	}
-	return withDB(true, func(ctx context.Context, db *DB) error {
-		resolved, err := resolveFeedProbe(ctx, db.core.Recipes, v.Recipe, v.Ingest, "", v.URL)
-		if err != nil {
-			return err
-		}
-		v.URL = resolved
-		return applyViews(ctx, db, []*feedView{v})
-	})
+	// The upsert every writing surface shares: offline field checks, then the
+	// subscribe-time probe with NO lock, then the write under .locked.
+	_, err := saveFeedTwoPhase(context.Background(), func(*DB) (*feedView, error) { return v, nil })
+	return err
 }
 
 // feedView is the canonical JSON/YAML shape for feed records. Used
@@ -321,78 +311,41 @@ type UpdCmd struct {
 }
 
 func (o *UpdCmd) Run() error {
-	if o.Title == nil && o.Tag == nil && o.Recipe == nil && o.Ingest == nil && o.Pipe == nil && o.Secrets == nil && o.URL == nil && o.Expire == nil && o.DedupDays == nil && o.DedupTitle == nil {
+	// The flags mean exactly what srr_update_feed's pointers mean (nil = keep),
+	// so the CLI rides the same merge-on-absent build. A repeatable flag is nil
+	// when absent; a lone -p "" / --secrets "" is present and filters to nil =
+	// cleared (normalizeFeed's filterPipe).
+	in := updateFeedIn{
+		ID:         o.ID,
+		Title:      o.Title,
+		URL:        o.URL,
+		Tag:        o.Tag,
+		Recipe:     o.Recipe,
+		Ingest:     o.Ingest,
+		ExpireDays: o.Expire,
+		DedupDays:  o.DedupDays,
+		DedupTitle: o.DedupTitle,
+	}
+	if o.Pipe != nil {
+		in.Pipe = &o.Pipe
+	}
+	if o.Secrets != nil {
+		in.Secrets = &o.Secrets
+	}
+	if in == (updateFeedIn{ID: o.ID}) {
 		return fmt.Errorf("nothing to update")
 	}
-
-	return withDB(true, func(ctx context.Context, db *DB) error {
-		ch, err := db.FeedByID(o.ID)
-		if err != nil {
-			return err
-		}
-		if o.Title != nil {
-			if *o.Title == "" {
-				return fmt.Errorf("title cannot be empty")
-			}
-			ch.Title = *o.Title
-		}
-		if o.Tag != nil {
-			ch.Tag = *o.Tag
-		}
-		if o.Recipe != nil {
-			ch.Recipe = *o.Recipe
-		}
-		if o.Ingest != nil {
-			ch.Ingest = *o.Ingest
-		}
-		if o.Pipe != nil {
-			// normalizeFeed's filterPipe turns a lone -p "" into nil = cleared.
-			ch.Pipe = o.Pipe
-		}
-		if o.Secrets != nil {
-			// Same clear sentinel as Pipe: a lone --secrets "" filters to nil.
-			ch.Secrets = o.Secrets
-		}
-		if o.Expire != nil {
-			ch.ExpireDays = *o.Expire
-		}
-		if o.DedupDays != nil {
-			ch.DedupDays = *o.DedupDays
-		}
-		if o.DedupTitle != nil {
-			ch.DedupTitle = *o.DedupTitle
-		}
-		// Determine the candidate URL (unchanged when -u is absent). resolveFeedProbe
-		// validates the recipe reference and probes for discovery only when the URL
-		// is actually changing and the effective ingest is #feed.
-		oldURL := ch.URL
-		newURL := ch.URL
-		if o.URL != nil {
-			if !validFeedURL(*o.URL) {
-				return fmt.Errorf("invalid url %q", *o.URL)
-			}
-			newURL = *o.URL
-		}
-		// Offline field checks before the subscribe-time probe, so bad input
-		// never triggers a wasted fetch.
-		if err := validateFeedFields(ch.ExpireDays, ch.DedupDays, ch.Ingest, ch.Pipe, ch.Tag); err != nil {
-			return err
-		}
-		resolved, err := resolveFeedProbe(ctx, db.core.Recipes, ch.Recipe, ch.Ingest, oldURL, newURL)
-		if err != nil {
-			return err
-		}
-		if o.URL != nil {
-			setFeedURL(ch, resolved)
-		}
-
-		if err := normalizeFeed(ch, db.core.Recipes); err != nil {
-			return err
-		}
-		// commitState (not Commit) so a setFeedURL fetch-state reset — which clears
-		// the seen.gz-backed ETag/LastModified — is persisted to the sidecar too.
-		return db.commitState(ctx)
-	})
+	// Offline pre-checks, before any store read or network probe.
+	if o.Title != nil && *o.Title == "" {
+		return fmt.Errorf("title cannot be empty")
+	}
+	if o.URL != nil && !validFeedURL(*o.URL) {
+		return fmt.Errorf("invalid url %q", *o.URL)
+	}
+	// resolveFeedProbe (inside the two-phase save) probes for discovery only
+	// when the URL actually changes and the effective ingest is #feed.
+	_, err := saveFeedTwoPhase(context.Background(), updateFeedBuild(in))
+	return err
 }
 
 // setFeedURL points the feed at url, preserving the per-feed fetch

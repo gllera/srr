@@ -70,11 +70,11 @@ func listViewOf(ch *Feed) feedListView {
 }
 
 // resolveFeedViewURL runs subscribe-time discovery on a feedView read-only,
-// folding the resolved URL back into v.URL. Same gating as `feed add`/`feed
-// upd -u`: probe when the effective ingest is #feed and the URL is new (create)
-// or changed (update). Kept OUT of the locked write path (handleFeedSave calls
-// it in a no-lock DB scope first) so the network probe never holds .locked —
-// which would 409 the fetch loop and every other GUI mutation for its duration.
+// folding the resolved URL back into v.URL: probe when the effective ingest is
+// #feed and the URL is new (create) or changed (update). Kept OUT of the locked
+// write path (saveFeedTwoPhase calls it in a no-lock DB scope first) so the
+// network probe never holds .locked — which would 409 the fetch loop and every
+// other mutation for its duration.
 func resolveFeedViewURL(ctx context.Context, db *DB, v *feedView) error {
 	// Offline field checks before the probe, so bad input never triggers a fetch.
 	if err := validateFeedFields(v.ExpireDays, v.DedupDays, v.Ingest, v.Pipe, v.Tag); err != nil {
@@ -96,9 +96,9 @@ func resolveFeedViewURL(ctx context.Context, db *DB, v *feedView) error {
 	return nil
 }
 
-// saveFeed upserts one feedView (URL already resolved by resolveFeedViewURL).
-// Shared by the POST and PUT handlers so the GUI matches the CLI. Returns the
-// stored *Feed for echo-back.
+// saveFeed upserts one feedView (URL already resolved by resolveFeedViewURL) —
+// saveFeedTwoPhase's locked half, so every surface writes a feed the same way.
+// Returns the stored *Feed for echo-back.
 func saveFeed(ctx context.Context, db *DB, v *feedView) (*Feed, error) {
 	if v.Title == "" {
 		return nil, fmt.Errorf("title required")
@@ -143,7 +143,7 @@ func updateFeed(w http.ResponseWriter, r *http.Request) {
 }
 
 // saveFeedTwoPhase is the two-phase feed upsert every writing surface shares
-// (the HTTP handlers and the MCP tools): phase 1 (NO lock) builds the target
+// (the HTTP handlers, the MCP tools, `feed add` and `feed upd`): phase 1 (NO lock) builds the target
 // view inside a read-only DB scope and runs subscribe-time discovery —
 // networked, so it must never hold .locked, which would 409 the fetch loop and
 // every other writer for the probe's duration — and phase 2 (locked) applies
