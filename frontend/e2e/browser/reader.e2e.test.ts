@@ -958,13 +958,13 @@ describe("browser: real SPA over real packs", () => {
       }
    })
 
-   // The "unpin" / "unpin-all" SW messages are the user-facing "Remove offline
-   // copy": unpin deletes the NAMED entries from srr-pinned-v1 (leaving the rest
-   // of a pinned scope intact), unpin-all empties the bucket. Neither reports
-   // back over a MessagePort (fire-and-forget in event.waitUntil), so both are
-   // observed by polling srr-pinned-v1. Same SW-controller sandbox limit as the
-   // pin tests above (see the block comment there).
-   it("removes named pins on 'unpin' and clears all on 'unpin-all'", async () => {
+   // The "unpin" SW message is the user-facing "Remove offline copy": it deletes
+   // the NAMED entries from srr-pinned-v1, leaving the rest of a pinned scope
+   // intact. It does not report back over a MessagePort (fire-and-forget in
+   // event.waitUntil), so it is observed by polling srr-pinned-v1. Same
+   // SW-controller sandbox limit as the pin tests above (see the block comment
+   // there).
+   it("removes named pins on 'unpin'", async () => {
       const ctx = await browser.createBrowserContext()
       const page = await ctx.newPage()
       try {
@@ -995,7 +995,7 @@ describe("browser: real SPA over real packs", () => {
          expect(pinnedAfter.some((k) => k.endsWith(`/packs/${idxKey}`))).toBe(true)
          expect(pinnedAfter.some((k) => k.endsWith(`/packs/${dataKey}`))).toBe(true)
 
-         // (a) unpin ONLY the data tail — the SW deletes that exact entry. base MUST
+         // Unpin ONLY the data tail — the SW deletes that exact entry. base MUST
          // match the pin's so the resolved URL (the cache key) is identical.
          await page.evaluate(async (key: string) => {
             const sw = navigator.serviceWorker.controller!
@@ -1019,18 +1019,6 @@ describe("browser: real SPA over real packs", () => {
          // Only the named entry was removed — the sibling pin survives.
          expect(afterUnpin.some((k) => k.endsWith(`/packs/${dataKey}`))).toBe(false)
          expect(afterUnpin.some((k) => k.endsWith(`/packs/${idxKey}`))).toBe(true)
-
-         // (b) unpin-all — the whole srr-pinned-v1 bucket is emptied.
-         await page.evaluate(async () => {
-            navigator.serviceWorker.controller!.postMessage({ type: "unpin-all" })
-         })
-         await page.waitForFunction(
-            async () => {
-               const pinned = await caches.open("srr-pinned-v1")
-               return (await pinned.keys()).length === 0
-            },
-            { timeout: 20000 },
-         )
       } finally {
          await ctx.close()
       }

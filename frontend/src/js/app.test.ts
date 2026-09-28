@@ -4524,8 +4524,8 @@ describe("offline pin — unpin subtraction & SW purge", () => {
    // (A "clears the local pin registry when the SW reports pins-purged" case sat
    // here. The handler it drove had no sender — `gen` and its PINNED purge were
    // retired at the manifest cutover — so the test's own MessageEvent was the
-   // only thing in the system that ever produced that message. Both are gone;
-   // pin.test.ts still covers clearAllPins directly.)
+   // only thing in the system that ever produced that message. Both are gone,
+   // and so is the registry reset that only that handler called.)
 })
 
 // The existing invokePinAction sends {done,total} with NO `cached`; here the SW

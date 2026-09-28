@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest"
 
 // pin.ts is a pure localStorage module — no module-level side effects
 // that require resetting, so a normal import is fine.
-import { pinFilter, unpinFilter, clearAllPins, isPinned, listPins, PINS_KEY } from "./pin"
+import { pinFilter, unpinFilter, isPinned, listPins } from "./pin"
 
 beforeEach(() => {
    localStorage.clear()
@@ -49,8 +49,7 @@ describe("pin registry", () => {
       expect(pins.get("all")!.names).toEqual(["data/1.gz", "data/2.gz"])
    })
 
-   it("PINS_KEY constant matches the stored key", () => {
-      expect(PINS_KEY).toBe("srr-pins")
+   it("the home registry lives under the bare srr-pins key", () => {
       pinFilter("x", ["a"])
       expect(localStorage.getItem("srr-pins")).not.toBeNull()
    })
@@ -63,13 +62,6 @@ describe("pin registry", () => {
    it("listPins is tolerant of non-object stored value", () => {
       localStorage.setItem("srr-pins", "42")
       expect(listPins().size).toBe(0)
-   })
-
-   it("clearAllPins empties the registry", () => {
-      pinFilter("feed:5", ["meta/0.gz", "data/1.gz"])
-      clearAllPins()
-      expect(listPins().size).toBe(0)
-      expect(localStorage.getItem("srr-pins")).toBeNull()
    })
 
    it("listPins skips malformed entries", () => {

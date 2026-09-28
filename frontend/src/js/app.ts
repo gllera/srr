@@ -1141,7 +1141,7 @@ async function init() {
    // (There was a "pins-purged" listener here. It reset the pin registry after
    // the SW's gen-change purge of the PINNED bucket — but `gen` was retired at
    // the manifest cutover, and with it that purge: every mutation of PINNED is
-   // now an explicit pin/unpin/unpin-all this page asked for. The worker's only
+   // now an explicit pin/unpin this page asked for. The worker's only
    // outbound message is "pin-progress", so the branch had no sender at all.)
 
    window.addEventListener("hashchange", () => void route(location.hash.substring(1)))

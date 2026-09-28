@@ -219,7 +219,7 @@ names. Nothing is left unclassified.
 | `SEEN_KEY` `srr-seen` | `{"feed:<id>": chronIdx}` | **per-store** | Values are chrons; feed ids are store-local. Two stores' `feed:3` are different feeds. |
 | `SEEN_TS_KEY` `srr-seen-ts` | `{"feed:<id>": unixSec}` | **per-store** | Keys mirror `srr-seen` exactly; must move with it or LWW ordering detaches from the values it orders. |
 | `SAVED_KEY` `srr-saved` | `chronIdx[]` in save order | **per-store** | chronIdx *element identity*. A cross-store queue is possible later (§6.5) but the storage stays per store either way. |
-| `PINS_KEY` `srr-pins` | filterKey → `{names}` | **per-store** | Values are store-relative pack names (`data/17.gz`) — meaningless without a root. The SW pin protocol already carries a `base`, so this generalizes cleanly (§5.5). |
+| `pinsKey(mid)` `srr-pins` | filterKey → `{names}` | **per-store** | Values are store-relative pack names (`data/17.gz`) — meaningless without a root. The SW pin protocol already carries a `base`, so this generalizes cleanly (§5.5). |
 | `PROFILE_TS_KEY` `srr-profile-ts` | unix sec, LWW ordering | **per-store** | It orders `saved` LWW, and saved is per store. Mount 0 keeps the bare key = the blob's top-level `ts` (wire compatibility, §4.4). |
 | `UNREAD_ONLY_KEY` `srr-unread-only` | `"1"`/`"0"` | **global** | A view mode of the reader, not a property of a store. Flipping it per store would be a surprise, not a feature. |
 | `IMG_PROXY_KEY` `srr-img-proxy` | URL prefix | **global** | A device-level privacy setting applied to *external* image URLs from any store. Per-store proxies would be config theatre. |

@@ -293,9 +293,6 @@ function isPinnableName(n: unknown): n is string {
 //     Progress message: { type: "pin-progress", done: number, total: number,
 //                         error?: string }
 //
-//   { type: "unpin-all" }
-//     Clears the entire PINNED bucket (called when the user removes all pins).
-//
 //   { type: "unpin", names: string[], base?: string }
 //     Removes specific entries from the PINNED bucket (base as in "pin").
 sw.addEventListener("message", (event) => {
@@ -329,9 +326,9 @@ sw.addEventListener("message", (event) => {
 
    // Validate every name as a pinnable pack OR asset key — reject anything else.
    // This filter is what closes the cache-key surface, so it is applied once here
-   // rather than restated per branch ("unpin-all" carries no names at all).
+   // rather than restated per branch.
    const validNames = (Array.isArray(msg.names) ? msg.names : []).filter(isPinnableName)
-   // Any of the three messages can change whether PINNED holds anything, and
+   // Either message below can change whether PINNED holds anything, and
    // this handler is the bucket's only writer — drop the emptiness memo here
    // rather than at each branch, so a new branch cannot forget it.
    pinnedEmpty = null
@@ -377,16 +374,6 @@ sw.addEventListener("message", (event) => {
                done++
                reply({ type: "pin-progress", done, total, cached })
             })
-         })(),
-      )
-      return
-   }
-
-   if (msg.type === "unpin-all") {
-      event.waitUntil(
-         (async () => {
-            const pinned = await openCache(PINNED)
-            await Promise.all((await pinned.keys()).map((k) => pinned.delete(k)))
          })(),
       )
       return

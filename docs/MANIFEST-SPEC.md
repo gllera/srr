@@ -855,7 +855,7 @@ listed.**
 | `localStorage["srr-saved"]` (`SAVED_KEY`) | `chronIdx[]` in **save order** | **element identity** — `nav.readSavedSet`, the ★ Saved queue |
 | `localStorage["srr-hash"]` + the URL `#pos!tokens` | chronIdx | the restored/shared reading position |
 | The sync profile blob (`profile.ts` v2, replicated to the user's endpoint and to every other device) | carries `srr-seen` + `srr-saved` verbatim | **the multiplier**: any renumbering must be applied consistently across devices, or a merge silently mixes two coordinate spaces |
-| `localStorage["srr-pins"]` (`PINS_KEY`) | filter key → pack **names** | not chron-keyed, but name-keyed — see §9.5 |
+| `localStorage["srr-pins"]` (`pinsKey(mid)`, the home store's key) | filter key → pack **names** | not chron-keyed, but name-keyed — see §9.5 |
 
 The sync blob is what makes the renumbering options expensive: it is not one
 device's state to migrate, it is a fleet's, and `profile.ts`'s merge rules
