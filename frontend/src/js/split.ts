@@ -9,10 +9,6 @@ import { untracked } from "./signals"
 
 const QUERY = "(min-width: 1000px)"
 
-interface LegacyMQL {
-   addListener?: (fn: (e: { matches: boolean }) => void) => void
-}
-
 const listeners: Array<(on: boolean) => void> = []
 
 export function initSplit(): void {
@@ -49,9 +45,7 @@ export function initSplit(): void {
       model.split.set(e.matches)
       for (const fn of listeners) fn(e.matches)
    }
-   // Safari < 14 has no addEventListener on MediaQueryList.
-   if (typeof mql.addEventListener === "function") mql.addEventListener("change", onChange)
-   else (mql as LegacyMQL).addListener?.(onChange)
+   mql.addEventListener("change", onChange)
    // Printing ended: whatever value the job left is over, whether or not Chrome
    // has delivered the undo crossing yet.
    window.addEventListener("afterprint", () => model.printSplit.set(null))
