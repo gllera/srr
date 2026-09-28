@@ -97,8 +97,9 @@ type FetchCmd struct {
 // rather than the cycle: an --interval loop runs thousands of cycles through
 // one FetchCmd, and rebuilding these every five minutes re-seeded pools whose
 // payloads are expensive to make — a feed buffer is --max-feed-size (5 MB by
-// default) per worker, and each mod.Module compiles two bluemonday policies
-// plus a minifier (FET14).
+// default) per worker, and each mod.Module builds a minifier plus every
+// built-in's per-instance state (FET14). The #sanitize policy is not part of
+// that cost: it is one process-wide value (mod/sanitize.go).
 //
 // The pools stay sync.Pools, so an idle loop still returns that memory to the
 // runtime at the next GC; what the hoist removes is the guaranteed rebuild.
