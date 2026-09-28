@@ -210,12 +210,11 @@ function makeShard(entries: IMetaWire[]): Shard {
 // a rejected promise clears its slot so the next query refetches.
 //
 // Per-store (docs/MULTI-STORE-SPEC.md §11.1): the lazy fetch slots, LRUs and the
-// delta-fold memo are what search.ts accumulated as module-level state; they now
-// hang off a per-Store record, keyed in a WeakMap by the Store the query runs
-// against. S37 has one store (the active one) so this is byte-identical, but the
-// state is already partitioned for S38's N stores. The data reads (storeNames,
-// metaReady, fetchPackBytes, deltaArticles) still go through the active store's
-// data.* exports — threading the searched store into THOSE is S38's step.
+// delta-fold memo hang off a per-Store record, keyed in a WeakMap by the active
+// Store. A query always runs against the active store — every data read below
+// (storeNames, metaReady, fetchPackBytes, deltaArticles) goes through its data.*
+// exports — so the partition only keeps each store's caches apart across a lane
+// switch.
 interface SearchState {
    loadSummary: () => Promise<Uint8Array>
    loadLatest: () => Promise<Shard>
@@ -348,7 +347,6 @@ export async function* search(
    q: string,
    limit = Infinity,
    scope?: SearchScope,
-   store: Store = activeStore(),
 ): AsyncGenerator<ISearchHit[], void, void> {
    const words = queryWords(q)
    if (words.length === 0) return
@@ -358,7 +356,7 @@ export async function* search(
    // inconsistent results — yield nothing (fails safe) instead.
    if (!data.metaReady()) return
 
-   const st = stateOf(store)
+   const st = stateOf(activeStore())
    const nf = data.numFinalizedMeta()
    // wordGrams already yields nothing for words shorter than SEARCH_GRAM.
    const gramBits = words.flatMap(wordGrams).map(bloomBits)
@@ -418,23 +416,18 @@ export interface HitSet {
 // the scope key, RDR8) and ignores `cap` on a hit, so a varying cap for the same
 // query would silently return the first cap's result. nav always passes the
 // fixed SEARCH_CAP.
-export function loadHits(
-   query: string,
-   cap: number,
-   scope?: SearchScope,
-   store: Store = activeStore(),
-): Promise<HitSet> {
+export function loadHits(query: string, cap: number, scope?: SearchScope): Promise<HitSet> {
    // Two scopes over one query are two hit sets, so the scope key joins the
    // cache key. An unscoped query keeps the bare query as its key — byte-identical
    // caching for the case that existed before scoping did.
    const key = scope ? JSON.stringify([query, scope.key]) : query
-   return cachedPromise(stateOf(store).hitCache, key, async () => {
+   return cachedPromise(stateOf(activeStore()).hitCache, key, async () => {
       const seen = new Set<number>()
       const chrons: number[] = []
       const cards = new Map<number, import("./format.gen").IMetaWire>()
       let truncated = false
       if (query) {
-         outer: for await (const batch of search(query, cap + 1, scope, store)) {
+         outer: for await (const batch of search(query, cap + 1, scope)) {
             for (const h of batch) {
                if (chrons.length >= cap) {
                   truncated = true
@@ -464,7 +457,8 @@ export function loadHits(
 // contract: while a q: filter is active this alone is not enough — nav.ts keeps
 // its own snapshot (searchSorted/searchLoadedFor), so pair with nav's
 // resetSearchStream() + a SearchLane.prepare() re-run (nav/lane-search.ts).
-export function invalidate(store: Store = activeStore()): void {
+export function invalidate(): void {
+   const store = activeStore()
    const fresh = makeState()
    const old = stateBy.get(store)
    if (old) fresh.shardCache = old.shardCache
