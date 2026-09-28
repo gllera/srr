@@ -222,8 +222,8 @@ func TestMCPListArticles(t *testing.T) {
 }
 
 // A bad since/until value fails with parseTimeBound's grammar message, prefixed
-// by the FIELD name (not the CLI flag name) — parseMCPWindow's own wording,
-// which is why ArtCmd.window's test-pinned "--since" messages stay untouched.
+// by the FIELD name (not the CLI flag name): the tool passes parseWindow its own
+// labels, which is why `srr art`'s test-pinned "--since" messages stay untouched.
 func TestMCPListArticlesBadTimeBound(t *testing.T) {
 	mcpTestStore(t)
 

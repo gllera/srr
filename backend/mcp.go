@@ -23,13 +23,6 @@ import (
 // function — the printing lives in the CLI Run() methods, which the tool layer
 // never calls. Logging stays on slog (stderr).
 
-// hintPtr is the *bool helper the MCP annotations need: DestructiveHint and
-// OpenWorldHint are POINTERS that default to TRUE when nil, so a read-only or
-// closed-world tool has to say `false` out loud or it is silently mislabelled
-// to every client. (Named for the hints rather than the type: `boolPtr` is
-// already taken by a test helper in this package.)
-func hintPtr(b bool) *bool { return &b }
-
 // newMCPServer builds the srr MCP server with every tool registered. The
 // version is the same ldflags-stamped `version` the CLI and the admin GUI
 // report, so a client can tell which binary it is talking to.

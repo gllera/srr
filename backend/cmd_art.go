@@ -62,21 +62,16 @@ type ArtCmd struct {
 	Until  string   `short:"u" optional:"" help:"Only articles fetched before this time (exclusive; same forms as --since)."`
 }
 
-// window resolves --since/--until into the half-open [since, until) window's
-// unix-second bounds; a nil bound is open-ended. The clock is fetched_at
-// (ingest time), not published: it is chron-monotone, so a window is a
-// contiguous chron range.
-func (o *ArtCmd) window(now time.Time) (since, until *int64, err error) {
-	return parseWindow(o.Since, o.Until, now, "--since", "--until")
-}
-
 // parseWindow resolves a since/until pair into the half-open [since, until)
-// unix-second window, over the shared parseTimeBound grammar. Both bounds
-// resolve against ONE now, either may be open, and an empty window is refused
-// — the rules the CLI (`srr art`) and the MCP tool must answer identically,
-// stated here once. The labels are the caller's names for the two bounds
-// (`--since`/`--until` for the flags, `since`/`until` for the tool's fields),
-// which is the only thing that ever differed between the two.
+// unix-second window, over the shared parseTimeBound grammar. The clock is
+// fetched_at (ingest time), not published: it is chron-monotone, so a window
+// is a contiguous chron range. Both bounds resolve against ONE now (so a
+// relative window can't straddle a clock tick), either may be open (a nil
+// bound), and an empty window is refused — the rules the CLI (`srr art`) and
+// the MCP tool must answer identically, stated here once. The labels are the
+// caller's names for the two bounds (`--since`/`--until` for the flags,
+// `since`/`until` for the tool's fields), which is the only thing that ever
+// differed between the two.
 func parseWindow(sinceStr, untilStr string, now time.Time, sinceLabel, untilLabel string) (since, until *int64, err error) {
 	if sinceStr != "" {
 		t, err := parseTimeBound(sinceStr, now)
@@ -121,8 +116,9 @@ type articlesOutput struct {
 // artQuery is one resolved article listing — the filters `listArticles`
 // answers, already parsed by whichever front end asked (CLI flags today, the
 // MCP tool layer next). The time window arrives as absolute unix-second
-// bounds rather than as the raw strings, so each caller keeps its own bound
-// grammar and its own error wording (ArtCmd.window's is test-pinned).
+// bounds rather than as the raw strings: both front ends resolve them through
+// parseWindow, each with its own labels (--since/--until for the CLI,
+// since/until for MCP).
 type artQuery struct {
 	ids    []int
 	tags   []string
@@ -261,9 +257,7 @@ func listArticles(ctx context.Context, db *DB, q artQuery) (*articlesOutput, err
 }
 
 func (o *ArtCmd) Run() error {
-	// Both bounds resolve against one `now`, so a relative window can't
-	// straddle a clock tick mid-command.
-	since, until, err := o.window(time.Now())
+	since, until, err := parseWindow(o.Since, o.Until, time.Now(), "--since", "--until")
 	if err != nil {
 		return err
 	}

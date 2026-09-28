@@ -56,14 +56,6 @@ func truncateRunes(s string, maxRunes int) (string, bool) {
 	return s, false
 }
 
-// parseMCPWindow resolves the tool-level since/until strings into the same
-// half-open [since, until) unix-second window `srr art` uses — the one
-// parseWindow, labelled with the tool's field names rather than the CLI's flag
-// names, which keeps ArtCmd.window's test-pinned wording untouched.
-func parseMCPWindow(sinceStr, untilStr string, now time.Time) (since, until *int64, err error) {
-	return parseWindow(sinceStr, untilStr, now, "since", "until")
-}
-
 // --- srr_list_articles ------------------------------------------------------
 
 type listArticlesIn struct {
@@ -99,9 +91,9 @@ type listArticlesOut struct {
 // scope. Feed titles are resolved inside that same scope, so the ids and the
 // names they are labelled with come from one consistent db.gz read.
 func mcpListArticles(ctx context.Context, _ *mcp.CallToolRequest, in listArticlesIn) (*mcp.CallToolResult, listArticlesOut, error) {
-	// Both bounds resolve against one `now`, so a relative window can't straddle
-	// a clock tick mid-call.
-	since, until, err := parseMCPWindow(in.Since, in.Until, time.Now())
+	// The same window `srr art` resolves, labelled with the tool's field names
+	// rather than the CLI's flag names.
+	since, until, err := parseWindow(in.Since, in.Until, time.Now(), "since", "until")
 	if err != nil {
 		return nil, listArticlesOut{}, mcpToolErr(err)
 	}
@@ -442,14 +434,16 @@ func mcpFetch(ctx context.Context, _ *mcp.CallToolRequest, in fetchIn) (*mcp.Cal
 
 // readOnlyTool is the annotation set for a tool that only reads: explicitly
 // non-destructive, and explicitly closed- or open-world depending on whether it
-// makes outbound requests. Both of those hints are pointers defaulting to TRUE,
-// so they must be stated.
+// makes outbound requests. Both of those hints (DestructiveHint, OpenWorldHint)
+// are POINTERS defaulting to TRUE when nil, so they must be stated out loud
+// (`new(false)`) or a read-only or closed-world tool is silently mislabelled to
+// every client.
 func readOnlyTool(openWorld bool) *mcp.ToolAnnotations {
 	return &mcp.ToolAnnotations{
 		ReadOnlyHint:    true,
 		IdempotentHint:  true,
-		DestructiveHint: hintPtr(false),
-		OpenWorldHint:   hintPtr(openWorld),
+		DestructiveHint: new(false),
+		OpenWorldHint:   new(openWorld),
 	}
 }
 
@@ -466,7 +460,7 @@ func previewTool() *mcp.ToolAnnotations {
 	return &mcp.ToolAnnotations{
 		ReadOnlyHint:   false,
 		IdempotentHint: false,
-		OpenWorldHint:  hintPtr(true),
+		OpenWorldHint:  new(true),
 	}
 }
 
@@ -508,8 +502,8 @@ func addMCPTools(s *mcp.Server) {
 		Annotations: &mcp.ToolAnnotations{
 			// Writes, but only ever adds a feed — nothing existing is touched.
 			// Not idempotent: calling twice creates two subscriptions.
-			DestructiveHint: hintPtr(false),
-			OpenWorldHint:   hintPtr(true),
+			DestructiveHint: new(false),
+			OpenWorldHint:   new(true),
 		},
 	}, mcpAddFeed)
 
@@ -521,9 +515,9 @@ func addMCPTools(s *mcp.Server) {
 			// Overwrites stored settings, so destructive; but re-applying the
 			// same arguments lands on the same state, so idempotent. Open-world
 			// because a url change probes the network.
-			DestructiveHint: hintPtr(true),
+			DestructiveHint: new(true),
 			IdempotentHint:  true,
-			OpenWorldHint:   hintPtr(true),
+			OpenWorldHint:   new(true),
 		},
 	}, mcpUpdateFeed)
 
@@ -535,8 +529,8 @@ func addMCPTools(s *mcp.Server) {
 			// Expiry deletes assets and advances each feed's retention frontier,
 			// so the cycle is genuinely destructive; and every call does more
 			// work, so it is not idempotent.
-			DestructiveHint: hintPtr(true),
-			OpenWorldHint:   hintPtr(true),
+			DestructiveHint: new(true),
+			OpenWorldHint:   new(true),
 		},
 	}, mcpFetch)
 }
