@@ -15,6 +15,7 @@ import { discardAdopted } from "./relocation"
 import {
    active,
    buffering,
+   currentEntry,
    cursor,
    cursorIndex,
    deps,
@@ -352,8 +353,7 @@ export function advance(autoplay: boolean): void {
 // Play the current entry — the READY state's play button — or, with no current
 // entry, the first.
 export function playCursor(): void {
-   const q = queue()
-   const e = q[cursorIndex()] ?? q[0]
+   const e = currentEntry()
    if (e) playEntry(e, true)
 }
 
@@ -525,7 +525,7 @@ export function removeCurrent(): void {
 // The title button: jump to the article that owns the episode (or, in the READY
 // state, the queue head's).
 export function openOwner(): void {
-   const a = active() ?? queue()[cursorIndex()] ?? queue()[0]
+   const a = active() ?? currentEntry()
    if (a) deps().openArticle(a.mid, a.chron)
 }
 

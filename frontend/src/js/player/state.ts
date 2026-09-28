@@ -15,7 +15,7 @@
 //
 // The element itself stays the source of truth for playback; `playback` is its
 // snapshot, refreshed by `sample()` from the claimed element's own events.
-import { shallowEqual, signal } from "../signals"
+import { computed, shallowEqual, signal } from "../signals"
 import { PLAYER_RATE_KEY } from "../keys"
 
 export interface PlayerDeps {
@@ -100,6 +100,11 @@ export function cursorIndex(): number {
    const k = cursor()
    return k === null ? -1 : queue().findIndex((e) => entryKey(e) === k)
 }
+// The current entry, or (no cursor) the first: what the READY state shows and
+// its play button starts. Undefined only while the playlist is empty.
+export function currentEntry(): QueueEntry | undefined {
+   return queue()[cursorIndex()] ?? queue()[0]
+}
 
 // Whether the player is UNFOLDED to the full player. It starts folded — just the
 // corner button — and only that button (or a full-queue chip) unfolds it.
@@ -127,6 +132,11 @@ export function sample(): void {
    const m = a.media
    playback.set({ paused: m.paused, time: m.currentTime, duration: m.duration })
 }
+
+// Paused unless a claimed episode is playing (the READY state reads as paused).
+// A computed, so what keys on it wakes on a play/pause and never on the ~4/s
+// time samples that move only the clock.
+export const pausedNow = computed(() => (active() ? playback().paused : true))
 
 // The speed ladder the rate button cycles. 1 is first so the cycle returns to
 // normal rather than dead-ending at 2x.

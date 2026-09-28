@@ -8,7 +8,7 @@ import { el } from "../els"
 import { stampSrc } from "../fmt"
 import { prefersReducedMotion } from "../motion"
 import { AXIS_SLOP, ROW_SWIPE_TRIGGER, verticalDominant } from "../gestures"
-import { arrayEqual, computed, diffed, effect, onChange, untracked } from "../signals"
+import { arrayEqual, diffed, effect, onChange, untracked } from "../signals"
 import {
    cycleRate,
    dropEntry,
@@ -29,16 +29,16 @@ import { save } from "./persist"
 import {
    active,
    buffering,
-   cursor,
+   currentEntry,
    cursorIndex,
    entryKey,
    entryLabel,
    mediaKind,
+   pausedNow,
    playback,
    queue,
    ratePref,
    unfolded,
-   type Active,
    type QueueEntry,
 } from "./state"
 
@@ -98,18 +98,15 @@ function clock(seconds: number): string {
 // READY state — the queue head behind a play button — since a queue must be
 // visible to be usable at all, and ✕ is how it goes away.
 function chromeKey(): readonly unknown[] {
-   const a = active()
-   const q = queue()
-   const i = cursorIndex()
    return [
-      a,
-      q[i] ?? q[0] ?? null,
-      q.length > 0,
-      i + 1 < q.length,
-      i > 0,
+      active(),
+      currentEntry() ?? null,
+      queue().length > 0,
+      hasNext(),
+      hasPrev(),
       unfolded(),
       buffering(),
-      a ? playback().paused : true,
+      pausedNow(),
       ratePref(),
    ]
 }
@@ -140,11 +137,11 @@ function paintChrome(): void {
    el.playerPrev.hidden = !hasPrev()
    // One painter for both states: the READY state is exactly the active state
    // at paused = true, labelled from the current entry instead of the claim.
-   const ready = q[cursorIndex()] ?? q[0]
+   const ready = currentEntry()
    const who = a ?? ready
    if (!who) return
-   const kind = a ? mediaKind(a.media) : ready.kind
-   const paused = a ? playback().paused : true
+   const kind = a ? mediaKind(a.media) : ready!.kind
+   const paused = pausedNow()
    el.player.dataset.kind = kind
    stampSrc(el.player, who.feedId)
    el.playerSource.textContent = data.feedTitle(who.feedId)
@@ -197,7 +194,7 @@ function paintClock(): void {
 // row tinted in its feed's colour, aria-current for assistive tech, no label
 // (user call 2026-09-23) — and the ones before it read as played. The player (and its dock) exists exactly while
 // this list is non-empty.
-function renderList(a: Active | null, q: readonly QueueEntry[], ci: number): void {
+function renderList(q: readonly QueueEntry[], ci: number, paused: boolean): void {
    el.playerCount.textContent = q.length ? String(q.length) : ""
    el.playerEmpty.hidden = q.length > 0
    el.playerList.replaceChildren(
@@ -221,7 +218,7 @@ function renderList(a: Active | null, q: readonly QueueEntry[], ci: number): voi
          play.append(source, name)
          // The current row's press is the transport's own toggle; any other
          // row's plays it now (it stays listed).
-         const verb = current ? (a && !playback().paused ? "Pause" : "Play") : "Play now"
+         const verb = current ? (paused ? "Play" : "Pause") : "Play now"
          play.setAttribute("aria-label", `${verb} — ${entryLabel(entry.title)} · ${data.feedTitle(entry.feedId)}`)
          if (current) play.setAttribute("aria-current", "true")
          play.addEventListener("click", () => {
@@ -635,8 +632,6 @@ function bindControls(): void {
    bindListScrollIntent()
 }
 
-const pausedNow = computed(() => (active() ? playback().paused : true))
-
 // Wire the controls and register the sheet's three effects. Each effect paints
 // under untracked(), so a DOM read inside a painter can never widen what it
 // re-runs on.
@@ -651,17 +646,15 @@ export function watchView(): () => void {
          untracked(paintClock)
       }),
       effect(() => {
-         const a = active()
          const q = queue()
-         cursor()
          const ci = cursorIndex()
          const open = unfolded()
          // A play/pause flips the current row's label (Play ↔ Pause). Through
          // a computed, never playback() itself: that moves ~4×/s while playing,
          // and a re-render would tear the rows out from under a drag or focus.
-         pausedNow()
+         const paused = pausedNow()
          untracked(() => {
-            renderList(a, q, ci)
+            renderList(q, ci, paused)
             followCurrent(q[ci], open)
          })
       }),

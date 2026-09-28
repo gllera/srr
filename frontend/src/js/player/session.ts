@@ -3,7 +3,7 @@
 import * as data from "../data"
 import { arrayEqual, diffed, onChange } from "../signals"
 import { advance, close, pause, play, prevTrack, seekTo, skip, SKIP_SECONDS } from "./engine"
-import { active, entryLabel, playback, queue, type Active } from "./state"
+import { active, entryLabel, pausedNow, queue, type Active } from "./state"
 
 // Metadata + playbackState follow the claimed episode and its play/pause. The
 // action handlers are (re)bound on every NEW claim — engines drop them when the
@@ -65,10 +65,7 @@ function syncQueueHandlers(has: boolean): void {
 
 export function watchSession(): () => void {
    const stopMeta = diffed(
-      () => {
-         const a = active()
-         return [a, a ? playback().paused : true] as const
-      },
+      () => [active(), pausedNow()] as const,
       ([a, paused], prev) => {
          if (a && a !== prev?.[0]) bindHandlers()
          syncMetadata(a, paused)
