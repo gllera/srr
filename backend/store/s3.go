@@ -128,6 +128,15 @@ func apiErrorCode(err error) string {
 	return ""
 }
 
+// s3Err wraps a failed call its op's own cases did not claim: an unauthorized
+// answer says so, and anything else names the op and the key.
+func s3Err(op, key string, err error) error {
+	if apiErrorCode(err) == s3ErrUnauthorized {
+		return fmt.Errorf("unauthorized access to s3: %w", err)
+	}
+	return fmt.Errorf("s3 %s %q: %w", op, key, err)
+}
+
 func (d *S3) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	key = d.s3path("read", key)
 
@@ -137,18 +146,15 @@ func (d *S3) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 		ChecksumMode: types.ChecksumModeEnabled,
 	})
 
-	switch apiErrorCode(err) {
 	// NotFound rides alongside NoSuchKey: a bucket reached through some
 	// S3-compatible gateways answers a bodyless miss with the HeadObject code
 	// even on GET, and a missing key that does not read as missing is exactly
 	// the lie this contract exists to prevent.
-	case s3ErrNoSuchKey, s3ErrNotFound:
+	if code := apiErrorCode(err); code == s3ErrNoSuchKey || code == s3ErrNotFound {
 		return nil, errMissing("key not found on s3:", key)
-	case s3ErrUnauthorized:
-		return nil, fmt.Errorf("unauthorized access to s3: %w", err)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("s3 get %q: %w", key, err)
+		return nil, s3Err("get", key, err)
 	}
 
 	return res.Body, nil
@@ -169,22 +175,29 @@ func (d *S3) AtomicPut(ctx context.Context, key string, r io.Reader, meta Object
 // best-effort check-then-write a filesystem is limited to. S3/R2 — the backends
 // real deployments use — is what the root flip needed a real CAS for.
 func (d *S3) Version(ctx context.Context, key string) (string, error) {
-	key = d.s3path("version", key)
+	res, found, err := d.head(ctx, d.s3path("version", key))
+	if err != nil || !found {
+		return "", err
+	}
+	return aws.ToString(res.ETag), nil
+}
 
-	res, err := d.client.HeadObject(ctx, &s3.HeadObjectInput{
+// head is the HeadObject call Stat and Version share. A missing key — NotFound
+// is S3's answer to a bodyless HEAD, NoSuchKey rides along for gateways — is
+// found == false with a nil error, left to each caller: Stat's contract makes
+// it an error, while to Version it is the "no object yet" token.
+func (d *S3) head(ctx context.Context, key string) (res *s3.HeadObjectOutput, found bool, err error) {
+	res, err = d.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(d.bucket),
 		Key:    aws.String(key),
 	})
-	switch apiErrorCode(err) {
-	case s3ErrNotFound, s3ErrNoSuchKey:
-		return "", nil
-	case s3ErrUnauthorized:
-		return "", fmt.Errorf("unauthorized access to s3: %w", err)
+	if code := apiErrorCode(err); code == s3ErrNotFound || code == s3ErrNoSuchKey {
+		return nil, false, nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("s3 head %q: %w", key, err)
+		return nil, false, s3Err("head", key, err)
 	}
-	return aws.ToString(res.ETag), nil
+	return res, true, nil
 }
 
 // PutIfVersion conditions the write on the object's current ETag — If-Match for
@@ -247,14 +260,11 @@ func (d *S3) put(ctx context.Context, key string, r io.Reader, ignoreExisting bo
 
 	res, err := d.client.PutObject(ctx, input)
 
-	switch apiErrorCode(err) {
-	case s3ErrPreconditionFailed:
+	if apiErrorCode(err) == s3ErrPreconditionFailed {
 		return "", fmt.Errorf("key %q already exists on s3: %w", key, os.ErrExist)
-	case s3ErrUnauthorized:
-		return "", fmt.Errorf("unauthorized access to s3: %w", err)
 	}
 	if err != nil {
-		return "", fmt.Errorf("s3 put %q: %w", key, err)
+		return "", s3Err("put", key, err)
 	}
 
 	return aws.ToString(res.ETag), nil
@@ -268,20 +278,13 @@ func (d *S3) put(ctx context.Context, key string, r io.Reader, ignoreExisting bo
 func (d *S3) Stat(ctx context.Context, key string) (int64, error) {
 	key = d.s3path("stat", key)
 
-	res, err := d.client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(d.bucket),
-		Key:    aws.String(key),
-	})
-
-	switch apiErrorCode(err) {
-	case s3ErrNotFound, s3ErrNoSuchKey:
+	res, found, err := d.head(ctx, key)
+	if err != nil {
+		return 0, err
+	}
+	if !found {
 		slog.Debug("db not found", "key", key)
 		return 0, errMissing("s3 head", key)
-	case s3ErrUnauthorized:
-		return 0, fmt.Errorf("unauthorized access to s3: %w", err)
-	}
-	if err != nil {
-		return 0, fmt.Errorf("s3 head %q: %w", key, err)
 	}
 	return aws.ToInt64(res.ContentLength), nil
 }
@@ -407,10 +410,7 @@ func (d *S3) List(ctx context.Context, prefix string) ([]string, error) {
 	for p.HasMorePages() {
 		page, err := p.NextPage(ctx)
 		if err != nil {
-			if apiErrorCode(err) == s3ErrUnauthorized {
-				return nil, fmt.Errorf("unauthorized access to s3: %w", err)
-			}
-			return nil, fmt.Errorf("s3 list %q: %w", full, err)
+			return nil, s3Err("list", full, err)
 		}
 		for _, obj := range page.Contents {
 			key := aws.ToString(obj.Key)
