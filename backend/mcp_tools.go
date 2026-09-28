@@ -61,7 +61,7 @@ func truncateRunes(s string, maxRunes int) (string, bool) {
 type listArticlesIn struct {
 	FeedIDs        []int    `json:"feed_ids,omitempty" jsonschema:"Only articles from these feed ids. Combined with tags as a union (an article matches if it is in ANY selected feed). Omit for every feed. Feed ids come from srr_overview."`
 	Tags           []string `json:"tags,omitempty" jsonschema:"Only articles from feeds carrying one of these tags. Exact tag match, not hierarchical; combined with feed_ids as a union. Omit for every feed."`
-	Query          string   `json:"query,omitempty" jsonschema:"Only articles whose TITLE contains this text, matched accent- and case-insensitively. Title-only: article bodies are not searched. Costly on a large store — an exact match count reads every data pack inside the window, so pair query with since (e.g. since=\"7d\") to bound the work."`
+	Query          string   `json:"query,omitempty" jsonschema:"Only articles whose TITLE contains this text, matched accent- and case-insensitively. Title-only: article bodies are not searched. Costly on a large store — an exact match count reads every article title inside the window, so pair query with since (e.g. since=\"7d\") to bound the work."`
 	Limit          int      `json:"limit,omitempty" jsonschema:"Maximum articles to return. Default 50, hard-capped at 200 — article content is large and this result lands in a context window."`
 	Before         *int     `json:"before,omitempty" jsonschema:"Pagination cursor: return only articles strictly before this chron index (exclusive). Pass back the next_cursor of the previous call; omit for the newest page. Articles are always returned newest-first."`
 	Since          string   `json:"since,omitempty" jsonschema:"Window start, INCLUSIVE. Forms: a duration before now (\"24h\", \"7d\", \"2w\", \"1d12h\"), a local date (\"2026-07-15\"), or an RFC3339 instant (\"2026-07-15T09:00:00Z\"). The clock is fetched_at (when SRR ingested the article), not the publisher's date — a backfill of old posts rides its recent ingest time."`
@@ -470,7 +470,7 @@ func addMCPTools(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "srr_list_articles",
 		Title:       "List stored articles",
-		Description: "List articles already stored in the SRR feed store, newest first, with optional feed/tag, title-query and time-window filters and cursor pagination. Reads the store only — no outbound requests, nothing is fetched or modified. Content is omitted unless include_content is set. Note: an exact match count with `query` reads every data pack in the window, so pair `query` with `since` on a large store.",
+		Description: "List articles already stored in the SRR feed store, newest first, with optional feed/tag, title-query and time-window filters and cursor pagination. Reads the store only — no outbound requests, nothing is fetched or modified. Content is omitted unless include_content is set. Note: an exact match count with `query` reads every article title in the window, so pair `query` with `since` on a large store.",
 		Annotations: readOnlyTool(false),
 	}, mcpListArticles)
 

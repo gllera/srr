@@ -178,12 +178,13 @@ func listArticles(ctx context.Context, db *DB, q artQuery) (*articlesOutput, err
 	}
 
 	// matches decides one entry: the feed filter first (free), then the title
-	// query (which costs a data-pack read, served from the shared reader's
-	// cache). Both the Total count and the page collection run it, so Total
-	// stays "how many articles match", not "how many articles there are". A
-	// dangling entry — one addressing past the end of its pack — is a
-	// non-match: the content fill already tolerates that row by leaving it
-	// blank, and a query cannot confirm a title it can't read.
+	// query (a meta-card or data-pack read, served from the shared reader's
+	// caches). Both the Total count and the page collection run it, so Total
+	// stays "how many articles match", not "how many articles there are". An
+	// entry whose title neither source holds — a dangling one, addressing past
+	// the end of its pack, outside the meta coverage — is a non-match: the
+	// content fill already tolerates that row by leaving it blank, and a query
+	// cannot confirm a title it can't read.
 	matches := func(e *idxEntry) (bool, error) {
 		if filter != nil && !filter[e.FeedID] {
 			return false, nil
@@ -191,11 +192,11 @@ func listArticles(ctx context.Context, db *DB, q artQuery) (*articlesOutput, err
 		if needle == "" {
 			return true, nil
 		}
-		ad, ok, err := reader.at(e.PackID, e.PackOffset)
+		title, ok, err := reader.title(e)
 		if err != nil || !ok {
 			return false, err
 		}
-		return strings.Contains(foldSearchText(ad.Title), needle), nil
+		return strings.Contains(foldSearchText(title), needle), nil
 	}
 
 	startIdx := hi
@@ -309,16 +310,79 @@ func readAllIdx(ctx context.Context, db *DB) ([]idxEntry, []ArticleData, error) 
 
 // packReader resolves idx entries to the ArticleData they address, caching
 // every data pack it touches. The window search and the content fill share one
-// instance, so a pack read while locating the window is never read twice.
+// instance, so a pack read while locating the window is never read twice. The
+// title query reads the meta/ series instead where it can (see title).
 type packReader struct {
 	ctx    context.Context
 	db     *DB
 	deltas []ArticleData
 	cache  map[int][]ArticleData
+	// metaCover is the chron below which title reads meta cards: the meta
+	// coverage, clamped to the pack region it may never exceed (delta-region
+	// titles are free from the parsed chain anyway). meta caches each meta
+	// shard's cards by position; a nil entry marks a shard that failed.
+	metaCover int
+	meta      map[int][]MetaEntry
 }
 
 func newPackReader(ctx context.Context, db *DB, deltas []ArticleData) *packReader {
-	return &packReader{ctx: ctx, db: db, deltas: deltas, cache: map[int][]ArticleData{}}
+	return &packReader{
+		ctx:       ctx,
+		db:        db,
+		deltas:    deltas,
+		cache:     map[int][]ArticleData{},
+		metaCover: min(db.core.metaCoverage(), tailCovered(&db.core)),
+		meta:      map[int][]MetaEntry{},
+	}
+}
+
+// title resolves one entry's title for the title query. Below metaCover it
+// reads the entry's meta card — the title-only projection SyncMeta copies
+// from the same ArticleData, 5,000 per shard — rather than gunzipping and
+// parsing whole data packs for their titles. The meta series is warn-only
+// derived state, so a shard that fails to read or parse, or runs short, falls
+// back to at, as does the uncovered tail. ok is false when neither source
+// holds the entry's record.
+func (r *packReader) title(e *idxEntry) (string, bool, error) {
+	if e.ChronIdx < r.metaCover {
+		p := e.ChronIdx / metaPackSize
+		cards, cached := r.meta[p]
+		if !cached {
+			cards = r.metaShard(p)
+			r.meta[p] = cards
+		}
+		if i := e.ChronIdx % metaPackSize; i < len(cards) {
+			return cards[i].Title, true, nil
+		}
+	}
+	ad, ok, err := r.at(e.PackID, e.PackOffset)
+	return ad.Title, ok, err
+}
+
+// metaShard reads the cards of the meta shard at position p, nil on any
+// failure (title then falls back to the data pack). A finalized shard leads
+// with its bloom; the tail shard carries none.
+func (r *packReader) metaShard(p int) []MetaEntry {
+	c := &r.db.core
+	key, err := c.Names.key(metaSeries, p)
+	if err != nil {
+		return nil
+	}
+	buf, err := r.db.readGz(r.ctx, key)
+	if err != nil {
+		return nil
+	}
+	if p < c.metaPacks() {
+		if len(buf) < searchBloomBytes {
+			return nil
+		}
+		buf = buf[searchBloomBytes:]
+	}
+	cards, err := parseMetaEntries(buf)
+	if err != nil {
+		return nil
+	}
+	return cards
 }
 
 // at resolves one entry's record. ok is false when the entry addresses past

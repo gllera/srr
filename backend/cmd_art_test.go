@@ -792,6 +792,8 @@ func TestArtListQueryFold(t *testing.T) {
 // the end of its data pack — counting as a NON-match for -q rather than
 // erroring or slipping into the page with a blank title. The unqueried listing
 // still tolerates it as a blank row, so the two paths differ only in the query.
+// The fixture has no meta coverage, so the query reads titles from the data
+// packs; a covered entry's title would come from its meta card instead.
 func TestArtListQueryDanglingEntry(t *testing.T) {
 	db := artQueryStore(t)
 	artDropLastRecord(t, db) // chron 5 = "cafe latte", the newest match
@@ -803,6 +805,99 @@ func TestArtListQueryDanglingEntry(t *testing.T) {
 	}
 	if out.Total != 3 {
 		t.Errorf("Total = %d, want 3 (dangling entry excluded from the count too)", out.Total)
+	}
+}
+
+// TestArtListQueryTitlesFromMeta pins the title query's meta-card path. Below
+// the meta coverage packReader.title reads every title from the meta/ series —
+// the finalized shard (bloom stripped) and the tail shard alike — without
+// reading one data pack, and each equals the title the data-pack path reads; a
+// chron past the coverage, or a meta shard that will not read, falls back to
+// the data pack, so the query answers the same either way.
+func TestArtListQueryTitlesFromMeta(t *testing.T) {
+	db, dir := setupMetaBoundaryDB(t) // "A0".."A4999", then "Last"
+	c := &db.core
+	if err := db.SyncMeta(ctx); err != nil {
+		t.Fatalf("SyncMeta: %v", err)
+	}
+	// One article past the meta coverage: SyncMeta is warn-only, so a lagging
+	// meta series is a legal store.
+	if _, err := db.PutArticles(ctx, []*Item{
+		{Feed: c.Feeds[1], Title: "Last uncovered", Content: "c", Published: metaPackSize + 1},
+	}); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+	if err := db.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if c.metaPacks() != 1 || c.MetaTail != 1 || c.TotalArticles != metaPackSize+2 {
+		t.Fatalf("fixture = (mp %d, mt %d, total %d), want a finalized shard, a 1-card tail and one uncovered article",
+			c.metaPacks(), c.MetaTail, c.TotalArticles)
+	}
+
+	entries, deltas, err := readAllIdx(ctx, db)
+	if err != nil {
+		t.Fatalf("readAllIdx: %v", err)
+	}
+	// compare resolves every entry's title through r.title and checks it
+	// against the data-pack record, reporting whether the covered chrons were
+	// served without a single data-pack read.
+	compare := func(r *packReader) (dataFree bool) {
+		t.Helper()
+		oracle := newPackReader(ctx, db, deltas)
+		for i := range entries {
+			e := &entries[i]
+			if e.ChronIdx == r.metaCover {
+				dataFree = len(r.cache) == 0
+			}
+			got, ok, err := r.title(e)
+			if err != nil || !ok {
+				t.Fatalf("title(chron %d) = ok %v, err %v", e.ChronIdx, ok, err)
+			}
+			ad, _, err := oracle.at(e.PackID, e.PackOffset)
+			if err != nil {
+				t.Fatalf("at(chron %d): %v", e.ChronIdx, err)
+			}
+			if got != ad.Title {
+				t.Fatalf("title(chron %d) = %q, want the data pack's %q", e.ChronIdx, got, ad.Title)
+			}
+		}
+		return dataFree
+	}
+
+	r := newPackReader(ctx, db, deltas)
+	if r.metaCover != metaPackSize+1 {
+		t.Fatalf("metaCover = %d, want %d", r.metaCover, metaPackSize+1)
+	}
+	if !compare(r) {
+		t.Error("the meta-covered titles read a data pack")
+	}
+	if len(r.meta) != 2 || r.meta[0] == nil || r.meta[1] == nil {
+		t.Errorf("meta shard cache = %d entries (finalized %d cards, tail %d), want both shards read",
+			len(r.meta), len(r.meta[0]), len(r.meta[1]))
+	}
+	query := func() articlesOutput { return artRun(t, &ArtCmd{Limit: 50, Query: "a499"}) }
+	want := query()
+	if want.Total != 11 { // A499, A4990..A4999
+		t.Fatalf("Total = %d, want 11", want.Total)
+	}
+	if last := artRun(t, &ArtCmd{Limit: 50, Query: "last"}); !slices.Equal(artTitles(last), []string{"Last uncovered", "Last"}) {
+		t.Errorf("titles = %v, want the uncovered article and the tail-shard card", artTitles(last))
+	}
+
+	// An unreadable finalized shard falls back to the data packs.
+	if err := os.WriteFile(filepath.Join(dir, posK(c, metaSeries, 0)), []byte("not gzip"), 0o644); err != nil {
+		t.Fatalf("corrupt meta shard: %v", err)
+	}
+	r = newPackReader(ctx, db, deltas)
+	if compare(r) {
+		t.Error("the corrupt shard's titles were served without a data-pack read")
+	}
+	if cards, read := r.meta[0]; !read || cards != nil {
+		t.Errorf("meta[0] = %d cards (read %v), want the failed shard cached as nil", len(cards), read)
+	}
+	if got := query(); !slices.Equal(artTitles(got), artTitles(want)) || got.Total != want.Total {
+		t.Errorf("fallback query = %v (Total %d), want %v (Total %d)", artTitles(got), got.Total, artTitles(want), want.Total)
 	}
 }
 

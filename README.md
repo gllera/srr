@@ -93,7 +93,7 @@ explicitly, e.g. `ssh host 'SRR_STORE=/srv/srr ~/.local/bin/srr mcp'`.
 
 - **`srr_fetch` can run for minutes** with no intermediate progress — the tool replies once, at the end, so there are no progress notifications. Raise the client's tool timeout when a whole-store fetch is expected: `MCP_TOOL_TIMEOUT=600000` (ms).
 - **Writes contend with the fetch loop.** `srr_add_feed`, `srr_update_feed` and `srr_fetch` take the store lock; while a `srr serve --interval` cycle holds it they return `store busy: fetch cycle in progress; retry shortly` — the same 409 contract the admin page reports. Retry, don't change the arguments.
-- **`srr_list_articles`' exact `Total` with `query` reads every data pack inside the window.** Pair `query` with `since` (e.g. `"7d"`) on a large store.
+- **`srr_list_articles`' exact `Total` with `query` reads every article title inside the window.** Pair `query` with `since` (e.g. `"7d"`) on a large store.
 
 ## Profile sync
 
