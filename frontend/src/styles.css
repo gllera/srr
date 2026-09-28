@@ -906,7 +906,9 @@ body.srr-playing .srr-pin-progress {
 .srr-player:has(.srr-player-media video) .srr-player-cover {
    display: none;
 }
-.srr-player-on .srr-player-cover span {
+/* Only while the view is open: folded, the cover is invisible and the dock
+   runs its own bars. */
+.srr-player-on:not(.srr-player-folded) .srr-player-cover span {
    animation: srr-player-level 0.9s ease-in-out infinite alternate;
    &:nth-child(2) {
       animation-delay: -0.35s;
@@ -930,7 +932,7 @@ body.srr-playing .srr-pin-progress {
    }
 }
 @media (prefers-reduced-motion: reduce) {
-   .srr-player-on .srr-player-cover span {
+   .srr-player-on:not(.srr-player-folded) .srr-player-cover span {
       animation: none;
    }
 }
