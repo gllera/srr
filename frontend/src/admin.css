@@ -32,7 +32,7 @@
    --well-ink: #cdd3da;
 }
 
-@media (prefers-color-scheme: dark) {
+@media screen and (prefers-color-scheme: dark) {
    :root {
       --signal: #ff7a3c;
       --signal-ink: #1a1410;

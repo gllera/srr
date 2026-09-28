@@ -122,7 +122,7 @@
       --border: #777;
    }
 }
-@media (prefers-contrast: more) and (prefers-color-scheme: dark) {
+@media screen and (prefers-contrast: more) and (prefers-color-scheme: dark) {
    :root {
       --fg-2: #ccc;
       --muted: #aaa;
@@ -132,8 +132,9 @@
 }
 
 /* Dark mode — token reassignments only. The per-element dark rules
-   (a {color}) stay in styles.css. */
-@media (prefers-color-scheme: dark) {
+   (a {color}) stay in styles.css. Screen only, like every dark block: paper is
+   white, so a print from a dark-mode session keeps the light palette. */
+@media screen and (prefers-color-scheme: dark) {
    :root {
       --bg: #111110;
       --surface-raised: #1c1c1a;

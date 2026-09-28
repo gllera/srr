@@ -4052,8 +4052,9 @@ html:has(body.srr-view-list) {
 }
 
 /* Dark mode — component-level overrides only; token reassignments and the dark
-   source ramp live in tokens.css. */
-@media (prefers-color-scheme: dark) {
+   source ramp live in tokens.css. Screen only (as there), so print never sees
+   it. */
+@media screen and (prefers-color-scheme: dark) {
    a {
       color: #c4a882;
    }
@@ -4067,21 +4068,16 @@ html:has(body.srr-view-list) {
    }
 }
 
-/* Print — and it MUST stay after the dark block, because a browser printing from
-   a dark-mode session matches BOTH queries at once. Every rule here that answers
-   a dark rule (the <a> color, the image dimming) does it at equal specificity, so
-   source order is the entire tiebreaker: above the dark block these silently lost
-   and a dark-mode print kept tan links and dimmed photos. Anything added here
-   that overrides a dark rule inherits that requirement. (The token block below is
-   the one part that would win either way — tokens.css is @imported first — but it
-   lives here with the rest for one readable print story.) */
+/* Print. Paper is white: the dark blocks (above and in tokens.css) are
+   `screen and`, so a print from a dark-mode session gets the light palette the
+   colors were chosen against — not a page of ink, nor pale grey text on white
+   once the browser drops backgrounds. */
 @media print {
    /* Every fixed-position piece of chrome, so a print carries the article and
-      nothing else — and so the token block below is free to restore only the
-      tokens the ARTICLE uses. A transient that happens to be up when Ctrl-P is
-      pressed (the snackbar's "Marked 43 read / UNDO", a pin's progress line)
-      belongs here as much as the toolbar does: it is on screen for seconds, and
-      those are exactly the seconds someone hits print. Add new chrome here. */
+      nothing else. A transient that happens to be up when Ctrl-P is pressed
+      (the snackbar's "Marked 43 read / UNDO", a pin's progress line) belongs
+      here as much as the toolbar does: it is on screen for seconds, and those
+      are exactly the seconds someone hits print. Add new chrome here. */
    .srr-toolbar,
    .srr-player,
    .srr-player-dock-lane,
@@ -4107,34 +4103,6 @@ html:has(body.srr-view-list) {
    }
    html {
       padding: 0;
-   }
-   /* Paper is white. A reader printing from a dark-mode session otherwise sent
-      the DARK token set to the printer: either a page of ink, or — once the
-      browser's own "don't print backgrounds" default drops the dark bg — pale
-      grey text on white, effectively blank. Force the light palette back, which
-      is the one these colors were chosen against.
-
-      Only the tokens the ARTICLE uses are restored; chrome tokens don't matter
-      because every piece of chrome above is display:none. The dark <a> override
-      is undone the same way, since it is a literal, not a token. */
-   :root {
-      --bg: #fafaf7;
-      --surface-raised: #ffffff;
-      --fg: #1c1c1a;
-      --fg-2: #5e5c56;
-      --muted: #8a8780;
-      --faint: #d5d2cb;
-      --border: #cbc7be;
-      --hover: rgba(0, 0, 0, 0.04);
-      --accent: #b35650;
-   }
-   a {
-      color: var(--fg);
-   }
-   /* And undo the dark-mode image dimming above — it exists to stop a bright
-      photo glaring out of a dark screen, which is not a thing paper does. */
-   .srr-content img {
-      filter: none;
    }
 }
 
