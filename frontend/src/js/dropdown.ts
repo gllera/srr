@@ -246,8 +246,8 @@ export function showSyncDialog(): void {
 // Manage the mounted store table: mount a new store by URL, unmount a peer, or
 // remove-and-forget its reading history. Built DYNAMICALLY (not from an
 // index.html skeleton) so it needs no design.html drift-guard change; it reuses
-// the shared modal CSS (.srr-mounts-dialog joins the grouped backdrop/card
-// selectors). app.ts owns the mount mutations (mounts.ts + data.applyMountTable
+// the shared modal CSS (lazyDialog stamps the .srr-dialog / -card / -title
+// classes). app.ts owns the mount mutations (mounts.ts + data.applyMountTable
 // + the SW mounts post) and passes them as hooks; the dialog is pure UI and
 // re-renders itself after each action.
 export interface MountRow {
@@ -264,22 +264,24 @@ export interface MountsDialogHooks {
    forget: (mid: string) => void
 }
 
-// The lazily-built modal skeleton both JS-only dialogs (Stores, Keyboard
-// shortcuts) share — built on first open so index.html/design.html need no markup
-// for them, then memoized in the returned closure. `label` is the accessible name
-// where it differs from the visible title; passing undefined keeps the element
-// without one, which is what the Stores dialog has always shipped.
+// The lazily-built modal skeleton the JS-only dialogs (Stores, Keyboard
+// shortcuts, Reading) share — built on first open so index.html/design.html need
+// no markup for them, then memoized in the returned closure. Each part wears the
+// shared .srr-dialog* class (the modal shell's styling) beside its own. `label`
+// is the accessible name where it differs from the visible title; passing
+// undefined keeps the element without one, which is what the Stores dialog has
+// always shipped.
 function lazyDialog(cls: string, title: string, label?: string): () => HTMLElement {
    let dialog: HTMLElement | null = null
    return () => {
       if (dialog) return dialog
-      const d = divEl(`srr-${cls}-dialog`)
+      const d = divEl(`srr-dialog srr-${cls}-dialog`)
       d.setAttribute("role", "dialog")
       d.setAttribute("aria-modal", "true")
       if (label) d.setAttribute("aria-label", label)
-      const card = divEl(`srr-${cls}-card`)
+      const card = divEl(`srr-dialog-card srr-${cls}-card`)
       const h = document.createElement("h2")
-      h.className = `srr-${cls}-title`
+      h.className = `srr-dialog-title srr-${cls}-title`
       h.textContent = title
       card.append(h, divEl(`srr-${cls}-body`))
       d.append(card)

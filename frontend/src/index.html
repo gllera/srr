@@ -55,9 +55,9 @@
            opened from the ⋯ overflow menu. dropdown.ts injects the editable body
            (input + Save/Disable/Cancel) into .srr-imgproxy-body on open, shows the
            overlay, traps focus, and closes on Escape / backdrop / commit. -->
-      <div class="srr-imgproxy-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-imgproxy-title">
-         <div class="srr-imgproxy-card">
-            <h2 class="srr-imgproxy-title" id="srr-imgproxy-title">Image proxy</h2>
+      <div class="srr-dialog srr-imgproxy-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-imgproxy-title">
+         <div class="srr-dialog-card srr-imgproxy-card">
+            <h2 class="srr-dialog-title srr-imgproxy-title" id="srr-imgproxy-title">Image proxy</h2>
             <p class="srr-imgproxy-desc">Route article images through a proxy URL (the https:// prefix is optional) — useful for upgrading insecure images to HTTPS. Leave it empty to load images straight from the source.</p>
             <div class="srr-imgproxy-body"></div>
          </div>
@@ -65,9 +65,9 @@
       <!-- Backup / Restore dialog — export the portable profile (seen progress,
            saved articles, preferences) as JSON, or import a blob from another
            device. dropdown.ts populates .srr-backup-body on open. -->
-      <div class="srr-backup-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-backup-title">
-         <div class="srr-backup-card">
-            <h2 class="srr-backup-title" id="srr-backup-title">Backup / Restore</h2>
+      <div class="srr-dialog srr-backup-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-backup-title">
+         <div class="srr-dialog-card srr-backup-card">
+            <h2 class="srr-dialog-title srr-backup-title" id="srr-backup-title">Backup / Restore</h2>
             <p class="srr-backup-desc">Copy or download your reading progress, saved articles, and preferences — then paste the file on another device to restore them.</p>
             <div class="srr-backup-body"></div>
          </div>
@@ -75,9 +75,9 @@
       <!-- Sync dialog — set the optional cross-device sync endpoint (any URL
            answering GET/PUT of the profile JSON). Same editor shape as the
            image-proxy dialog; dropdown.ts populates .srr-sync-body on open. -->
-      <div class="srr-sync-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-sync-title">
-         <div class="srr-sync-card">
-            <h2 class="srr-sync-title" id="srr-sync-title">Sync</h2>
+      <div class="srr-dialog srr-sync-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-sync-title">
+         <div class="srr-dialog-card srr-sync-card">
+            <h2 class="srr-dialog-title srr-sync-title" id="srr-sync-title">Sync</h2>
             <p class="srr-sync-desc">Keep reading progress and saved articles in sync across devices through a URL you control — any endpoint that stores what this reader sends it (HTTP GET and PUT). Leave it empty to keep everything on this device.</p>
             <div class="srr-sync-body"></div>
          </div>
@@ -88,10 +88,10 @@
            .srr-info-body on open. Same centered-modal pattern as the
            image-proxy / backup dialogs (dimmed backdrop, focus trap, Escape /
            backdrop close). -->
-      <div class="srr-info-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-info-title">
-         <div class="srr-info-card">
+      <div class="srr-dialog srr-info-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-info-title">
+         <div class="srr-dialog-card srr-info-card">
             <header class="srr-info-head">
-               <h2 class="srr-info-title" id="srr-info-title"></h2>
+               <h2 class="srr-dialog-title srr-info-title" id="srr-info-title"></h2>
                <button class="srr-info-close" aria-label="Close" title="Close">&times;</button>
             </header>
             <div class="srr-info-body"></div>

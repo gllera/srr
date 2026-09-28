@@ -3315,18 +3315,13 @@ html:has(body.srr-view-list) {
    }
 }
 
-/* Modal shell shared by the image-proxy / sync / backup / info dialogs — true
-   centered modals: unlike the toast-style .srr-popup they dim the page behind a
-   full-viewport backdrop and trap focus (dropdown.ts openModal / picker.ts
-   openInfoDialog). Per-dialog differences (card width, the info card's tighter
-   head) live as small overrides in each dialog's own section below. */
-.srr-imgproxy-dialog,
-.srr-sync-dialog,
-.srr-backup-dialog,
-.srr-mounts-dialog,
-.srr-keys-dialog,
-.srr-reading-dialog,
-.srr-info-dialog {
+/* Modal shell shared by every dialog (the .srr-dialog / -card / -title classes
+   each one wears beside its own) — true centered modals: unlike the toast-style
+   .srr-popup they dim the page behind a full-viewport backdrop and trap focus
+   (dropdown.ts openModal / picker.ts openInfoDialog). Per-dialog differences
+   (card width, the info card's tighter head) live as small overrides in each
+   dialog's own section below, which source order lets win. */
+.srr-dialog {
    display: none;
    position: fixed;
    inset: 0;
@@ -3339,13 +3334,7 @@ html:has(body.srr-view-list) {
       display: flex;
    }
 }
-.srr-imgproxy-card,
-.srr-sync-card,
-.srr-backup-card,
-.srr-mounts-card,
-.srr-keys-card,
-.srr-reading-card,
-.srr-info-card {
+.srr-dialog-card {
    max-height: calc(100dvh - 2.5rem);
    overflow-y: auto;
    background: var(--surface-raised);
@@ -3356,13 +3345,7 @@ html:has(body.srr-view-list) {
    padding: 1.25rem 1.4rem 1.4rem;
 }
 /* The dialogs' titles speak in the wire voice (tracked mono caps). */
-.srr-imgproxy-title,
-.srr-sync-title,
-.srr-backup-title,
-.srr-mounts-title,
-.srr-keys-title,
-.srr-reading-title,
-.srr-info-title {
+.srr-dialog-title {
    margin: 0 0 0.6rem;
    font-family: var(--font-mono);
    font-size: 0.82rem;
@@ -4127,13 +4110,7 @@ html:has(body.srr-view-list) {
    .srr-pin-progress,
    .srr-picker,
    .srr-ctxmenu,
-   .srr-imgproxy-dialog,
-   .srr-backup-dialog,
-   .srr-sync-dialog,
-   .srr-mounts-dialog,
-   .srr-keys-dialog,
-   .srr-reading-dialog,
-   .srr-info-dialog {
+   .srr-dialog {
       display: none !important;
    }
    /* The second selector is not redundant: body.srr-playing raises this same

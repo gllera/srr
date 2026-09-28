@@ -31,9 +31,9 @@
          <button class="srr-popup-retry srr-hidden">Retry</button>
          <button class="srr-popup-close" aria-label="Close">&times;</button>
       </div>
-      <div class="srr-imgproxy-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-imgproxy-title">
-         <div class="srr-imgproxy-card">
-            <h2 class="srr-imgproxy-title" id="srr-imgproxy-title">Image proxy</h2>
+      <div class="srr-dialog srr-imgproxy-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-imgproxy-title">
+         <div class="srr-dialog-card srr-imgproxy-card">
+            <h2 class="srr-dialog-title srr-imgproxy-title" id="srr-imgproxy-title">Image proxy</h2>
             <p class="srr-imgproxy-desc">
                Route article images through a proxy URL (the https:// prefix is optional) — useful for upgrading
                insecure images to HTTPS. Leave it empty to load images straight from the source.
@@ -41,9 +41,9 @@
             <div class="srr-imgproxy-body"></div>
          </div>
       </div>
-      <div class="srr-backup-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-backup-title">
-         <div class="srr-backup-card">
-            <h2 class="srr-backup-title" id="srr-backup-title">Backup / Restore</h2>
+      <div class="srr-dialog srr-backup-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-backup-title">
+         <div class="srr-dialog-card srr-backup-card">
+            <h2 class="srr-dialog-title srr-backup-title" id="srr-backup-title">Backup / Restore</h2>
             <p class="srr-backup-desc">
                Copy or download your reading progress, saved articles, and preferences — then paste the file on another
                device to restore them.
@@ -51,9 +51,9 @@
             <div class="srr-backup-body"></div>
          </div>
       </div>
-      <div class="srr-sync-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-sync-title">
-         <div class="srr-sync-card">
-            <h2 class="srr-sync-title" id="srr-sync-title">Sync</h2>
+      <div class="srr-dialog srr-sync-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-sync-title">
+         <div class="srr-dialog-card srr-sync-card">
+            <h2 class="srr-dialog-title srr-sync-title" id="srr-sync-title">Sync</h2>
             <p class="srr-sync-desc">
                Keep reading progress and saved articles in sync across devices through a URL you control — any endpoint
                that stores what this reader sends it (HTTP GET and PUT). Leave it empty to keep everything on this
@@ -62,10 +62,10 @@
             <div class="srr-sync-body"></div>
          </div>
       </div>
-      <div class="srr-info-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-info-title">
-         <div class="srr-info-card">
+      <div class="srr-dialog srr-info-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-info-title">
+         <div class="srr-dialog-card srr-info-card">
             <header class="srr-info-head">
-               <h2 class="srr-info-title" id="srr-info-title"></h2>
+               <h2 class="srr-dialog-title srr-info-title" id="srr-info-title"></h2>
                <button class="srr-info-close" aria-label="Close" title="Close">&times;</button>
             </header>
             <div class="srr-info-body"></div>
