@@ -447,17 +447,40 @@ describe("search", () => {
       })
    })
 
-   it("invalidate() drops the cached tail/summary/shards/hits so the next query re-reads", async () => {
+   it("invalidate() drops the cached tail/summary/hits but keeps the finalized shards, keyed by name", async () => {
       const first = await search.loadHits("alpha", 500)
       const before = mockData.fetchPackBytes.mock.calls.length
       await search.loadHits("alpha", 500) // cached — no new fetches
       expect(mockData.fetchPackBytes.mock.calls.length).toBe(before)
       search.invalidate()
       const second = await search.loadHits("alpha", 500)
-      expect(mockData.fetchPackBytes.mock.calls.length).toBeGreaterThan(before) // re-read
+      // The generation-named tail and summary are re-read; a finalized shard's
+      // name is write-once, so its folded parse carries over.
+      const reread = mockData.fetchPackBytes.mock.calls.slice(before).map((c) => c[0])
+      expect(reread.sort()).toEqual(["meta/L7.gz", "meta/s2.gz"])
       // The unchanged store yields the same hit set — invalidation drops caches,
       // never the results.
       expect(second.chrons).toEqual(first.chrons)
       expect(second.cards).toEqual(first.cards)
+   })
+
+   it("a finalized shard under a fresh name (a compaction) misses the carried-over shards", async () => {
+      await search.loadHits("alpha", 500)
+      const before = mockData.fetchPackBytes.mock.calls.length
+      const names = mockData.storeNames
+      store["meta/9.gz"] = store["meta/1.gz"]
+      const spy = vi.spyOn(mockData, "storeNames").mockImplementation(() => {
+         const n = names()
+         n.meta.keys[1] = "meta/9.gz"
+         return n
+      })
+      try {
+         search.invalidate()
+         await search.loadHits("alpha", 500)
+         const reread = mockData.fetchPackBytes.mock.calls.slice(before).map((c) => c[0])
+         expect(reread.sort()).toEqual(["meta/9.gz", "meta/L7.gz", "meta/s2.gz"])
+      } finally {
+         spy.mockRestore()
+      }
    })
 })

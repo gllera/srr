@@ -11,6 +11,7 @@ import { cachedPromise, lazySlot, makeLRU, type LRU } from "./cache"
 import * as data from "./data"
 import { activeStore, type Store } from "./data"
 import { META_PACK_SIZE, SEARCH_BLOOM_BYTES, SEARCH_BLOOM_K, SEARCH_GRAM, type IMetaWire } from "./format.gen"
+import { keyAt } from "./names"
 
 // One search result: the shard entry plus its global position (chron =
 // shard base + line index; the existing nav addressing takes over from here).
@@ -218,7 +219,7 @@ function makeShard(entries: IMetaWire[]): Shard {
 interface SearchState {
    loadSummary: () => Promise<Uint8Array>
    loadLatest: () => Promise<Shard>
-   shardCache: LRU<Promise<Shard>>
+   shardCache: LRU<Promise<Shard>, string> // keyed by object name (loadShard)
    hitCache: LRU<Promise<HitSet>, string>
    deltaShardCache: { arts: IArticle[]; shard: Shard } | null
 }
@@ -244,7 +245,7 @@ function makeState(): SearchState {
          if (meta.tail < 0) throw new Error("meta tail: the store names none")
          return data.loadMetaPack(meta.tail).then(makeShard)
       }),
-      shardCache: makeLRU<Promise<Shard>>(8),
+      shardCache: makeLRU<Promise<Shard>, string>(8),
       hitCache: makeLRU<Promise<HitSet>, string>(8),
       deltaShardCache: null,
    }
@@ -260,8 +261,12 @@ function stateOf(store: Store): SearchState {
    return s
 }
 
+// Keyed by the shard's object name, not its position, so the folded shards
+// survive invalidate(): a name is write-once (docs/MANIFEST-SPEC.md §4), so an
+// unchanged name is unchanged bytes, and a compaction's fresh stem misses.
 function loadShard(st: SearchState, n: number): Promise<Shard> {
-   return cachedPromise(st.shardCache, n, () => data.loadMetaPack(n).then(makeShard))
+   const key = keyAt(data.storeNames().meta, n, `meta shard ${n}`)
+   return cachedPromise(st.shardCache, key, () => data.loadMetaPack(n).then(makeShard))
 }
 
 // The resident delta chain projected as a synthetic Shard so the newest chrons
@@ -450,17 +455,18 @@ export function loadHits(
    })
 }
 
-// Drop every cached read so the next query re-reads the refreshed store: the
-// latest tail and bloom summary are generation-named (stale after a refresh),
-// the hit sets were computed against the old snapshot, and on a gen change even
-// finalized shards changed bytes. Refetches ride the SW cache. Called by
-// refresh.ts after data.refresh() adopts a new snapshot. Caller contract: while
-// a q: filter is active this alone is not enough — nav.ts keeps its own snapshot
-// (searchSorted/searchLoadedFor), so pair with nav's resetSearchStream() + a
-// SearchLane.prepare() re-run (nav/lane-search.ts).
+// Drop the per-snapshot reads so the next query re-reads the refreshed store:
+// the latest tail and bloom summary are generation-named (stale after a
+// refresh), and the hit sets and the delta fold were computed against the old
+// snapshot. The folded finalized shards carry over — loadShard keys them by
+// write-once object name, so only a changed name re-reads. Refetches ride the SW
+// cache. Called by refresh.ts after data.refresh() adopts a new snapshot. Caller
+// contract: while a q: filter is active this alone is not enough — nav.ts keeps
+// its own snapshot (searchSorted/searchLoadedFor), so pair with nav's
+// resetSearchStream() + a SearchLane.prepare() re-run (nav/lane-search.ts).
 export function invalidate(store: Store = activeStore()): void {
-   // Replace the store's whole SearchState — a fresh set of lazy slots/LRUs, the
-   // delta memo dropped — so stale generation-named summary/tail bytes from a
-   // refresh can't leak into a search.
-   stateBy.set(store, makeState())
+   const fresh = makeState()
+   const old = stateBy.get(store)
+   if (old) fresh.shardCache = old.shardCache
+   stateBy.set(store, fresh)
 }
