@@ -19,7 +19,7 @@ import (
 // stream mid-session.
 // Enforced by construction: every handler returns a typed value the SDK
 // marshals, and every wrapped helper (listArticles, buildOverview,
-// renderPreview, previewFetch, saveFeed, runFetch) is a value-returning
+// previewURL, resolveProbe, saveFeed, runFetch) is a value-returning
 // function — the printing lives in the CLI Run() methods, which the tool layer
 // never calls. Logging stays on slog (stderr).
 

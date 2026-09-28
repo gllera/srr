@@ -26,12 +26,7 @@ func handlePreview(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, fmt.Errorf("url is required"))
 		return
 	}
-	var items []*Item
-	err := withDBCtx(r.Context(), false, func(ctx context.Context, db *DB) error {
-		var e error
-		items, e = renderPreview(ctx, db.core.Recipes, q.Get("recipe"), q["pipe"], q.Get("ingest"), q["secrets"], rawURL)
-		return e
-	})
+	items, err := previewURL(r.Context(), q.Get("recipe"), q["pipe"], q.Get("ingest"), q["secrets"], rawURL)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -44,36 +39,12 @@ func handlePreview(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleResolve probes a URL through a recipe's ingest without touching the
-// store: GET /api/resolve?url=&recipe=&ingest= → {url, title, items} (ingest
-// is the optional feed-level override, winning over the recipe's). The
-// add-feed dialog calls it to read the wire's own label before the operator
-// commits: the resolved feed URL (subscribe-time discovery folds a homepage to
-// its advertised feed), the feed-level title, and the item count. Read-only
-// and advisory — save re-resolves server-side, so a skipped or failed probe
-// never blocks an add.
+// store: GET /api/resolve?url=&recipe=&ingest=&secrets= → {url, title?, items}
+// (resolveProbe). The add-feed dialog calls it to read the wire's own label
+// before the operator commits.
 func handleResolve(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	rawURL := q.Get("url")
-	if !validFeedURL(rawURL) {
-		writeErr(w, fmt.Errorf("invalid url %q", rawURL))
-		return
-	}
-	var out map[string]any
-	err := withDBCtx(r.Context(), false, func(ctx context.Context, db *DB) error {
-		// The probe simulates the feed's fetch, secret grant included — an
-		// external ingest needing its credentials must resolve here too.
-		ctx = grantSecrets(ctx, db.core.Recipes, q.Get("recipe"), q["secrets"])
-		res, e := previewFetch(ctx, db.core.Recipes, q.Get("recipe"), q.Get("ingest"), rawURL)
-		if e != nil {
-			return e
-		}
-		resolved := res.ResolvedURL
-		if resolved == "" {
-			resolved = rawURL
-		}
-		out = map[string]any{"url": resolved, "title": res.Title, "items": len(res.Items)}
-		return nil
-	})
+	out, err := resolveProbe(r.Context(), q.Get("recipe"), q.Get("ingest"), q["secrets"], q.Get("url"))
 	if err != nil {
 		writeErr(w, err)
 		return

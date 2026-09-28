@@ -3,7 +3,6 @@ package main
 import (
 	"cmp"
 	"context"
-	"fmt"
 	"slices"
 	"sync"
 	"time"
@@ -16,7 +15,7 @@ import (
 // `jsonschema:` tags are the documentation an LLM actually reads.
 //
 // Every handler WRAPS an existing function — listArticles, buildOverview,
-// renderPreview, previewFetch, resolveFeedViewURL+saveFeed, runFetch — rather
+// previewURL, resolveProbe, resolveFeedViewURL+saveFeed, runFetch — rather
 // than reimplementing it, so the tool surface and the CLI/GUI surfaces can
 // never drift. See mcp.go for the stdout-discipline rule these handlers obey.
 //
@@ -204,9 +203,8 @@ type previewFeedOut struct {
 	Total    int                 `json:"total" jsonschema:"How many articles the fetch+pipeline produced in total, before limit was applied."`
 }
 
-// mcpPreviewFeed wraps renderPreview (cmd_preview.go) — the same code path as
-// `srr preview` and GET /api/preview — in a read-only, unlocked DB scope (it
-// reads only the recipes map). Nothing is stored: this is a dry run.
+// mcpPreviewFeed wraps previewURL (cmd_preview.go) — the same code path as
+// `srr preview` and GET /api/preview. Nothing is stored: this is a dry run.
 func mcpPreviewFeed(ctx context.Context, _ *mcp.CallToolRequest, in previewFeedIn) (*mcp.CallToolResult, previewFeedOut, error) {
 	limit := in.Limit
 	if limit <= 0 {
@@ -217,12 +215,7 @@ func mcpPreviewFeed(ctx context.Context, _ *mcp.CallToolRequest, in previewFeedI
 		maxChars = mcpDefaultPreviewChars
 	}
 
-	var items []*Item
-	err := withDBCtx(ctx, false, func(ctx context.Context, db *DB) error {
-		var e error
-		items, e = renderPreview(ctx, db.core.Recipes, in.Recipe, in.Pipe, in.Ingest, in.Secrets, in.URL)
-		return e
-	})
+	items, err := previewURL(ctx, in.Recipe, in.Pipe, in.Ingest, in.Secrets, in.URL)
 	if err != nil {
 		return nil, previewFeedOut{}, mcpToolErr(err)
 	}
@@ -259,31 +252,11 @@ type resolveFeedOut struct {
 	Items int    `json:"items" jsonschema:"How many items the feed currently carries — a quick liveness signal."`
 }
 
-// mcpResolveFeed wraps previewFetch (cmd_preview.go) behind the same
-// validFeedURL gate the GUI's /api/resolve uses, in a read-only, unlocked DB
-// scope. It is advisory: srr_add_feed re-resolves server-side, so a failed
-// probe here never blocks an add.
+// mcpResolveFeed wraps resolveProbe (cmd_preview.go) — the very probe the
+// GUI's /api/resolve answers with. It is advisory: srr_add_feed re-resolves
+// server-side, so a failed probe here never blocks an add.
 func mcpResolveFeed(ctx context.Context, _ *mcp.CallToolRequest, in resolveFeedIn) (*mcp.CallToolResult, resolveFeedOut, error) {
-	if !validFeedURL(in.URL) {
-		return nil, resolveFeedOut{}, fmt.Errorf("invalid url %q", in.URL)
-	}
-	var out resolveFeedOut
-	err := withDBCtx(ctx, false, func(ctx context.Context, db *DB) error {
-		// Same grant the real fetch would resolve — an external ingest needing
-		// its credentials must get them for the probe too.
-		ctx = grantSecrets(ctx, db.core.Recipes, in.Recipe, in.Secrets)
-		res, e := previewFetch(ctx, db.core.Recipes, in.Recipe, in.Ingest, in.URL)
-		if e != nil {
-			return e
-		}
-		out.URL = res.ResolvedURL
-		if out.URL == "" {
-			out.URL = in.URL
-		}
-		out.Title = res.Title
-		out.Items = len(res.Items)
-		return nil
-	})
+	out, err := resolveProbe(ctx, in.Recipe, in.Ingest, in.Secrets, in.URL)
 	if err != nil {
 		return nil, resolveFeedOut{}, mcpToolErr(err)
 	}

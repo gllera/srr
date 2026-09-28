@@ -79,7 +79,7 @@ var previewTmpl = template.Must(template.New("preview").Funcs(template.FuncMap{
 // the effective ingest strategy (ingestOverride acting as a feed-level
 // override over the recipe's, over the default's) and fetches rawURL through
 // it on a one-shot client. Shared by renderPreview (which then runs the
-// pipeline) and serve's handleResolve (which only reads the wire's metadata).
+// pipeline) and resolveProbe (which only reads the wire's metadata).
 func previewFetch(ctx context.Context, recipes map[string]Recipe, recipeName, ingestOverride, rawURL string) (ingest.Result, error) {
 	// The shared probe client and a pooled body buffer, like every other
 	// subscribe-time probe: a client per call built a transport whose idle
@@ -98,9 +98,49 @@ func previewFetch(ctx context.Context, recipes map[string]Recipe, recipeName, in
 	return result, nil
 }
 
+// resolveProbe is the look-before-you-subscribe probe behind GET /api/resolve
+// and srr_resolve_feed: it fetches rawURL through the recipe's ingest (with the
+// same feed-level overrides as renderPreview) and reports the resolved feed URL
+// (subscribe-time discovery folds a homepage to its advertised feed), the
+// feed-level title and the item count. Read-only and advisory — save
+// re-resolves server-side, so a skipped or failed probe never blocks an add.
+func resolveProbe(ctx context.Context, recipeName, ingestOverride string, secretsOverride []string, rawURL string) (resolveFeedOut, error) {
+	if !validFeedURL(rawURL) {
+		return resolveFeedOut{}, fmt.Errorf("invalid url %q", rawURL)
+	}
+	recipes, err := loadRecipes(ctx)
+	if err != nil {
+		return resolveFeedOut{}, err
+	}
+	// The probe simulates the feed's fetch, secret grant included — an
+	// external ingest needing its credentials must resolve here too.
+	ctx = grantSecrets(ctx, recipes, recipeName, secretsOverride)
+	res, err := previewFetch(ctx, recipes, recipeName, ingestOverride, rawURL)
+	if err != nil {
+		return resolveFeedOut{}, err
+	}
+	out := resolveFeedOut{URL: res.ResolvedURL, Title: res.Title, Items: len(res.Items)}
+	if out.URL == "" {
+		out.URL = rawURL
+	}
+	return out, nil
+}
+
+// previewURL is renderPreview over the store's own recipes — the one entry
+// point `srr preview`, GET /api/preview and srr_preview_feed share. The
+// recipes are read in a short read-only scope that closes before the network
+// preview starts.
+func previewURL(ctx context.Context, recipeName string, pipeOverride []string, ingestOverride string, secretsOverride []string, rawURL string) ([]*Item, error) {
+	recipes, err := loadRecipes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return renderPreview(ctx, recipes, recipeName, pipeOverride, ingestOverride, secretsOverride, rawURL)
+}
+
 // renderPreview fetches url through the resolved recipe's ingest, runs the
-// module pipeline, and returns the processed articles. Shared by PreviewCmd
-// (HTML page) and GET /api/preview (JSON). Optional ad-hoc overrides with
+// module pipeline, and returns the processed articles (previewURL is its
+// entry point over the store's recipes). Optional ad-hoc overrides with
 // feed-level semantics (the same resolution Feed.Fetch applies to a feed's
 // own Ingest/Pipe/Secrets): a non-empty pipeOverride replaces the recipe's
 // effective pipe, #default inside it expanding to that pipe; a non-empty
@@ -142,13 +182,7 @@ func renderPreview(ctx context.Context, recipes map[string]Recipe, recipeName st
 }
 
 func (o *PreviewCmd) Run() error {
-	ctx := context.Background()
-	recipes, err := loadRecipes(ctx)
-	if err != nil {
-		return err
-	}
-
-	articles, err := renderPreview(ctx, recipes, o.Recipe, o.Pipe, o.Ingest, o.Secrets, o.URL.String())
+	articles, err := previewURL(context.Background(), o.Recipe, o.Pipe, o.Ingest, o.Secrets, o.URL.String())
 	if err != nil {
 		return err
 	}
