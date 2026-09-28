@@ -97,7 +97,9 @@ func setNodeAttr(n *html.Node, key, val string) {
 func extractTextNode(title string, body *html.Node, max int) string {
 	var b strings.Builder
 	appendWords := func(s string) bool {
-		for _, f := range strings.Fields(s) {
+		// The iterator form: the extract stops at max bytes, so materializing
+		// every word of a large text node first would be wasted garbage.
+		for f := range strings.FieldsSeq(s) {
 			room := max - b.Len()
 			if b.Len() > 0 {
 				room-- // the separating space
