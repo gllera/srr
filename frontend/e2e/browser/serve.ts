@@ -28,33 +28,22 @@ declare module "vitest" {
 
 export default async function setup({ provide }: GlobalSetupContext) {
    const cwd = process.cwd() // frontend/
-   const appDir = resolve(cwd, "../dist/srrf") // build output dir (passed via --dist-dir)
+   const appDir = resolve(cwd, "../dist/srrf") // the `build` script's --dist-dir
    const packsDir = mkdtempSync(join(tmpdir(), "srr-e2e-browser-"))
 
-   // Wipe the output dir first. This build invokes Parcel DIRECTLY (it needs a
-   // custom env the npm script can't carry), so it bypasses the `npm run build`
-   // wipe — and Parcel never cleans, so every local `make test-browser` used to
-   // leave another orphaned frontend.<hash>.js behind in the dir the release
-   // job tars and deploys.
-   rmSync(appDir, { recursive: true, force: true })
-
-   // Build the real bundle pointed at the same-origin /packs/ path. Force
+   // Build through the package.json `build` script, which owns the output-dir
+   // wipe and the entry-page list; `npm run` passes this env through to Parcel.
+   // Point the bundle at the same-origin /packs/ path, and force
    // NODE_ENV=production: vitest sets NODE_ENV=test on this (global-setup)
    // process, and `parcel build` keeps an already-set NODE_ENV rather than
    // forcing production — without this override app.ts's
    // `process.env.NODE_ENV === "production"` SW-registration branch is
    // dead-code-eliminated (and the dev branch that UNregisters the SW is kept),
    // so the SW never controls the page and every SW e2e times out.
-   await execFileAsync(
-      resolve(cwd, "node_modules/.bin/parcel"),
-      ["build", "src/index.html", "--dist-dir", "../dist/srrf", "--no-cache", "--no-source-maps"],
-      { cwd, env: { ...process.env, NODE_ENV: "production", SRR_CDN_URL: "/packs/" } },
-   )
-   await execFileAsync(
-      resolve(cwd, "node_modules/.bin/parcel"),
-      ["build", "src/admin.html", "--dist-dir", "../dist/srrf", "--no-cache", "--no-source-maps"],
-      { cwd, env: { ...process.env, NODE_ENV: "production", SRR_CDN_URL: "/packs/" } },
-   )
+   await execFileAsync("npm", ["run", "build"], {
+      cwd,
+      env: { ...process.env, NODE_ENV: "production", SRR_CDN_URL: "/packs/" },
+   })
 
    const { server, baseUrl } = await startStaticServer({ appDir, packsDir })
    provide("baseUrl", `${baseUrl}/`)
