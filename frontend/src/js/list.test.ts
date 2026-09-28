@@ -1933,9 +1933,9 @@ describe("list", () => {
 
    // ── Bug #10 — NaN feedId from a skeleton row in selectRow ────────────────────
    // selectRow on a skeleton (no dataset.feed) must NOT call nav.select with NaN.
-   // Once fillRow stamps dataset.feed, if the row holds .srr-row-current nav.select
-   // must be called with the correct (chron, feed) to sync nav state.
-   it("selectRow on a skeleton does not call nav.select with NaN; re-selects once fillRow runs", async () => {
+   // It selects once, with the (chron, feed) data.getFeedId resolves — without
+   // waiting for the row's meta card.
+   it("selectRow on a skeleton does not call nav.select with NaN; selects with the resolved feed", async () => {
       setIndex(3)
       // Gate loadMeta so skeletons remain when we call moveSelection
       let releaseLoadMeta: (() => void) | null = null
@@ -1954,37 +1954,29 @@ describe("list", () => {
       // Move selection while rows are still skeletons
       nav.select.mockClear()
       await list.moveSelection("older") // establishes cursor on first visible row (skeleton)
+      await new Promise((r) => setTimeout(r, 0)) // let the feed id resolve
 
-      // nav.select must NOT have been called with NaN as the feed arg
-      const nanCall = nav.select.mock.calls.find((args) => isNaN(args[1]))
-      expect(nanCall).toBeUndefined()
-
-      // Once the fills land, the current row's nav.select should be called
-      nav.select.mockClear()
-      releaseLoadMeta!()
-      await p
-
-      // nav.select should be called for the currently-highlighted row with a real feed id
-      const selectCalls = nav.select.mock.calls
+      // The highlighted row is still a skeleton, and it is selected exactly once
+      // with its real feed — never NaN.
       const currentRow = $rows().find((r) => r.classList.contains("srr-row-current"))
       expect(currentRow).not.toBeUndefined()
+      expect(currentRow!.classList.contains("srr-row-skeleton")).toBe(true)
       const chron = Number(currentRow!.dataset.chron)
-      const feed = Number(currentRow!.dataset.feed)
-      expect(isNaN(feed)).toBe(false)
-      const reSelect = selectCalls.find((args) => args[0] === chron && args[1] === feed)
-      expect(reSelect).not.toBeUndefined()
+      expect(nav.select.mock.calls).toEqual([[chron, data._arts.get(chron)!.f]])
 
+      releaseLoadMeta!()
+      await p
       data.loadMeta.mockImplementation(async (c: number) => {
          const a = data._arts.get(c)!
          return { f: a.f, w: a.p || a.a, t: a.t }
       })
    })
 
-   // ── Bug #10 follow-up — stale skeleton re-select after cursor move ────────
-   // refresh() can run between selectRow (skeleton window) and fillRow, moving
-   // .srr-row-current to a different row.  fillRow must clear selectPending but
-   // must NOT call nav.select with the stale (skeleton chron, skeleton feed).
-   it("fillRow does not re-select a skeleton that is no longer .srr-row-current", async () => {
+   // ── Bug #10 follow-up — stale skeleton select after cursor move ────────────
+   // refresh() can run between selectRow (skeleton) and the feed id resolving,
+   // moving .srr-row-current to a different row. The late answer must NOT call
+   // nav.select with the stale skeleton's chron.
+   it("a skeleton select whose row lost .srr-row-current before its feed resolved does not select", async () => {
       setIndex(3)
       // Gate loadMeta so skeletons remain after render()
       let releaseLoadMeta: (() => void) | null = null
@@ -2000,30 +1992,35 @@ describe("list", () => {
       await new Promise((r) => setTimeout(r, 0))
       expect($rows().every((r) => r.classList.contains("srr-row-skeleton"))).toBe(true)
 
+      // Hold the skeleton's feed-id lookup until the cursor has moved
+      let releaseFeedId: (() => void) | null = null
+      const feedGate = new Promise<void>((r) => (releaseFeedId = () => r()))
+      data.getFeedId.mockImplementationOnce(async (chron: number) => {
+         await feedGate
+         return data._arts.get(chron)!.f
+      })
+
       // Establish cursor on chron=2 (newest) skeleton
       nav.select.mockClear()
       await list.moveSelection("older")
       const skeletonRow = $rows().find((r) => r.classList.contains("srr-row-current"))
       expect(skeletonRow).not.toBeUndefined()
       const skeletonChron = Number(skeletonRow!.dataset.chron)
-      expect(skeletonRow!.dataset.selectPending).toBe("1")
+      expect(nav.select).not.toHaveBeenCalled()
 
       // Simulate refresh() moving the cursor to a DIFFERENT chron (e.g. the reader
-      // navigated away while the skeleton was pending) — pick a row that is NOT
+      // navigated away while the feed id was pending) — pick a row that is NOT
       // the skeleton we just selected.
       const otherChron = $chrons().find((c) => c !== skeletonChron)!
       nav._setPos(otherChron)
       list.refresh()
-
-      // The skeleton row must no longer carry .srr-row-current after refresh()
       expect(skeletonRow!.classList.contains("srr-row-current")).toBe(false)
-      // But it still has selectPending (refresh() does not clear it)
-      expect(skeletonRow!.dataset.selectPending).toBe("1")
 
-      // Now release fills and wait for render to settle
-      nav.select.mockClear()
+      // Now let the feed id answer, release fills and wait for render to settle
+      releaseFeedId!()
       releaseLoadMeta!()
       await p
+      await new Promise((r) => setTimeout(r, 0))
 
       // nav.select must NOT have been called with the stale skeleton's chron
       const staleCall = nav.select.mock.calls.find((args) => args[0] === skeletonChron)

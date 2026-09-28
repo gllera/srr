@@ -659,16 +659,6 @@ export function fillRow(a: HTMLElement, art: import("./format.gen").IMetaWire, s
    head.lastElementChild!.textContent = timeAgo(art.w) // .srr-row-age
    paintTitle(body.lastElementChild as HTMLElement, art.t || "(untitled)")
    a.classList.remove("srr-row-skeleton")
-   // If selectRow placed the cursor on this row while it was still a skeleton
-   // (feed unknown → nav.select was deferred via data-select-pending), sync now —
-   // but only when the row is still the current cursor.  refresh() can move
-   // .srr-row-current to a different row (e.g. the reader navigated away during
-   // the skeleton window) without clearing selectPending, so we clear the marker
-   // unconditionally and re-select only if this row is still highlighted.
-   if (a.dataset.selectPending) {
-      delete a.dataset.selectPending
-      if (a.classList.contains("srr-row-current")) nav.select(chron, art.f)
-   }
 }
 
 // The list's DOM window: how many screens' worth of rows stay materialized,
@@ -1910,9 +1900,6 @@ function syncRovingTab(): void {
 // downward swipe and hide the toolbar (same contract as render/fetchNewer).
 function selectRow(row: HTMLElement): void {
    if (!rowsEl) return
-   // Clear any pending deferred-select marker left by a prior selectRow call
-   // (regardless of whether that skeleton is still .srr-row-current).
-   rowsEl.querySelector("[data-select-pending]")?.removeAttribute("data-select-pending")
    rowsEl.querySelector(".srr-row-current")?.classList.remove("srr-row-current")
    row.classList.add("srr-row-current")
    syncRovingTab() // the cursor moved — it is now the one tabbable row
@@ -1922,12 +1909,20 @@ function selectRow(row: HTMLElement): void {
    // moves focus, so the cursor was invisible to assistive tech).
    row.focus({ preventScroll: true })
    // Skeleton rows have no dataset.feed yet — Number(undefined) = NaN which
-   // poisons the cursor's feedId and breaks anchorChron().  Defer nav.select until
-   // fillRow stamps the feed; mark the row so fillRow knows to pick it up.
+   // poisons the cursor's feedId and breaks anchorChron(). Ask the idx for the
+   // feed instead (as claimCursor does), and select only if the row is still the
+   // live cursor when it answers: refresh() can move the highlight meanwhile. A
+   // failed load stays a quiet no-op.
+   const chron = Number(row.dataset.chron)
    if (row.dataset.feed !== undefined) {
-      nav.select(Number(row.dataset.chron), Number(row.dataset.feed))
+      nav.select(chron, Number(row.dataset.feed))
    } else {
-      row.dataset.selectPending = "1"
+      void data.getFeedId(chron).then(
+         (f) => {
+            if (row.isConnected && row.classList.contains("srr-row-current")) nav.select(chron, f)
+         },
+         () => {},
+      )
    }
    scrollRowIntoView(row)
    notifyScroll()
