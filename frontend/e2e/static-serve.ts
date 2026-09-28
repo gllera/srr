@@ -45,26 +45,22 @@ export async function startStaticServer(opts: {
    appDir: string
    packsDir: string
    indexFile?: string
-   apiTarget?: string
+   apiPort?: number
 }): Promise<StaticServer> {
    const indexFile = opts.indexFile ?? "index.html"
    const syncBlobs = new Map<string, Buffer>()
    const server = createServer((req, res) => {
       res.setHeader("Connection", "close") // avoid keep-alive sockets that stall server.close()
-      if (opts.apiTarget && (req.url || "").startsWith("/api/")) {
-         // Same parsing and loopback Host as frontend/.proxyrc.js: split on the
-         // LAST colon (IPv6 literals), and present a loopback Host so serve's
-         // hostGuard accepts the proxied request.
-         const at = opts.apiTarget.lastIndexOf(":")
-         const host = opts.apiTarget.slice(0, at).replace(/^\[|\]$/g, "") || "127.0.0.1"
-         const port = opts.apiTarget.slice(at + 1)
+      if (opts.apiPort && (req.url || "").startsWith("/api/")) {
+         // Proxy to the loopback API with a loopback Host, as frontend/.proxyrc.js
+         // does, so serve's hostGuard accepts the proxied request.
          const up = request(
             {
-               host,
-               port: Number(port),
+               host: "127.0.0.1",
+               port: opts.apiPort,
                method: req.method,
                path: req.url,
-               headers: { ...req.headers, host: `localhost:${port}` },
+               headers: { ...req.headers, host: `localhost:${opts.apiPort}` },
             },
             (r) => {
                res.writeHead(r.statusCode || 502, r.headers)

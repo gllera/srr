@@ -48,13 +48,14 @@ describe("browser: admin page", () => {
       store = makeStore()
       feeds = await feedServer({ "/admin.xml": rssFeed("Admin E2E Feed", nItems(2, "a")) })
       await srr(store, "feed", "add", "-t", "Admin E2E Feed", "-u", `${feeds.url}/admin.xml`)
-      const addr = `127.0.0.1:${await freePort()}`
+      const apiPort = await freePort()
+      const addr = `127.0.0.1:${apiPort}`
       serve = spawn(srrBin(), ["-o", store, "serve", "-a", addr], {
          env: { ...process.env, SRR_CONFIG_INLINE: "{}", SRR_ALLOW_PRIVATE_FETCH: "1" },
          stdio: "ignore",
       })
       await waitApi(addr)
-      withApi = await startStaticServer({ appDir, packsDir: store, apiTarget: addr })
+      withApi = await startStaticServer({ appDir, packsDir: store, apiPort })
       noApi = await startStaticServer({ appDir, packsDir: store })
       browser = await launchBrowser()
    })
