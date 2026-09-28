@@ -213,29 +213,19 @@ func feedMatchesTag(feedTag string, sels []string) bool {
 	return false
 }
 
-// selectFeeds resolves the feeds a cycle should fetch. The GUI single-feed path
-// (o.only) resolves exact ids and hard-errors on an unknown one; otherwise the
-// include/exclude filter runs over every feed, logging (never erroring on) any
-// no-match selector or an empty result.
+// selectFeeds resolves the feeds a cycle should fetch. The GUI/MCP on-demand
+// path (o.only) hard-errors on an unknown id, then selects those ids through
+// feedFilter.apply (one pass over the feed map, so a repeated id still yields
+// its feed once); otherwise the include/exclude filter runs over every feed,
+// logging (never erroring on) any no-match selector or an empty result.
 func (o *FetchCmd) selectFeeds(db *DB) ([]*Feed, error) {
 	if len(o.only) > 0 {
-		feeds := make([]*Feed, 0, len(o.only))
-		seen := make(map[int]struct{}, len(o.only))
 		for _, id := range o.only {
-			// Dedup: a repeated id (e.g. a crafted /api/fetch?id=5&id=5) would
-			// otherwise resolve to the SAME *Feed twice — the fan-out then races
-			// two goroutines on it and the aggregation writes its new articles
-			// into the immutable packs twice.
-			if _, dup := seen[id]; dup {
-				continue
-			}
-			ch, err := db.FeedByID(id)
-			if err != nil {
+			if _, err := db.FeedByID(id); err != nil {
 				return nil, err
 			}
-			seen[id] = struct{}{}
-			feeds = append(feeds, ch)
 		}
+		feeds, _ := feedFilter{Feed: o.only}.apply(db.Feeds())
 		return feeds, nil
 	}
 	feeds, warnings := o.apply(db.Feeds())
