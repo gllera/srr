@@ -972,10 +972,10 @@ func (o *FetchCmd) commitPhase(ctx context.Context, db *DB, res *fetchResults) e
 	// Same warn-only contract: the meta series is a derived index, so a
 	// failed sync must not discard the durable batch. Coverage fields stay
 	// behind, readers keep search disabled (or miss only the newest tail),
-	// and the next run reconciles. PutArticles' return lets the common
-	// cycle build its entries from memory instead of re-reading the packs
-	// just written.
-	if err := db.SyncMeta(ctx, written); err != nil {
+	// and the next run reconciles. The consolidation's replay slice lets the
+	// common cycle build its entries from memory instead of re-reading the
+	// packs just written.
+	if err := db.SyncMeta(ctx); err != nil {
 		slog.Warn("sync meta", "error", err)
 	}
 	// The keyword-watchlist bitmaps (watch.go) are a derived projection over the

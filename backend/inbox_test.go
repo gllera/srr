@@ -282,7 +282,7 @@ func TestDrainedCycleValidates(t *testing.T) {
 	if err := db.SyncIdxSummary(ctx); err != nil {
 		t.Fatalf("SyncIdxSummary: %v", err)
 	}
-	if err := db.SyncMeta(ctx, written); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta: %v", err)
 	}
 	if err := db.Commit(ctx); err != nil {

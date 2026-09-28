@@ -200,12 +200,13 @@ func (c *DBCore) metaCoverage() int { return c.metaPacks()*metaPackSize + c.Meta
 // with the missing chron range, finalizing bloom-headed shards at each
 // metaPackSize boundary, then writes the new latest shard and, when shards
 // were finalized, rebuilds the bloom summary from cheap streaming header
-// reads. The missing range is normally exactly `written` — the slice
-// PutArticles just returned — so the common cycle builds entries from
-// memory; any other gap (first run, post-bump, failed-sync catch-up) is read
-// back from the idx+data packs. The coverage fields are set only after every
-// save it accounts for succeeds and the caller's Commit publishes them — so,
-// like Seq/HdrPacks, no reader can learn a name before its content is durable;
+// reads. The missing range is normally exactly o.consolidated — what this
+// cycle's consolidations just replayed into the packs — so the common cycle
+// builds entries from memory; any other gap (first run, post-bump,
+// failed-sync catch-up) is read back from the idx+data packs. The coverage
+// fields are set only after every save it accounts for succeeds and the
+// caller's Commit publishes them — so, like Seq/HdrPacks, no reader can learn
+// a name before its content is durable;
 // a run interrupted after finalizing at least one shard publishes the SHORTER
 // coverage those durable shards describe rather than discarding them (see
 // salvage), which is a lag, never an overclaim.
@@ -253,7 +254,7 @@ func (m *metaTailCache) reset() {
 	m.key, m.lines = "", nil
 }
 
-func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
+func (o *DB) SyncMeta(ctx context.Context) error {
 	c := &o.core
 	// The meta series covers the consolidated region only ([0, tailCovered)):
 	// delta-region cards are derived from the resident chain by every reader,
@@ -433,25 +434,13 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 	}
 
 	// The missing range in memory, when it lines up exactly: on a
-	// consolidation cycle o.consolidated (deltas ++ batch) covers [tc0,
-	// target); with no deltas in play, `written` covers the end of the store.
-	// The DeltaArticles==0 guard on the written path is load-bearing: on a
-	// catch-up cycle with a live chain, this cycle's batch is DELTA-region
-	// content — its length coinciding with the missing pack-region range must
-	// not feed the wrong cards. Any other gap reads back from the packs.
+	// consolidation cycle o.consolidated (deltas ++ batch, every pass of it)
+	// covers [first tc0, target) — the very values the packs hold, so no pack
+	// is re-read seconds after it was written. Any other gap reads back from
+	// the packs.
 	if from := start + len(rawLines); o.consolidated != nil && from+len(o.consolidated) == target {
 		for i := range o.consolidated {
 			if err := add(&o.consolidated[i]); err != nil {
-				return salvage(err)
-			}
-		}
-	} else if c.DeltaArticles == 0 && from+len(written) == target {
-		// The missing range is exactly this run's batch: written is what
-		// PutArticles reported persisting, so the entries derive from the
-		// very values the packs hold and no pack is re-read seconds after
-		// it was written.
-		for i := range written {
-			if err := add(&written[i]); err != nil {
 				return salvage(err)
 			}
 		}

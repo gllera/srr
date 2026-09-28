@@ -65,14 +65,14 @@ func TestGenExpireStore(t *testing.T) {
 	now := time.Now().Unix()
 	put := func(fetchedAt int64, items []*Item) {
 		db.core.FetchedAt = fetchedAt
-		written, err := db.PutArticles(ctx, items)
+		_, err := db.PutArticles(ctx, items)
 		if err != nil {
 			t.Fatalf("PutArticles: %v", err)
 		}
 		if err := db.SyncIdxSummary(ctx); err != nil {
 			t.Fatalf("SyncIdxSummary: %v", err)
 		}
-		if err := db.SyncMeta(ctx, written); err != nil {
+		if err := db.SyncMeta(ctx); err != nil {
 			t.Fatalf("SyncMeta: %v", err)
 		}
 		if err := db.Commit(ctx); err != nil {

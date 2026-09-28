@@ -109,14 +109,14 @@ func driveDeltaStoreChunked(t *testing.T, maxDeltas, maxBatchBytes int) (string,
 			})
 			art++
 		}
-		written, err := db.PutArticles(ctx, batch)
+		_, err := db.PutArticles(ctx, batch)
 		if err != nil {
 			t.Fatalf("batch %d: PutArticles: %v", bi, err)
 		}
 		if err := db.SyncIdxSummary(ctx); err != nil {
 			t.Fatalf("batch %d: SyncIdxSummary: %v", bi, err)
 		}
-		if err := db.SyncMeta(ctx, written); err != nil {
+		if err := db.SyncMeta(ctx); err != nil {
 			t.Fatalf("batch %d: SyncMeta: %v", bi, err)
 		}
 		if err := db.Commit(ctx); err != nil {
@@ -208,14 +208,14 @@ func TestDeltaCycleWritesOnlyDelta(t *testing.T) {
 	// Batch 1: consolidated base (forced), so a real tail exists.
 	globals.MaxDeltas = 0
 	c.FetchedAt = 1_700_000_000
-	w1, err := db.PutArticles(ctx, []*Item{
+	_, err := db.PutArticles(ctx, []*Item{
 		{Feed: ch, Title: "base 1", Content: "c1", Published: 100},
 		{Feed: ch, Title: "base 2", Content: "c2", Published: 200},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SyncMeta(ctx, w1); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatal(err)
 	}
 	tailIdx := tailK(c, idxSeries)
@@ -233,11 +233,11 @@ func TestDeltaCycleWritesOnlyDelta(t *testing.T) {
 	// Batch 2: delta cycle.
 	globals.MaxDeltas = 4
 	c.FetchedAt += 300
-	w2, err := db.PutArticles(ctx, []*Item{{Feed: ch, Title: "delta 1", Content: "c3", Published: 300}})
+	_, err = db.PutArticles(ctx, []*Item{{Feed: ch, Title: "delta 1", Content: "c3", Published: 300}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SyncMeta(ctx, w2); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatal(err)
 	}
 
@@ -431,14 +431,14 @@ func TestDeltaBoundaryForcesConsolidation(t *testing.T) {
 		t.Fatalf("first batch should be a delta cycle (nd=%d)", c.numDeltas())
 	}
 	c.FetchedAt += 300
-	w, err := db.PutArticles(ctx, mkBatch(10, 5000))
+	_, err := db.PutArticles(ctx, mkBatch(10, 5000))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c.numDeltas() != 0 {
 		t.Errorf("stratum-crossing batch did not consolidate (nd=%d)", c.numDeltas())
 	}
-	if err := db.SyncMeta(ctx, w); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if c.metaPacks() != 1 || c.MetaTail != c.TotalArticles-metaPackSize {
@@ -854,11 +854,11 @@ func TestSyncMetaCatchUpWithLiveChain(t *testing.T) {
 
 	globals.MaxDeltas = 8
 	c.FetchedAt += 300
-	w, err := db.PutArticles(ctx, []*Item{{Feed: ch, Title: "delta 1", Content: "x", Published: 3}})
+	_, err := db.PutArticles(ctx, []*Item{{Feed: ch, Title: "delta 1", Content: "x", Published: 3}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SyncMeta(ctx, w); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("catch-up SyncMeta: %v", err)
 	}
 	if c.MetaTail != 2 || c.metaPacks() != 0 {

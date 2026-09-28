@@ -680,7 +680,7 @@ func (o *DB) SyncIdxSummary(ctx context.Context) error {
 }
 
 // PutArticles persists the batch and returns the ArticleData it wrote, in
-// pack order — SyncMeta consumes that slice, so derived meta entries can never
+// pack order — SyncWatch consumes that slice, so derived watch bits can never
 // drift from the packs. Accounting (TotalArticles, per-feed TotalArt /
 // ContentBytes) runs HERE, exactly once per article at ingest time; pack
 // materialization runs either now (a consolidation cycle: this batch plus the
@@ -703,19 +703,12 @@ func (o *DB) SyncIdxSummary(ctx context.Context) error {
 // single pass would be in (see its comment — that is what the roll trigger
 // reads). Chunking only changes how MANY passes there are, and a pass is what
 // draws object names (opaque, monotone stems) and delta segments.
-//
-// ⚠ One visible consequence: SyncMeta's exact-cover fast paths key on
-// `o.consolidated` (the LAST pass's replay slice) or on `written` covering the
-// whole missing range, so a multi-pass cycle usually misses both and rebuilds
-// the meta tail via walkArticles. That is correct — the cards derive from the
-// packs the same articles just produced — and it costs a few pack reads on the
-// rare oversized backfill, never on a steady-state cycle.
 func (o *DB) PutArticles(ctx context.Context, articles []*Item) ([]ArticleData, error) {
 	if len(articles) == 0 {
 		return nil, nil
 	}
 	c := &o.core
-	o.consolidated = nil
+	o.consolidated = nil // every pass's consolidateTail appends to it
 
 	maxBytes := int64(globals.MaxBatchBytes) << 10
 	written := make([]ArticleData, 0, len(articles))
@@ -890,10 +883,11 @@ func (o *DB) DrainDeltas(ctx context.Context) error {
 	if o.core.numDeltas() == 0 {
 		return nil
 	}
+	o.consolidated = nil
 	if err := o.consolidateTail(ctx, nil, nil, o.core.TotalArticles); err != nil {
 		return err
 	}
-	if err := o.SyncMeta(ctx, nil); err != nil {
+	if err := o.SyncMeta(ctx); err != nil {
 		slog.Warn("sync meta after delta drain", "error", err)
 	}
 	return nil
@@ -1129,7 +1123,11 @@ func (o *DB) consolidateTail(ctx context.Context, batch []ArticleData, batchLine
 	// The meta tail this consolidation supersedes — SyncMeta's read-back
 	// candidate, now a name rather than a generation number.
 	o.prevMetaTail = c.Names.tailKey(metaSeries)
-	o.consolidated = entries
+	// Appended, not replaced: each pass of a chunked batch starts at the
+	// previous one's tailCovered, so the slice stays one contiguous chron run
+	// ending at the new tailCovered — SyncMeta's in-memory source however many
+	// passes consolidated.
+	o.consolidated = append(o.consolidated, entries...)
 	c.Names.Deltas.Stems = nil
 	c.DeltaArticles, c.DeltaBytes = 0, 0
 	return nil

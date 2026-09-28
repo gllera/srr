@@ -284,8 +284,8 @@ func watchRules(specs map[string]string) map[string]*mod.Match {
 // when the batch covers it and from walkArticles when it does not.
 //
 // `written` is the slice PutArticles returned (the batch, in chron order),
-// which the caller already has in hand for SyncMeta. It is the fast path and
-// nothing more: correctness comes from the walk fallback.
+// which the caller already has in hand. It is the fast path and nothing more:
+// correctness comes from the walk fallback.
 func (o *DB) SyncWatch(ctx context.Context, written []ArticleData) error {
 	c := &o.core
 

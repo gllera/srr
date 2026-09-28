@@ -77,7 +77,7 @@ func buildExpiredStore(t *testing.T) (*DB, string) {
 		if err := db.SyncIdxSummary(ctx); err != nil {
 			t.Fatalf("SyncIdxSummary: %v", err)
 		}
-		if err := db.SyncMeta(ctx, nil); err != nil {
+		if err := db.SyncMeta(ctx); err != nil {
 			t.Fatalf("SyncMeta: %v", err)
 		}
 		if err := db.Commit(ctx); err != nil {
@@ -257,7 +257,7 @@ func TestCompactPreservesLiveDeltaChain(t *testing.T) {
 		if err := db.SyncIdxSummary(ctx); err != nil {
 			t.Fatal(err)
 		}
-		if err := db.SyncMeta(ctx, nil); err != nil {
+		if err := db.SyncMeta(ctx); err != nil {
 			t.Fatal(err)
 		}
 		if err := db.Commit(ctx); err != nil {
@@ -348,7 +348,7 @@ func TestCompactMetaShardAndSummary(t *testing.T) {
 		if err := db.SyncIdxSummary(ctx); err != nil {
 			t.Fatal(err)
 		}
-		if err := db.SyncMeta(ctx, nil); err != nil {
+		if err := db.SyncMeta(ctx); err != nil {
 			t.Fatal(err)
 		}
 		if err := db.Commit(ctx); err != nil {

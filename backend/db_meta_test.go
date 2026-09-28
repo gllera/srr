@@ -125,7 +125,7 @@ func TestSyncMetaFresh(t *testing.T) {
 	putOneArticle(t, db, ch, 1)
 	putOneArticle(t, db, ch, 2)
 
-	if err := db.SyncMeta(ctx, nil); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta: %v", err)
 	}
 	if c.metaPacks() != 0 || c.MetaTail != 2 {
@@ -155,7 +155,7 @@ func TestSyncMetaAtBoundary(t *testing.T) {
 	db, dir := setupMetaBoundaryDB(t)
 	c := &db.core
 
-	if err := db.SyncMeta(ctx, nil); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta: %v", err)
 	}
 	if c.metaPacks() != 1 || c.MetaTail != 1 {
@@ -195,7 +195,7 @@ func TestSyncMetaAtBoundary(t *testing.T) {
 func TestSyncMetaNoopWhenCurrent(t *testing.T) {
 	db, dir := setupMetaBoundaryDB(t)
 
-	if err := db.SyncMeta(ctx, nil); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta: %v", err)
 	}
 	// The names the store ACTUALLY published, resolved from the table. Spelled
@@ -212,7 +212,7 @@ func TestSyncMetaNoopWhenCurrent(t *testing.T) {
 		}
 		os.Remove(filepath.Join(dir, key))
 	}
-	if err := db.SyncMeta(ctx, nil); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta (noop): %v", err)
 	}
 	for _, key := range keys {
@@ -229,11 +229,11 @@ func TestSyncMetaIncremental(t *testing.T) {
 	c.FetchedAt = 1700000000
 
 	putOneArticle(t, db, ch, 1)
-	if err := db.SyncMeta(ctx, nil); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta #1: %v", err)
 	}
 	putOneArticle(t, db, ch, 2)
-	if err := db.SyncMeta(ctx, nil); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta #2: %v", err)
 	}
 
@@ -247,7 +247,7 @@ func TestSyncMetaIncremental(t *testing.T) {
 }
 
 // The common fetch cycle: the missing range is exactly what PutArticles just
-// returned, so SyncMeta builds its entries from memory. Removing the packs
+// consolidated, so SyncMeta builds its entries from memory. Removing the packs
 // the walk would need proves no read-back happens.
 func TestSyncMetaBatchFastPath(t *testing.T) {
 	db, c, dir := setupTestDB(t)
@@ -255,7 +255,7 @@ func TestSyncMetaBatchFastPath(t *testing.T) {
 	c.Feeds = map[int]*Feed{ch.id: ch}
 	c.FetchedAt = 1700000000
 
-	written, err := db.PutArticles(ctx, []*Item{
+	_, err := db.PutArticles(ctx, []*Item{
 		{Feed: ch, Title: "A1", Content: "C", Published: 1000},
 		{Feed: ch, Title: "A2", Content: "C"},
 	})
@@ -268,7 +268,7 @@ func TestSyncMetaBatchFastPath(t *testing.T) {
 		}
 	}
 
-	if err := db.SyncMeta(ctx, written); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta: %v", err)
 	}
 	if c.metaPacks() != 0 || c.MetaTail != 2 {
@@ -284,6 +284,54 @@ func TestSyncMetaBatchFastPath(t *testing.T) {
 	}
 }
 
+// A chunked batch consolidates in several passes, and each pass's replay is
+// appended to the in-memory source, so SyncMeta still builds the whole missing
+// range from memory — even with the last pass left as a live delta. Removing
+// every idx and data object proves no read-back happens.
+func TestSyncMetaChunkedBatchFastPath(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	globals.MaxDeltas = 2           // every third pass consolidates
+	globals.MaxDeltaBytes = 1 << 20 // never the byte cap (KB)
+	globals.MaxBatchBytes = 4       // KB, against ~3.1 KB lines: two articles a pass
+	ch := &Feed{Title: "feed", URL: "https://example.com/f"}
+	if err := db.AddFeed(ch); err != nil {
+		t.Fatalf("AddFeed: %v", err)
+	}
+	c.FetchedAt = 1700000000
+
+	items := make([]*Item, 14) // seven passes: delta, delta, CONSOLIDATE, twice, then a delta
+	for i := range items {
+		items[i] = &Item{Feed: ch, Title: fmt.Sprintf("A%d", i), Content: strings.Repeat("x", 3000), Published: int64(i + 1)}
+	}
+	if _, err := db.PutArticles(ctx, items); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+	if tc := tailCovered(c); tc != 12 || c.DeltaArticles != 2 {
+		t.Fatalf("fixture: tailCovered = %d, na = %d, want 12, 2", tc, c.DeltaArticles)
+	}
+	for _, series := range []string{idxSeries, dataSeries} {
+		if err := os.RemoveAll(filepath.Join(dir, series)); err != nil {
+			t.Fatalf("RemoveAll %s: %v", series, err)
+		}
+	}
+
+	if err := db.SyncMeta(ctx); err != nil {
+		t.Fatalf("SyncMeta: %v", err)
+	}
+	if c.metaPacks() != 0 || c.MetaTail != 12 {
+		t.Fatalf("coverage = (%d, %d), want (0, 12)", c.metaPacks(), c.MetaTail)
+	}
+	entries := readMetaEntries(t, dir, tailK(c, metaSeries), false)
+	if len(entries) != 12 {
+		t.Fatalf("latest has %d entries, want 12", len(entries))
+	}
+	for i, e := range entries {
+		if want := fmt.Sprintf("A%d", i); e.Title != want {
+			t.Fatalf("entry %d = %q, want %q", i, e.Title, want)
+		}
+	}
+}
+
 // A missing previous tail (consecutive failed syncs, manual deletion) falls
 // back to rebuilding the tail from the data packs.
 func TestSyncMetaRebuildsMissingTail(t *testing.T) {
@@ -294,14 +342,14 @@ func TestSyncMetaRebuildsMissingTail(t *testing.T) {
 
 	putOneArticle(t, db, ch, 1)
 	putOneArticle(t, db, ch, 2)
-	if err := db.SyncMeta(ctx, nil); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta: %v", err)
 	}
 	putOneArticle(t, db, ch, 3)
 	os.Remove(filepath.Join(dir, tailK(c, metaSeries))) // the read-back candidate
 	metaTailMemo.reset()                                // force the GET path — this test covers the missing-tail rebuild
 
-	if err := db.SyncMeta(ctx, nil); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta (rebuild): %v", err)
 	}
 	if c.MetaTail != 3 {
@@ -327,7 +375,7 @@ func TestSyncMetaStaleLowCoverageDoesNotOverwriteFinalizedShard(t *testing.T) {
 	c := &db.core
 
 	// Correct baseline: meta/0.gz = [A0..A4999], latest tail meta/L2 = [Last].
-	if err := db.SyncMeta(ctx, nil); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta baseline: %v", err)
 	}
 	if c.metaPacks() != 1 || c.MetaTail != 1 {
@@ -342,13 +390,13 @@ func TestSyncMetaStaleLowCoverageDoesNotOverwriteFinalizedShard(t *testing.T) {
 	// A later cycle adds one article; its read-back tail (meta/L2, 1 entry)
 	// matches the stale MetaTail.
 	ch := c.Feeds[1]
-	written, err := db.PutArticles(ctx, []*Item{
+	_, err := db.PutArticles(ctx, []*Item{
 		{Feed: ch, Title: "New", Content: "c", Published: int64(metaPackSize + 1)},
 	})
 	if err != nil {
 		t.Fatalf("PutArticles: %v", err)
 	}
-	if err := db.SyncMeta(ctx, written); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta: %v", err)
 	}
 
@@ -373,7 +421,7 @@ func TestSyncMetaInconsistentCoverageRebuilds(t *testing.T) {
 	putOneArticle(t, db, ch, 2)
 	c.MetaTail = 7 // covered (7) > total_art (2)
 
-	if err := db.SyncMeta(ctx, nil); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta: %v", err)
 	}
 	if c.metaPacks() != 0 || c.MetaTail != 2 {
@@ -404,7 +452,7 @@ func TestSyncMetaSaveFailureLeavesCoverageUnchanged(t *testing.T) {
 	// save — finalizing shard 0 at the metaPackSize boundary — fails.
 	db.Backend = &faultBackend{Backend: db.Backend, put: failAll()}
 
-	if err := db.SyncMeta(ctx, nil); err == nil {
+	if err := db.SyncMeta(ctx); err == nil {
 		t.Fatal("SyncMeta should surface the injected Put failure")
 	}
 	if c.metaPacks() != 0 || c.MetaTail != 0 {
@@ -423,7 +471,7 @@ func TestSyncMetaInconsistentCoverageFailureKeepsNames(t *testing.T) {
 	db, _ := setupMetaBoundaryDB(t)
 	c := &db.core
 
-	if err := db.SyncMeta(ctx, nil); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta (setup): %v", err)
 	}
 	before := c.metaPacks()
@@ -441,7 +489,7 @@ func TestSyncMetaInconsistentCoverageFailureKeepsNames(t *testing.T) {
 	metaTailMemo.reset()
 	db.Backend = &faultBackend{Backend: db.Backend, put: failAll()}
 
-	if err := db.SyncMeta(ctx, nil); err == nil {
+	if err := db.SyncMeta(ctx); err == nil {
 		t.Fatal("SyncMeta should surface the injected rebuild failure")
 	}
 	if got := c.metaPacks(); got != before {
@@ -488,7 +536,7 @@ func TestSyncMetaPartialProgressAdopted(t *testing.T) {
 	be := &metaCountPutBackend{Backend: db.Backend, failAt: 2}
 	db.Backend = be
 
-	if err := db.SyncMeta(ctx, nil); !errors.Is(err, errMetaTPutFail) {
+	if err := db.SyncMeta(ctx); !errors.Is(err, errMetaTPutFail) {
 		t.Fatalf("SyncMeta err = %v, want the injected failure", err)
 	}
 	if c.metaPacks() != 1 || c.MetaTail != metaPackSize {
@@ -527,7 +575,7 @@ func TestSyncMetaPartialProgressAdopted(t *testing.T) {
 	// republishes the tail + summary — 3 meta writes, not the 4 a from-scratch
 	// rebuild would cost — and leaves the salvaged shard's name untouched.
 	be.failAt, be.puts = 0, 0
-	if err := db.SyncMeta(ctx, nil); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta (resume): %v", err)
 	}
 	if be.puts != 3 {
@@ -554,7 +602,7 @@ func TestSyncMetaZeroProgressFailureAdoptsNothing(t *testing.T) {
 	db, _ := setupMetaBoundaryDB(t)
 	c := &db.core
 
-	if err := db.SyncMeta(ctx, nil); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta (baseline): %v", err)
 	}
 	before, beforeTail := c.metaPacks(), tailK(c, metaSeries)
@@ -565,7 +613,7 @@ func TestSyncMetaZeroProgressFailureAdoptsNothing(t *testing.T) {
 	be := &metaCountPutBackend{Backend: db.Backend, failAt: 1}
 	db.Backend = be
 
-	if err := db.SyncMeta(ctx, nil); !errors.Is(err, errMetaTPutFail) {
+	if err := db.SyncMeta(ctx); !errors.Is(err, errMetaTPutFail) {
 		t.Fatalf("SyncMeta err = %v, want the injected failure", err)
 	}
 	if be.puts != 1 {
@@ -589,7 +637,7 @@ func TestSyncMetaTailCountMismatchRebuilds(t *testing.T) {
 
 	putOneArticle(t, db, ch, 1)
 	putOneArticle(t, db, ch, 2)
-	if err := db.SyncMeta(ctx, nil); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta #1: %v", err)
 	}
 	if c.MetaTail != 2 {
@@ -604,7 +652,7 @@ func TestSyncMetaTailCountMismatchRebuilds(t *testing.T) {
 	rewriteGz(t, filepath.Join(dir, tailK(c, metaSeries)), []byte(`{"f":1,"w":1,"t":"stale"}`+"\n"))
 	metaTailMemo.reset() // force the GET path — this test covers the count-mismatch rebuild
 
-	if err := db.SyncMeta(ctx, nil); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta (rebuild): %v", err)
 	}
 	if c.MetaTail != 3 {
@@ -653,7 +701,7 @@ func TestInspectValidateMeta(t *testing.T) {
 	if err := db.SyncIdxSummary(ctx); err != nil {
 		t.Fatalf("SyncIdxSummary: %v", err)
 	}
-	if err := db.SyncMeta(ctx, nil); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta: %v", err)
 	}
 	if err := db.Commit(ctx); err != nil {
@@ -673,7 +721,7 @@ func TestInspectValidateMetaOverclaim(t *testing.T) {
 	if err := db.SyncIdxSummary(ctx); err != nil {
 		t.Fatalf("SyncIdxSummary: %v", err)
 	}
-	if err := db.SyncMeta(ctx, nil); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta: %v", err)
 	}
 	db.core.Names.SSum.Covers = 2
@@ -699,7 +747,7 @@ func TestSyncMetaTailMemoHit(t *testing.T) {
 
 	putOneArticle(t, db, ch, 1)
 	putOneArticle(t, db, ch, 2)
-	if err := db.SyncMeta(ctx, nil); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta #1: %v", err)
 	}
 	if lines, ok := metaTailMemo.memoized(tailK(c, metaSeries), c.MetaTail); !ok || len(lines) != 2 {
@@ -714,7 +762,7 @@ func TestSyncMetaTailMemoHit(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logbuf, nil)))
 	defer slog.SetDefault(old)
 
-	if err := db.SyncMeta(ctx, nil); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta #2: %v", err)
 	}
 	if strings.Contains(logbuf.String(), "read-back") {
@@ -776,7 +824,7 @@ func TestSyncMetaHeadProjection(t *testing.T) {
 	for i := 1; i <= headMax+5; i++ {
 		putOneArticle(t, db, ch, i)
 	}
-	if err := db.SyncMeta(ctx, nil); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta: %v", err)
 	}
 	if len(c.Head) != headMax {
@@ -808,7 +856,7 @@ func TestSyncMetaHeadProjection(t *testing.T) {
 func TestSyncMetaHeadShrinksAtBoundary(t *testing.T) {
 	db, _ := setupMetaBoundaryDB(t)
 	c := &db.core
-	if err := db.SyncMeta(ctx, nil); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta: %v", err)
 	}
 	if len(c.Head) != 1 || c.Head[0].Title != "Last" {

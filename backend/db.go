@@ -352,13 +352,14 @@ type DB struct {
 	rootVersion   string
 	rootVersioned bool
 	locked        bool
-	// consolidated is the full replay slice (parsed deltas ++ this cycle's
-	// batch) when PutArticles consolidated the tail this cycle, else nil
-	// (cleared at every PutArticles entry). SyncMeta's fast path consumes it so
-	// a consolidation cycle builds its meta entries from memory instead of
-	// re-reading the packs just written; prevMetaTail is the meta tail key the
-	// consolidation superseded — SyncMeta's read-back candidate for the
-	// previous meta tail.
+	// consolidated is every replay slice (parsed deltas ++ batch) the tail
+	// consolidations of this cycle materialized, concatenated in chron order —
+	// one per pass of a chunked batch, contiguous because each starts at the
+	// previous one's tailCovered — else nil (cleared at every PutArticles and
+	// DrainDeltas entry). SyncMeta's fast path consumes it so a consolidation
+	// cycle builds its meta entries from memory instead of re-reading the packs
+	// just written; prevMetaTail is the meta tail key the consolidation
+	// superseded — SyncMeta's read-back candidate for the previous meta tail.
 	consolidated []ArticleData
 	prevMetaTail string
 	// deltaMemo caches the parsed live delta chain (plus each entry's verbatim

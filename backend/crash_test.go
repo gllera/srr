@@ -187,12 +187,12 @@ func crashCycle(ctx context.Context, i int, halt *stopAfterN) error {
 		db.seen.stamp(ch.id, uint32(i*crashPerCycle+j+1), today)
 	}
 
-	written, err := db.PutArticles(ctx, items)
+	_, err = db.PutArticles(ctx, items)
 	if err != nil {
 		return err
 	}
 	_ = db.SyncIdxSummary(ctx)
-	_ = db.SyncMeta(ctx, written)
+	_ = db.SyncMeta(ctx)
 	_ = db.ExpireArticles(ctx, db.core.FetchedAt)
 	if err := db.SyncSeen(ctx); err != nil {
 		return err

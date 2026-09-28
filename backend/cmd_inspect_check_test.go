@@ -25,7 +25,7 @@ func inspBoundaryStore(t *testing.T) (keyGetter, *DBCore) {
 	if err := db.SyncIdxSummary(ctx); err != nil {
 		t.Fatalf("SyncIdxSummary: %v", err)
 	}
-	if err := db.SyncMeta(ctx, nil); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatalf("SyncMeta: %v", err)
 	}
 	fetch := func(key string) ([]byte, error) { return db.readGz(ctx, key) }

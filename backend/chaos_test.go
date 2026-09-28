@@ -505,7 +505,7 @@ func (c *chaosRun) runStep(step int, st chaosStep) {
 	if err := c.db.SyncIdxSummary(ctx); err != nil {
 		t.Fatalf("%s step %d: SyncIdxSummary: %v", c.label, step, err)
 	}
-	if err := c.db.SyncMeta(ctx, nil); err != nil {
+	if err := c.db.SyncMeta(ctx); err != nil {
 		t.Fatalf("%s step %d: SyncMeta: %v", c.label, step, err)
 	}
 	if err := c.db.ExpireArticles(ctx, c.next); err != nil {

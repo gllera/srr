@@ -799,7 +799,7 @@ func TestMigrationFromLegacyRoot(t *testing.T) {
 	}
 	putOneArticle(t, db, ch, 1)
 	putOneArticle(t, db, ch, 2)
-	if err := db.SyncMeta(ctx, nil); err != nil {
+	if err := db.SyncMeta(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Commit(ctx); err != nil {

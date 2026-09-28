@@ -437,10 +437,10 @@ func TestGenBigStore(t *testing.T) {
 		if err := db.SyncIdxSummary(ctx); err != nil {
 			t.Fatalf("SyncIdxSummary batch %d: %v", batchCount, err)
 		}
-		// nil forces SyncMeta down the walkArticles reconciliation route (the
-		// stricter path: it re-reads the just-written packs), a useful resume
-		// cross-check that the committed packs parse back correctly.
-		if err := db.SyncMeta(ctx, nil); err != nil {
+		// SyncMeta builds the cards from db.consolidated in memory when this
+		// batch consolidated, and reads the missing range back from the packs
+		// otherwise.
+		if err := db.SyncMeta(ctx); err != nil {
 			t.Fatalf("SyncMeta batch %d: %v", batchCount, err)
 		}
 		if err := db.Commit(ctx); err != nil {
