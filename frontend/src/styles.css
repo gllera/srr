@@ -1105,12 +1105,11 @@ body.srr-playing .srr-pin-progress {
       cursor: default;
    }
 }
-/* Play / pause is drawn in CSS off the state player.ts already publishes for
-   assistive tech, so the button's content stays empty and one attribute serves
-   both the eye and the screen reader. Paused = the classic border-trick
-   triangle; playing = two bars from a box with only left/right borders. The
-   .srr-player-playing class player.ts sets alongside aria-pressed selects the
-   same glyph, so the two can never disagree. */
+/* Play / pause is drawn in CSS off the aria-pressed player/view.ts already
+   publishes for assistive tech, so the button's content stays empty and one
+   attribute serves both the eye and the screen reader — no class restates it.
+   Paused = the classic border-trick triangle; playing = two bars from a box
+   with only left/right borders. */
 /* The one large thing in the sheet: play is what you came here for. */
 .srr-player-controls .srr-player-toggle {
    min-width: 3.5rem;
@@ -1134,8 +1133,7 @@ body.srr-playing .srr-pin-progress {
       border-color: transparent transparent transparent currentColor;
    }
 }
-.srr-player-toggle[aria-pressed="true"]::before,
-.srr-player-toggle.srr-player-playing::before {
+.srr-player-toggle[aria-pressed="true"]::before {
    width: 0.85rem;
    height: 1.1rem;
    margin-left: 0;
@@ -1219,9 +1217,6 @@ body.srr-playing .srr-pin-progress {
    margin: 0.1rem 0 0.35rem;
    font-size: var(--text-sm);
    color: var(--muted);
-}
-.srr-player-empty[hidden] {
-   display: none;
 }
 .srr-player-row {
    display: flex;

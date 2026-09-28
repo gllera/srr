@@ -149,7 +149,6 @@ function paintChrome(): void {
    el.playerTitle.setAttribute("aria-label", `Go to ${who.title || "this article"} — ${data.feedTitle(who.feedId)}`)
    el.playerToggle.setAttribute("aria-label", paused ? "Play" : "Pause")
    el.playerToggle.setAttribute("aria-pressed", String(!paused))
-   el.playerToggle.classList.toggle("srr-player-playing", !paused)
    // The dock: named with the episode (it is the only trace of the player
    // while folded), in the feed's colour, its level bars moving while it plays.
    stampSrc(el.playerDock, who.feedId)
