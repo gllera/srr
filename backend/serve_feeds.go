@@ -7,65 +7,32 @@ import (
 	"net/http"
 )
 
-// feedListView is the read-only feed shape the GUI table consumes: the writable
-// feedView fields plus server-owned health fields. Writes (POST/PUT) accept
-// title/url/tag/recipe/ingest/pipe/no_title/expire_days/dedup_days/dedup_title —
-// full-replace semantics, like `feed apply` (the edit modal always sends the
-// no_title checkbox, expire_days, the dedup pool overrides, and the ingest/pipe
-// override values).
+// feedListView is the read-only feed shape the GUI table consumes: the feedView
+// projection (so every writable field round-trips — the GUI's full-replace save
+// would silently wipe one it lacked) plus server-owned health fields. Writes
+// (POST/PUT) accept title/url/tag/recipe/ingest/pipe/no_title/expire_days/
+// dedup_days/dedup_title — full-replace semantics, like `feed apply` (the edit
+// modal always sends the no_title checkbox, expire_days, the dedup pool
+// overrides, and the ingest/pipe override values).
 type feedListView struct {
-	ID     int      `json:"id"`
-	Title  string   `json:"title"`
-	URL    string   `json:"url"`
-	Tag    string   `json:"tag,omitempty"`
-	Recipe string   `json:"recipe,omitempty"`
-	Ingest string   `json:"ingest,omitempty"`
-	Pipe   []string `json:"pipe,omitempty"`
-	// Secrets is the feed-level secret-scope grant override. Scope NAMES only —
-	// values never leave srr.yaml — and it must round-trip like DedupDays so the
-	// GUI's full-replace save doesn't silently wipe it.
-	Secrets    []string `json:"secrets,omitempty"`
-	NoTitle    bool     `json:"no_title,omitempty"`
-	Error      string   `json:"error,omitempty"`
-	FailStreak int      `json:"fail_streak"`
-	LastOK     int64    `json:"last_ok"`
-	LastNew    int64    `json:"last_new"`
-	TotalArt   int      `json:"total_art"`
-	ExpireDays int      `json:"expire_days,omitempty"`
-	// DedupDays / DedupTitle are the per-feed seen.gz pool overrides (0 inherits
-	// the store default; -1 disables; DedupTitle adds the folded-title axis). They
-	// must round-trip so the GUI's full-replace save doesn't silently wipe them.
-	DedupDays  int  `json:"dedup_days,omitempty"`
-	DedupTitle bool `json:"dedup_title,omitempty"`
-	Expired    int  `json:"expired,omitempty"`
-	// ContentBytes/AssetBytes are server-owned counters (see Feed): uncompressed
-	// data-pack bytes added by the feed, and its live assets/ footprint.
-	ContentBytes int64 `json:"content_bytes,omitempty"`
-	AssetBytes   int64 `json:"asset_bytes,omitempty"`
+	feedView
+	// ID shadows feedView's *int (for encoding/json and jsonschema-go alike):
+	// a listed feed always has one, so "id" stays a required plain int.
+	ID         int   `json:"id"`
+	FailStreak int   `json:"fail_streak"`
+	LastOK     int64 `json:"last_ok"`
+	LastNew    int64 `json:"last_new"`
+	TotalArt   int   `json:"total_art"`
 }
 
 func listViewOf(ch *Feed) feedListView {
 	return feedListView{
-		ID:           ch.id,
-		Title:        ch.Title,
-		URL:          ch.URL,
-		Tag:          ch.Tag,
-		Recipe:       ch.Recipe,
-		Ingest:       ch.Ingest,
-		Pipe:         ch.Pipe,
-		Secrets:      ch.Secrets,
-		NoTitle:      ch.NoTitle,
-		Error:        ch.FetchError,
-		FailStreak:   ch.FailStreak,
-		LastOK:       ch.LastOK,
-		LastNew:      ch.LastNew,
-		TotalArt:     ch.TotalArt,
-		ExpireDays:   ch.ExpireDays,
-		DedupDays:    ch.DedupDays,
-		DedupTitle:   ch.DedupTitle,
-		Expired:      ch.Expired,
-		ContentBytes: ch.ContentBytes,
-		AssetBytes:   ch.AssetBytes,
+		feedView:   *viewOf(ch),
+		ID:         ch.id,
+		FailStreak: ch.FailStreak,
+		LastOK:     ch.LastOK,
+		LastNew:    ch.LastNew,
+		TotalArt:   ch.TotalArt,
 	}
 }
 

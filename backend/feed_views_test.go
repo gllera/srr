@@ -22,11 +22,12 @@ func jsonTags(t reflect.Type) map[string]bool {
 // TestWritableFeedFieldsRouteEverywhere pins the ONE writable-feed projection
 // against its hand-written copies, the way TestFeedSplitCoversEveryWireField
 // pins the manifest/config split. feedView (feed ls/show/apply/edit) is the
-// canonical shape; configFeed (srr config export/import), addFeedIn /
-// updateFeedIn (the MCP tools) and feedListView (the admin GUI, whose save is
-// full-replace) must each carry every writable field — a knob missing from any
-// of them is silently WIPED by a save through that surface, the bug class the
-// TestServeFeedSave…RoundTrips* pins each caught once, one field at a time.
+// canonical shape; configFeed (srr config export/import) and addFeedIn /
+// updateFeedIn (the MCP tools) must each carry every writable field — a knob
+// missing from any of them is silently WIPED by a save through that surface, the
+// bug class the TestServeFeedSave…RoundTrips* pins each caught once, one field
+// at a time. (feedListView, the admin GUI's full-replace shape, embeds feedView,
+// so it carries them by construction.)
 func TestWritableFeedFieldsRouteEverywhere(t *testing.T) {
 	writable := jsonTags(reflect.TypeOf(feedView{}))
 	// The server-owned read-only fields (reported, never applied back) and the
@@ -58,16 +59,6 @@ func TestWritableFeedFieldsRouteEverywhere(t *testing.T) {
 	exact("configFeed", jsonTags(reflect.TypeOf(configFeed{})))
 	exact("addFeedIn", jsonTags(reflect.TypeOf(addFeedIn{})))
 	exact("updateFeedIn", jsonTags(reflect.TypeOf(updateFeedIn{})), "id")
-
-	// feedListView additionally carries the read-only health/stat projection,
-	// so it is a superset: it must CONTAIN every writable field (the GUI's
-	// full-replace save round-trips them all through it).
-	lv := jsonTags(reflect.TypeOf(feedListView{}))
-	for f := range writable {
-		if !lv[f] {
-			t.Errorf("feedListView is missing writable feed field %q — the GUI's full-replace save silently wipes it", f)
-		}
-	}
 }
 
 // TestFeedViewCopiesRoundTrip nets the ASSIGNMENTS, which the test above does
