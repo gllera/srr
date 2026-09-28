@@ -76,6 +76,20 @@ window.addEventListener("storage", (e) => {
    if (e.key === null || e.key === savedK()) publishSaved()
 })
 
+// The slot a member holds in save order: its save-index neighbors ("older" =
+// the earlier save, "newer" = the later one, -1 at the ends) and the saves still
+// ahead of it. null when `chron` is not in `order`; the ghost below is a frozen
+// copy of one.
+interface QueueSlot {
+   older: number
+   newer: number
+   ahead: number
+}
+function queueSlot(order: readonly number[], chron: number): QueueSlot | null {
+   const i = order.indexOf(chron)
+   return i < 0 ? null : { older: order[i - 1] ?? -1, newer: order[i + 1] ?? -1, ahead: order.length - 1 - i }
+}
+
 // ★ Saved unsave-of-current anchor (the saved cousin of filter.anchor). Un-saving
 // the article on screen drops it from the queue but leaves it in the reader
 // (toggleSave is a state flip, not a navigation). Its save-index neighbors then
@@ -84,7 +98,13 @@ window.addEventListener("storage", (e) => {
 // queue neighbors and ahead-count it held, so savedNeighbor/savedAhead still
 // answer for it until the reader steps off (resolve) or the filter changes
 // (resolveNoMatch). Set by toggleSaved, cleared on any landing. null = none.
-let savedGhost: { chron: number; older: number; newer: number; ahead: number } | null = null
+let savedGhost: (QueueSlot & { chron: number }) | null = null
+
+// `chron`'s slot in the live queue, else the ghost's copy when `chron` is the
+// article just un-saved on screen, else null.
+function slotOf(chron: number): QueueSlot | null {
+   return queueSlot(savedOrder(), chron) ?? (savedGhost?.chron === chron ? savedGhost : null)
+}
 
 // Any real landing moves off the just-unsaved ghost article onto a genuine
 // member (or another article entirely), so the saved ghost is spent. Called by
@@ -100,20 +120,14 @@ export function clearSavedGhost(): void {
 // aliases two numerically-adjacent saved articles. A `chron` no longer in the set
 // falls back to savedGhost (the article was just un-saved on screen).
 export function savedNeighbor(chron: number, dir: "older" | "newer"): number {
-   const order = savedOrder()
-   const i = order.indexOf(chron)
-   if (i < 0) return savedGhost?.chron === chron ? savedGhost[dir] : -1
-   return dir === "older" ? (order[i - 1] ?? -1) : (order[i + 1] ?? -1)
+   return slotOf(chron)?.[dir] ?? -1
 }
 
 // The ★ Saved half of the reader's pending readout (nav's pendingRight): the
 // saves still AHEAD of `pos` — a front-to-back countdown by save-index. A `pos`
 // that just left the set answers from the ghost's captured ahead-count.
 export function savedAhead(pos: number): number {
-   const order = savedOrder()
-   const i = order.indexOf(pos)
-   if (i < 0) return savedGhost?.chron === pos ? savedGhost.ahead : 0
-   return order.length - 1 - i
+   return slotOf(pos)?.ahead ?? 0
 }
 
 // Stamp this chron's membership change (RDR18) — the exact seam persistSeen is
@@ -156,9 +170,7 @@ export function toggleSaved(
    // a non-member). Re-saving that same article — or any state flip that returns
    // it to the set — drops the ghost.
    if (!nowSaved && ctx.savedMode && chron === ctx.pos) {
-      const order = [...set]
-      const i = order.indexOf(chron)
-      savedGhost = { chron, older: order[i - 1] ?? -1, newer: order[i + 1] ?? -1, ahead: order.length - 1 - i }
+      savedGhost = { chron, ...queueSlot([...set], chron)! }
    } else if (savedGhost?.chron === chron) {
       savedGhost = null
    }
