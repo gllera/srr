@@ -834,11 +834,7 @@ type chaosState struct {
 }
 
 func chaosStateOf(c *DBCore) chaosState {
-	st := chaosState{State: c.ManifestState, Feeds: map[int]FeedPublic{}}
-	for id, f := range c.Feeds {
-		st.Feeds[id] = feedPublicOf(f)
-	}
-	return st
+	return chaosState{State: c.ManifestState, Feeds: publicFeeds(c.Feeds)}
 }
 
 // chaosRepro is the one line that turns a nightly red into a local repro.

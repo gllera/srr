@@ -107,17 +107,13 @@ type Manifest struct {
 // publishes.
 func (o *DB) buildManifest(m int) Manifest {
 	c := &o.core
-	feeds := make(map[int]FeedPublic, len(c.Feeds))
-	for id, ch := range c.Feeds {
-		feeds[id] = feedPublicOf(ch)
-	}
 	return Manifest{
 		Version:             dbFormatVersion,
 		Num:                 m,
 		ManifestState:       c.ManifestState,
 		ManifestWriterState: c.ManifestWriterState,
 		Names:               c.Names,
-		Feeds:               feeds,
+		Feeds:               publicFeeds(c.Feeds),
 	}
 }
 

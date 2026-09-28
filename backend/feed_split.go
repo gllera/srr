@@ -94,6 +94,16 @@ func feedPublicOf(f *Feed) FeedPublic {
 	}
 }
 
+// publicFeeds projects every feed onto its manifest half, keyed by id: the
+// manifest's `feeds` object, built once for the writer and `srr inspect` alike.
+func publicFeeds(feeds map[int]*Feed) map[int]FeedPublic {
+	out := make(map[int]FeedPublic, len(feeds))
+	for id, f := range feeds {
+		out[id] = feedPublicOf(f)
+	}
+	return out
+}
+
 // feedConfigOf projects a feed onto its config-sidecar half.
 func feedConfigOf(f *Feed) FeedConfig {
 	return FeedConfig{

@@ -106,10 +106,7 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 	if !reflect.DeepEqual(man.ManifestWriterState, core.ManifestWriterState) {
 		bad("manifest writer state diverges from the loaded core: %s", diffJSON(man.ManifestWriterState, core.ManifestWriterState))
 	}
-	wantFeeds := map[int]FeedPublic{}
-	for id, ch := range core.Feeds {
-		wantFeeds[id] = feedPublicOf(ch)
-	}
+	wantFeeds := publicFeeds(core.Feeds)
 	for _, id := range slices.Sorted(maps.Keys(wantFeeds)) {
 		got, ok := man.Feeds[id]
 		if !ok {
@@ -553,10 +550,7 @@ func (o *InspectCmd) checkChronPermanence(fetch keyGetter, core *DBCore) int {
 		states = append(states, chronState{gen: g, totalArt: man.TotalArticles, nextPID: man.NextPackID, feeds: man.Feeds})
 	}
 	// The current generation (root.m) is the loaded core itself, not a re-read.
-	cur := chronState{gen: core.ManifestNum, totalArt: core.TotalArticles, nextPID: core.NextPackID, feeds: map[int]FeedPublic{}}
-	for id, ch := range core.Feeds {
-		cur.feeds[id] = feedPublicOf(ch)
-	}
+	cur := chronState{gen: core.ManifestNum, totalArt: core.TotalArticles, nextPID: core.NextPackID, feeds: publicFeeds(core.Feeds)}
 	states = append(states, cur)
 
 	issues := 0
