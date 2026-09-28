@@ -147,6 +147,21 @@ func RunSubprocess(ctx context.Context, args string, env []string, dir string, s
 	return bytes.TrimSpace(out), nil
 }
 
+// RunSubprocessJSON is RunSubprocess with in JSON-encoded (HTML left
+// unescaped) as the command's stdin: the stdin half of the external-command
+// wire protocol, owned here so external pipe steps (runExternal) and external
+// ingest strategies (ingest.Fetch) cannot drift in how they frame it. Empty
+// output, error wrapping and decoding stay with each caller.
+func RunSubprocessJSON(ctx context.Context, args string, env []string, dir string, in any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(in); err != nil {
+		return nil, fmt.Errorf("encode stdin: %w", err)
+	}
+	return RunSubprocess(ctx, args, env, dir, &buf)
+}
+
 // RunCommandTimeout runs argv (name plus args) under the same hardened bounds as
 // RunSubprocess — subprocessWaitDelay and a maxSubprocessOutput-capped stdout —
 // but via direct exec rather than /bin/sh, WITHOUT trimming (stdout may be binary,
@@ -321,13 +336,6 @@ func (o *Module) Process(ctx context.Context, args string, i *RawItem) error {
 // runExternal runs a pipeline step that is not a built-in as a shell command,
 // piping the item through it as JSON.
 func (o *Module) runExternal(ctx context.Context, args string, i *RawItem) error {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(i); err != nil {
-		return err
-	}
-
 	// External pipe steps get SRR_ASSET_DIR pointing at the run's shared cache
 	// dir, so a step can place self-hosted files there and reference them with
 	// "#"-markers — the same asset contract external ingest strategies have.
@@ -349,7 +357,7 @@ func (o *Module) runExternal(ctx context.Context, args string, i *RawItem) error
 	if dir := cacheDirFromContext(ctx); dir != "" {
 		env = append(env, "SRR_ASSET_DIR="+dir)
 	}
-	out, err := RunSubprocess(ctx, args, env, "", &buf)
+	out, err := RunSubprocessJSON(ctx, args, env, "", i)
 	if err != nil {
 		return err
 	}

@@ -9,7 +9,6 @@
 package ingest
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -240,13 +239,6 @@ func Fetch(ctx context.Context, args string, client *http.Client, buf []byte, re
 		return fn(ctx, client, buf, req)
 	}
 
-	var body bytes.Buffer
-	enc := json.NewEncoder(&body)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(req); err != nil {
-		return Result{}, fmt.Errorf("encode fetcher request: %w", err)
-	}
-
 	// The command runs under --cmd-timeout when the operator set one (see
 	// mod.SubprocessTimeout; unlimited by default — bounded only by run
 	// cancellation). The caller's shared download cache (Request.AssetDir)
@@ -254,7 +246,7 @@ func Fetch(ctx context.Context, args string, client *http.Client, buf []byte, re
 	// files with relative paths. The environment is computed per call from the
 	// ctx-carried secret-scope grant (mod.SubprocessEnv) — only granted scopes
 	// reach it.
-	raw, err := mod.RunSubprocess(ctx, args, mod.SubprocessEnv(ctx), req.AssetDir, &body)
+	raw, err := mod.RunSubprocessJSON(ctx, args, mod.SubprocessEnv(ctx), req.AssetDir, req)
 	if err != nil {
 		return Result{}, fmt.Errorf("fetcher command %q: %w", args, err)
 	}
