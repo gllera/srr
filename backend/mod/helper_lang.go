@@ -17,19 +17,14 @@ const (
 	langMaxTextLen    = 4096 // byte cap on the text fed to the detector
 )
 
-// DetectLang returns the article's confidently-detected ISO 639-1 code — at
-// least langMinTextLen runes of extracted text classified at ≥
+// DetectLangNode returns the article's confidently-detected ISO 639-1 code —
+// at least langMinTextLen runes of extracted text classified at ≥
 // langConfidenceMin confidence — or "" on the fail-open path (short text, low
 // confidence, or a detected language with no 639-1 code). The store-ready
-// form processItem stamps onto RawItem.Lang.
-func DetectLang(title, content string) string {
-	return DetectLangNode(title, parseBodyHTML(content))
-}
-
-// DetectLangNode is DetectLang over an already-parsed content DOM — the form
-// the caller's content session holds, so the always-on stamp costs no parse of
-// its own. A nil body (content that did not parse) classifies the title alone,
-// exactly as DetectLang did.
+// form processItem stamps onto RawItem.Lang. It reads an already-parsed
+// content DOM — the form the caller's content session holds, so the always-on
+// stamp costs no parse of its own. A nil body (content that did not parse)
+// classifies the title alone.
 func DetectLangNode(title string, body *html.Node) string {
 	text := extractTextNode(title, body, langMaxTextLen)
 	if utf8.RuneCountInString(text) < langMinTextLen {

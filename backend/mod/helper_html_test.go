@@ -6,6 +6,12 @@ import (
 	"unicode/utf8"
 )
 
+// extractText is extractTextNode over a content string, the form the tests
+// state their fixtures in.
+func extractText(title, content string, max int) string {
+	return extractTextNode(title, parseBodyHTML(content), max)
+}
+
 // TestExtractTextStripsMarkup: tags are dropped, text nodes joined by spaces.
 func TestExtractTextStripsMarkup(t *testing.T) {
 	got := extractText("Title here", `<p>Hello <b>world</b></p><div>again</div>`, 4096)

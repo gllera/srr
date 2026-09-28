@@ -232,7 +232,7 @@ type RawItem struct {
 	Drop bool `json:"drop,omitempty"`
 	// Lang is the article's ISO 639-1 language code, persisted to the data
 	// packs under ArticleData's "g" key (empty = unknown, field omitted).
-	// Stamped by the caller's PRE-pipeline detection (DetectLang in
+	// Stamped by the caller's PRE-pipeline detection (DetectLangNode in
 	// processItem) unless the ingest strategy declared one, so every pipeline
 	// step can read it — #filter keep_lang decides from it — and a mod can
 	// override it via this wire field. A post-pipe re-attempt covers content

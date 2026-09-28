@@ -112,9 +112,9 @@ func processItem(ctx context.Context, processor *mod.Module, pipeline []string, 
 	// while the field could only be empty here, but it would now clear a good
 	// fallback whenever the re-detection abstains too.
 	//
-	// The guard tracks whether DetectLang's exact INPUTS changed, not their
-	// sizes. Skipping is then provably safe: DetectLang is a pure function of
-	// (title, content), so unchanged inputs give the identical answer. A size
+	// The guard tracks whether DetectLangNode's exact INPUTS changed, not their
+	// sizes. Skipping is then provably safe: DetectLangNode is a pure function
+	// of (title, content DOM), so unchanged inputs give the identical answer. A size
 	// comparison is not safe in either direction — the gate is a rune count of
 	// EXTRACTED TEXT, while bytes are mostly markup, so a byte-heavy text-poor
 	// teaser replaced by a byte-light text-rich body is a genuine growth that
@@ -129,7 +129,7 @@ func processItem(ctx context.Context, processor *mod.Module, pipeline []string, 
 	if (i.Lang == "" || i.Lang == declaredLang) && (i.Title != preTitle || sess.Rev() != preRev) {
 		// Through the session, like the pre-pipe stamp: when the pipe ended in
 		// a DOM step the parse is already in hand, and when it did not, DOM()
-		// re-parses exactly what DetectLang would have.
+		// re-parses the item's current content.
 		if code := mod.DetectLangNode(i.Title, sess.DOM()); code != "" {
 			i.Lang = code
 		}

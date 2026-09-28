@@ -12,8 +12,8 @@ import (
 // descend yields n and every node beneath it, in document order. It is the
 // recursion eight built-ins each wrote out by hand, where only the per-node
 // body ever differed. Callers that must skip a SUBTREE rather than stop
-// (extractText's script/style cut) still need their own walk: break here ends
-// the whole traversal, not one branch.
+// (extractTextNode's script/style cut) still need their own walk: break here
+// ends the whole traversal, not one branch.
 func descend(n *html.Node) iter.Seq[*html.Node] {
 	return func(yield func(*html.Node) bool) {
 		var walk func(*html.Node) bool
@@ -83,22 +83,17 @@ func setNodeAttr(n *html.Node, key, val string) {
 	n.Attr = append(n.Attr, html.Attribute{Key: key, Val: val})
 }
 
-// extractText returns the plain text of title + content for language
-// detection: content is parsed as HTML and only its text nodes contribute
-// (script/style subtrees excluded — a mod may run before #sanitize), all
-// whitespace collapsed to single spaces. The result is a HARD max bytes: a
-// single oversized token is truncated (on a rune boundary) rather than
-// written whole, so the per-article cost stays bounded even on content with
-// no whitespace at all — scripts like Japanese or Chinese are one
+// extractTextNode returns the plain text of title + the parsed content body
+// for language detection: only the body's text nodes contribute (script/style
+// subtrees excluded — a mod may run before #sanitize), all whitespace
+// collapsed to single spaces. The result is a HARD max bytes: a single
+// oversized token is truncated (on a rune boundary) rather than written
+// whole, so the per-article cost stays bounded even on content with no
+// whitespace at all — scripts like Japanese or Chinese are one
 // strings.Fields token per paragraph, so truncating rather than dropping is
-// what keeps them detectable.
-func extractText(title, content string, max int) string {
-	return extractTextNode(title, parseBodyHTML(content), max)
-}
-
-// extractTextNode is extractText over an already-parsed body — the form the
-// content session holds, so the language stamp shares the pipeline's one
-// parse. A nil body (unparseable content) contributes nothing but the title.
+// what keeps them detectable. The body is the content session's, so the
+// language stamp shares the pipeline's one parse. A nil body (unparseable
+// content) contributes nothing but the title.
 func extractTextNode(title string, body *html.Node, max int) string {
 	var b strings.Builder
 	appendWords := func(s string) bool {

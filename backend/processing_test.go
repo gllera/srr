@@ -219,7 +219,7 @@ func TestProcessItemStampsLang(t *testing.T) {
 	}
 }
 
-// The post-pipe detection retry fires whenever the text DetectLang judged is
+// The post-pipe detection retry fires whenever the text DetectLangNode judged is
 // no longer the text we hold. The guard compares the inputs themselves, never
 // their sizes: the detection gate is a rune count of extracted TEXT while bytes
 // are mostly markup, so "grew" and "got longer" are different questions.
@@ -253,7 +253,7 @@ func TestProcessItemPostPipeDetection(t *testing.T) {
 		t.Errorf("Lang = %q, want %q — a text-rich body that is byte-smaller must still re-detect", item.Lang, "es")
 	}
 
-	// Unchanged inputs skip the retry: DetectLang is pure, so the answer cannot
+	// Unchanged inputs skip the retry: DetectLangNode is pure, so the answer cannot
 	// differ. Observable only as the same fail-open empty.
 	item = &mod.RawItem{Content: "corto pero no detectable", Link: "http://example.com"}
 	if err := processItem(ctx, mod.New(), nil, item, ""); err != nil {

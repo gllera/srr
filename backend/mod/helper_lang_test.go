@@ -24,6 +24,12 @@ const (
 	langTextYI = "דער שנעלער ברוינער פוקס שפּרינגט איבער דעם פוילן הונט בשעת די מאָרגן זון גייט לאַנגזאַם אויף איבער דעם רויקן דאָרף."
 )
 
+// DetectLang is DetectLangNode over a content string, the form the tests
+// state their fixtures in.
+func DetectLang(title, content string) string {
+	return DetectLangNode(title, parseBodyHTML(content))
+}
+
 // DetectLang is the always-on stamp processItem applies: the ISO 639-1 code
 // on a confident detection, "" on the fail-open path.
 func TestDetectLang(t *testing.T) {
