@@ -152,12 +152,10 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 			bad("M3 violated: %s is at or above the series' next stem %d", k, next)
 		}
 	}
+	// A tail outside its series' listed range never reaches this far:
+	// SeriesNames.UnmarshalJSON refuses it, so the parse above already failed.
 	for _, series := range slices.Sorted(maps.Keys(names.Series)) {
-		s := names.Series[series]
-		if s.Tail >= 0 && (s.Tail < s.Base || s.Tail >= s.Base+len(s.Stems)) {
-			bad("%s tail position %d is outside the listed range [%d, %d)", series, s.Tail, s.Base, s.Base+len(s.Stems))
-		}
-		for _, stem := range s.Stems {
+		for _, stem := range names.Series[series].Stems {
 			checkStem(series, stem)
 		}
 	}
@@ -169,6 +167,8 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 	}
 	tc := tailCovered(core)
 	// M5/M6: the listed lengths must be exactly what chron arithmetic indexes.
+	// (M6's pairing — deltas named iff na > 0 — is validateCore's: loadStore
+	// refused a mismatch when it built core from these same manifest bytes.)
 	wantIdx := numFinalizedIdx(core.TotalArticles)
 	if tc > 0 {
 		wantIdx++
@@ -188,9 +188,6 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 	}
 	if core.metaCoverage() > tc {
 		bad("meta coverage %d overclaims the consolidated region (tc=%d)", core.metaCoverage(), tc)
-	}
-	if (len(names.Deltas.Stems) == 0) != (core.DeltaArticles == 0) {
-		bad("M6 violated: %d delta segment(s) named for %d delta article(s)", len(names.Deltas.Stems), core.DeltaArticles)
 	}
 	if names.HSum != nil && names.HSum.Covers > numFinalizedIdx(core.TotalArticles) {
 		bad("the idx header summary claims to cover %d finalized pack(s), more than the %d that exist",
