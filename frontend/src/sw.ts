@@ -40,7 +40,7 @@
 // browser without SW support (or an insecure-context LAN deploy) just runs straight
 // off the network, exactly as before. Self-contained: no SRR_CDN_URL, so it works
 // under any cdn-url prefix.
-import { POOL_LIMIT, runPool } from "./js/cache"
+import { cachedPromise, makeLRU, POOL_LIMIT, runPool } from "./js/cache"
 import { type IDBWire, type IManifestWire } from "./js/format.gen"
 import { bootWarmNames, gunzipJson, listedNames, manifestNames, type StoreNames } from "./js/names"
 import { parsePackName, RE_ASSET, RE_DB, RE_SHELL_HASHED } from "./js/sw-grammar"
@@ -75,17 +75,10 @@ const KEEP = new Set([ASSETS, PACKS, SHELL, META, PINNED])
 // asset, so the un-memoized form costs hundreds of CacheStorage round-trips per
 // render. Safe because the ONLY caches.delete here is the activate sweep of
 // buckets NOT in KEEP — a handle we hand out can never be deleted underneath us.
-const cacheHandles = new Map<string, Promise<Cache>>()
-function openCache(name: string): Promise<Cache> {
-   let p = cacheHandles.get(name)
-   if (!p) {
-      p = caches.open(name)
-      cacheHandles.set(name, p)
-      // A rejected open must not stick: drop the slot so the next call retries.
-      p.catch(() => cacheHandles.delete(name))
-   }
-   return p
-}
+// Every name opened is a KEEP bucket, so an LRU sized to KEEP never evicts; a
+// rejected open drops its slot (cachedPromise) so the next call retries.
+const cacheHandles = makeLRU<Promise<Cache>, string>(KEEP.size)
+const openCache = (name: string): Promise<Cache> => cachedPromise(cacheHandles, name, () => caches.open(name))
 
 // §5.2, stated once: never cache an opaque response. A cross-origin mount
 // without CORS yields status-0 unreadable bytes, and caching one would serve a
