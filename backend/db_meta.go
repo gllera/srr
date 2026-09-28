@@ -356,15 +356,9 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 		// a full shard, so on a complete run pos == nf by construction.
 		pos := start / metaPackSize
 		covered := start + len(rawLines) // the chron the series reaches
-		latest := newPack()
-		for _, line := range rawLines {
-			if _, err := latest.Write(line); err != nil {
-				return err
-			}
-		}
 		tailStem := names.alloc(metaSeries)
 		tailKey := store.PackKey(metaSeries, tailStem)
-		if err := o.savePack(ctx, tailKey, latest); err != nil {
+		if err := o.saveLines(ctx, tailKey, rawLines); err != nil {
 			return err
 		}
 		if err := names.setTail(metaSeries, pos, tailStem); err != nil {
@@ -537,10 +531,8 @@ func (o *DB) saveMetaShard(ctx context.Context, key string, rawLines [][]byte) e
 	if _, err := p.Write(bloom); err != nil {
 		return err
 	}
-	for _, line := range rawLines {
-		if _, err := p.Write(line); err != nil {
-			return err
-		}
+	if err := p.writeLines(rawLines); err != nil {
+		return err
 	}
 	return o.savePackFinal(ctx, key, p)
 }

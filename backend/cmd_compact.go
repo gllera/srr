@@ -299,13 +299,7 @@ func (o *DB) compactMetaShard(ctx context.Context, c *DBCore, names *ManifestNam
 	stem := names.alloc(metaSeries)
 	newKey := store.PackKey(metaSeries, stem)
 	if isTail {
-		p := newPack()
-		for _, line := range newLines {
-			if _, err := p.Write(line); err != nil {
-				return err
-			}
-		}
-		if err := o.savePack(ctx, newKey, p); err != nil {
+		if err := o.saveLines(ctx, newKey, newLines); err != nil {
 			return err
 		}
 	} else if err := o.saveMetaShard(ctx, newKey, newLines); err != nil {

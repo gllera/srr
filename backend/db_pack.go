@@ -168,6 +168,17 @@ func newPack() *pack {
 func (p *pack) Len() int                    { return p.buf.Len() }
 func (p *pack) Write(b []byte) (int, error) { return p.gz.Write(b) }
 
+// writeLines appends JSONL lines one Write per line, the granularity the
+// materialization loop appends in (see packFromBytes); none means no Write.
+func (p *pack) writeLines(lines [][]byte) error {
+	for _, line := range lines {
+		if _, err := p.Write(line); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // The three idx writers below own the SEQUENCING of an idx pack (which bytes,
 // in which order, at which points in the materialization loop); the bytes
 // themselves come from the generated encoders in idx_layout.gen.go, emitted
@@ -282,6 +293,16 @@ func packFromBytes(raw []byte) (*pack, error) {
 // generations, summaries).
 func (o *DB) savePack(ctx context.Context, key string, p *pack) error {
 	return o.flushPack(ctx, key, p, false)
+}
+
+// saveLines publishes a pack of JSONL lines (writeLines) with savePack's fast
+// gzip — a delta segment, or a meta tail.
+func (o *DB) saveLines(ctx context.Context, key string, lines [][]byte) error {
+	p := newPack()
+	if err := p.writeLines(lines); err != nil {
+		return err
+	}
+	return o.savePack(ctx, key, p)
 }
 
 // savePackFinal publishes a finalized pack. Finalized names are immutable
@@ -850,14 +871,8 @@ func (o *DB) shouldConsolidate(prevTotal, newTotal int, batchBytes int64) bool {
 // publishes the manifest that names it.
 func (o *DB) emitDelta(ctx context.Context, lines [][]byte, n int, size int64) error {
 	c := &o.core
-	p := newPack()
-	for _, line := range lines {
-		if _, err := p.Write(line); err != nil {
-			return err
-		}
-	}
 	stem := c.Names.alloc(dataSeries)
-	if err := o.savePack(ctx, store.PackKey(dataSeries, stem), p); err != nil {
+	if err := o.saveLines(ctx, store.PackKey(dataSeries, stem), lines); err != nil {
 		return err
 	}
 	c.Names.Deltas.Stems = append(c.Names.Deltas.Stems, stem)
