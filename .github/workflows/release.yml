@@ -17,9 +17,9 @@ concurrency:
 jobs:
   # Gate every release artifact on a green `make verify` (lint + format + tests +
   # build + the boot smoke + the e2e contract layer). Without this, a tag push
-  # publishes binaries and deploys the reader without the build ever
-  # passing its own gates — exactly how a frontend that fails its tests (or a
-  # bundle that doesn't boot) could reach production.
+  # publishes binaries and the reader bundle without the build ever passing its
+  # own gates — exactly how a frontend that fails its tests (or a bundle that
+  # doesn't boot) could reach production.
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -29,8 +29,8 @@ jobs:
     - run: make verify
 
   # The browser e2e layer is NOT part of `make verify` (see the Makefile), and
-  # ci.yml has no `tags:` trigger — so without this job a tag push deploys the
-  # production reader with the browser layer red or never run. Mirrors ci.yml's
+  # ci.yml has no `tags:` trigger — so without this job a tag push publishes the
+  # reader bundle with the browser layer red or never run. Mirrors ci.yml's
   # `browser` job.
   browser:
     runs-on: ubuntu-latest
@@ -53,8 +53,12 @@ jobs:
       VERSION: ${{ github.ref_name }}
     steps:
     - uses: actions/checkout@v6
+    # `verify` (a `needs:` above) already ran the backend gate on this commit,
+    # so the job runs the ungated cross-compile and needs no golangci-lint.
     - uses: ./.github/actions/setup-toolchain
-    - run: make release
+      with:
+        lint: "false"
+    - run: make release-bins
     # Bundle the built SPA as a flat tarball (entries are index.html, hashed
     # assets — no leading dir) so `srr frontend update` can install it into a
     # store root. Built with NO cdn-url (deliberately no SRR_CONFIG_INLINE here),

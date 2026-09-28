@@ -38,7 +38,8 @@ All commands run from the repo root via `make`:
 | `make lint-be` | golangci-lint (gate-clean; runs inside `verify-be`, config in `backend/.golangci.yml`) |
 | `make generate` | Regenerate `frontend/src/js/format.gen.ts` from the backend Go declarations (`srr gen-ts`) |
 | `make generate-check` | Fail if `format.gen.ts` is stale (runs inside `verify-be`) |
-| `make release` | Cross-compile backend for all platforms (requires `VERSION=`) |
+| `make release` | Cross-compile backend for all platforms (requires `VERSION=`), gated on `verify-be` |
+| `make release-bins` | The same cross-compile without the gate (`release.yml` runs it after its `verify` job) |
 | `make design-fixture` / `make design` / `make design-shots` | Design harness: build the curated store fixture / dev server on it (`/design.html`) / headless screenshots of every UI state (see `frontend/CLAUDE.md` → Design harness) |
 | `make clean` | Remove build artifacts |
 

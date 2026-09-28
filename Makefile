@@ -1,11 +1,11 @@
-.PHONY: verify verify-fe verify-be typecheck-fe check-coverage-test fuzz-be lint-fe format-check-fe format-fe test-fe build-fe smoke-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-race-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design design-shots
+.PHONY: verify verify-fe verify-be typecheck-fe check-coverage-test fuzz-be lint-fe format-check-fe format-fe test-fe build-fe smoke-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-race-be test-contract test-browser test-stress test-e2e generate generate-check release release-bins clean design-fixture design design-shots
 
 SHELL := /bin/bash -e
 
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
 
-# release stamps main.version. CI passes VERSION= (the tag); locally it defaults
-# to a git description so an ad-hoc build is still traceable to a commit.
+# release-bins stamps main.version. CI passes VERSION= (the tag); locally it
+# defaults to a git description so an ad-hoc build is still traceable to a commit.
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo development)
 
 # verify includes the fast jsdom e2e contract layer; the heavier headless-browser
@@ -73,7 +73,7 @@ typecheck-fe lint-fe format-check-fe format-fe test-fe smoke-fe dev-fe: frontend
 # the dir grew without bound (129 frontend.*.js at the 2026-07-20 audit). That
 # matters because the whole dir SHIPS: release.yml tars it into srrf.tar.gz, so
 # the pile was deployed too. The wipe lives in package.json (scoped to
-# dist/srrf, NEVER dist/ — the release job runs `make release` BEFORE
+# dist/srrf, NEVER dist/ — the release job runs `make release-bins` BEFORE
 # `make build-fe`, so wiping dist/ would delete the cross-compiled dist/srr-*
 # binaries it is about to attach) and runs once before both Parcel builds (the
 # reader, then the admin page — two builds so a multi-entry build doesn't hoist
@@ -206,7 +206,14 @@ dist:
 build-be: | dist
 	cd backend && go build -o ../dist/srr .
 
-release: verify-be | dist
+# release is the local, gated entry point. release-bins is the bare
+# cross-compile: release.yml runs it directly, since its `verify` job has
+# already passed verify-be on the same commit. It is a RECIPE, not a sibling
+# prerequisite, so `make -j release` cannot cross-compile before the gate passes.
+release: verify-be
+	@$(MAKE) --no-print-directory release-bins
+
+release-bins: | dist
 	@echo "release version: $(VERSION)"
 	@cd backend; for p in $(PLATFORMS); do \
 	  os=$${p%/*}; arch=$${p#*/}; ext=; \

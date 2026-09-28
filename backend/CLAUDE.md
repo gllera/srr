@@ -16,7 +16,7 @@ The root `Makefile` is the unified entry point for both halves of the monorepo; 
 - `make generate` / `make generate-check` — regenerate / freshness-check `frontend/src/js/format.gen.ts` (`srr gen-ts`)
 - `make verify-be` — vet + gofmt check + lint + build + test + generate-check
 - `make fuzz-be` — smoke every fuzz target (`FUZZTIME` per target, default 20s). Kept OUT of `verify`: the checked-in seed corpora already run on every push as ordinary unit tests (`go test` executes each `f.Add` seed), so a broken target is caught there; this is for finding the inputs nobody thought of. `.github/workflows/fuzz.yml` runs the same targets nightly at 5m each and uploads any crasher it writes to `testdata/fuzz/`. Targets: `FuzzParseIdxPack` + `FuzzIdxWriteParse` + `FuzzParseSeen` (the byte-level store parsers, `fuzz_test.go`), `FuzzParseFeed` (`ingest/` — hostile network bytes every five minutes), `FuzzSanitize` (`mod/` — asserts the XSS boundary over a PARSED DOM, not a regexp on the string: sanitized output is mostly text, and text may legally contain " onerror=")
-- `make release VERSION=…` — cross-compile all platforms (`CGO_ENABLED=0 -ldflags "-s -w"`)
+- `make release VERSION=…` — cross-compile all platforms (`CGO_ENABLED=0 -ldflags "-s -w"`), gated on `verify-be`; `make release-bins` is the ungated cross-compile `release.yml` runs
 
 Direct equivalents when working inside `backend/`: `go build -o srr .` (the Makefile artifact is `dist/srr`), `go test ./...`, `go test -run TestName .`, `go test -v ./store/`.
 

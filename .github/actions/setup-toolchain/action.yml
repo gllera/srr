@@ -12,7 +12,7 @@ inputs:
   lint:
     description: >
       Install golangci-lint (needed by any job running make verify /
-      verify-be / release). Off for jobs that build but never lint.
+      verify-be). Off for jobs that build but never lint.
     default: "true"
   puppeteer:
     description: >
