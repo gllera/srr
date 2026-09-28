@@ -1990,9 +1990,9 @@ function scrollRowIntoView(row: HTMLElement): void {
 // underneath permanent chrome, where it can be neither seen nor pressed.
 // offsetHeight is also why this needs no safe-area arithmetic: the bar's own
 // bottom padding carries env(safe-area-inset-bottom), so the measurement
-// already includes it. The two places that state the SAME height as a literal
-// — the pane's padding-bottom and the grip's `bottom`, both in styles.css's
-// split block — do have to spell the inset out, and all three must agree.
+// already includes it. The CSS states the SAME height once, as tokens.css's
+// --toolbar-h, and its uses (the split pane's padding-bottom and grip `bottom`,
+// the player dock's lane) spell the inset out beside it; the two must agree.
 function toolbarInset(): number {
    const bar = document.querySelector<HTMLElement>(".srr-toolbar")
    return bar ? bar.offsetHeight : 0
