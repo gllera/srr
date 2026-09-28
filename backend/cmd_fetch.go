@@ -665,13 +665,12 @@ func newFetchClient(workers int) *http.Client {
 // fetchResults carries the read-only fetch phase's outcome across the store
 // scopes of runFetch: the snapshot feeds the fan-out mutated (plus their
 // pre-fan-out guard records for applyFetched and the notify hook), and the
-// run-scoped objects the locked write phase still reports on (asset counters,
-// the progress line, the cache dir for the post-commit sweep).
+// run-scoped objects the rest of the cycle still reports on (asset counters,
+// the progress line).
 type fetchResults struct {
 	fetched  []fetchedFeed
 	assets   *assetFetcher
 	progress *fetchProgress
-	cacheDir string
 }
 
 // checkStoreBusy is the fetch phase's advisory fail-fast probe. With the lock
@@ -710,9 +709,11 @@ func checkStoreBusy(ctx context.Context, db *DB) error {
 // advanced underneath), and runs the existing PutArticles→Commit chain. The
 // lock hold drops from the whole fan-out (minutes on a slow cycle) to the
 // write phase (seconds), so an operator mutation no longer 409s against a
-// running cycle — and the .locked lease is stamped far inside its TTL. A
-// producer (--spool) runs only the first phase: it publishes its results as
-// an inbox envelope instead of folding them, and never locks at all.
+// running cycle — and the .locked lease is stamped far inside its TTL. What
+// follows a successful commit touches no store (the ingest-cache sweep, the
+// asset-health warnings, the notify hook), so it runs after the lock is
+// released. A producer (--spool) runs only the first phase: it publishes its
+// results as an inbox envelope instead of folding them, and never locks at all.
 func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed func(feedProgress)) error {
 	res := &fetchResults{}
 	// The progress line spans both phases. finish() is idempotent, so this one
@@ -728,9 +729,43 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 	}); err != nil || o.Spool {
 		return err
 	}
-	return withDBCtx(ctx, true, func(ctx context.Context, db *DB) error {
+	if err := withDBCtx(ctx, true, func(ctx context.Context, db *DB) error {
 		return o.commitPhase(ctx, db, res)
-	})
+	}); err != nil {
+		return err
+	}
+
+	// The ingest cache is self-maintaining: a download is consumed (uploaded
+	// to the store under its content-hash key) within the cycle that fetched
+	// it, so files unused past the age window are garbage — dropped items'
+	// media, interrupted-run debris, consumed downloads nothing re-references.
+	// Swept only after a successful Commit; both cache consumers refresh a
+	// file's mtime on reuse, so a warming retry never loses its cache. Outside
+	// the lock: the walk lstat()s the whole cache and touches no store.
+	if n := sweepAssetCache(globals.CacheDir, globals.CacheMaxAge); n > 0 {
+		slog.Info("asset cache swept", "removed", n)
+	}
+
+	// Aggregate asset-pipeline health: each peek/process failure and each
+	// declined corrupt asset already warned per asset, but a systemic cause
+	// (webify missing from the service PATH, a broken transcoder) drowns in
+	// per-asset noise while every asset silently degrades to an unprocessed
+	// original — surface it once per cycle, loudly.
+	if pf := res.assets.procFailed.Load(); pf > 0 {
+		slog.Warn("asset processing degraded this cycle — check the asset-peek/asset-process commands (PATH?)",
+			"failed_commands", pf, "asset_jobs", res.assets.done.Load())
+	}
+	if c := res.assets.corrupt.Load(); c > 0 {
+		slog.Warn("corrupt media assets declined this cycle (published without media)", "count", c)
+	}
+
+	// Alert on the outages/recoveries this cycle produced. Last, after the
+	// batch is durable and the lock is released: an operator's notify command
+	// (no timeout by default) must never be able to affect what got stored, nor
+	// hold off the store's other writers. WithoutCancel so a shutdown
+	// mid-summary still delivers the alert the cycle already decided to send.
+	fireNotify(context.WithoutCancel(ctx), res.fetched)
+	return nil
 }
 
 // fetchPhase is the read-only half of a cycle: it snapshots the feed set and
@@ -806,7 +841,7 @@ func (o *FetchCmd) fetchPhase(ctx context.Context, db *DB, client *http.Client, 
 	}
 	// Stage asset-process {output} files inside the cache tree (not the OS
 	// temp dir): big transcodes can't fill a tmpfs /tmp, and a crash-leaked
-	// output is reclaimed by the post-cycle age sweep below.
+	// output is reclaimed by the post-cycle age sweep (runFetch).
 	assets.procDir = filepath.Join(cacheDir, "_processed")
 
 	// Run-scoped deps shared across all workers (all concurrent-safe). The
@@ -906,7 +941,6 @@ func (o *FetchCmd) fetchPhase(ctx context.Context, db *DB, client *http.Client, 
 
 	res.fetched = fetched
 	res.assets = assets
-	res.cacheDir = cacheDir
 	return nil
 }
 
@@ -1037,29 +1071,6 @@ func (o *FetchCmd) commitPhase(ctx context.Context, db *DB, res *fetchResults) e
 	// cycle by the watermark check, and reaped then.
 	reapInbox(gcCtx, db.Backend, drainedSlots)
 
-	// The ingest cache is self-maintaining: a download is consumed (uploaded
-	// to the store under its content-hash key) within the cycle that fetched
-	// it, so files unused past the age window are garbage — dropped items'
-	// media, interrupted-run debris, consumed downloads nothing re-references.
-	// Swept only after a successful Commit; both cache consumers refresh a
-	// file's mtime on reuse, so a warming retry never loses its cache.
-	if n := sweepAssetCache(res.cacheDir, globals.CacheMaxAge); n > 0 {
-		slog.Info("asset cache swept", "removed", n)
-	}
-
-	// Aggregate asset-pipeline health: each peek/process failure and each
-	// declined corrupt asset already warned per asset, but a systemic cause
-	// (webify missing from the service PATH, a broken transcoder) drowns in
-	// per-asset noise while every asset silently degrades to an unprocessed
-	// original — surface it once per cycle, loudly.
-	if pf := res.assets.procFailed.Load(); pf > 0 {
-		slog.Warn("asset processing degraded this cycle — check the asset-peek/asset-process commands (PATH?)",
-			"failed_commands", pf, "asset_jobs", res.assets.done.Load())
-	}
-	if c := res.assets.corrupt.Load(); c > 0 {
-		slog.Warn("corrupt media assets declined this cycle (published without media)", "count", c)
-	}
-
 	// Failure counting stays on the SNAPSHOT feeds — the fan-out's outcome is
 	// what this cycle did, whether or not every record survived the fold.
 	failed := 0
@@ -1074,10 +1085,5 @@ func (o *FetchCmd) commitPhase(ctx context.Context, db *DB, res *fetchResults) e
 		"fetched", len(res.fetched)-failed,
 		"failed", failed,
 	)
-	// Alert on the outages/recoveries this cycle produced. Last, after the
-	// batch is durable: an operator's notify command must never be able to
-	// affect what got stored. WithoutCancel so a shutdown mid-summary still
-	// delivers the alert the cycle already decided to send.
-	fireNotify(context.WithoutCancel(ctx), res.fetched)
 	return nil
 }
