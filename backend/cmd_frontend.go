@@ -365,14 +365,6 @@ func writeSitemap(ctx context.Context, backend store.Backend, keys []string) err
 	return backend.AtomicPut(ctx, sitemapKey, strings.NewReader(body), store.ObjectMeta{ContentType: mimeForKey(sitemapKey)})
 }
 
-func toSet(keys []string) map[string]bool {
-	s := make(map[string]bool, len(keys))
-	for _, k := range keys {
-		s[k] = true
-	}
-	return s
-}
-
 // union returns the sorted set-union of two key slices.
 func union(a, b []string) []string {
 	s := toSet(a)

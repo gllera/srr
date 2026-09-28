@@ -83,3 +83,12 @@ func printFields(v reflect.Value, indent string, envName func(reflect.StructFiel
 		fmt.Println(line)
 	}
 }
+
+// toSet returns the set of keys as a membership map.
+func toSet(keys []string) map[string]bool {
+	s := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		s[k] = true
+	}
+	return s
+}

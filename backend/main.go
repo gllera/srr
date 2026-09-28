@@ -173,13 +173,7 @@ func defaultCacheDir() string {
 // keys existing config files use; this set restores those — and ONLY those,
 // so a stray top-level "interval:" or "tag:" can never be captured by a
 // per-command flag.
-var scopedYAMLFlags = func() map[string]bool {
-	m := map[string]bool{}
-	for _, n := range scopedFlagNamesList {
-		m[n] = true
-	}
-	return m
-}()
+var scopedYAMLFlags = toSet(scopedFlagNamesList)
 
 // resolveStoreAlias maps --store through srr.yaml's optional top-level
 // `stores:` alias table (exact-name match → the mapped path/URL). A miss, a
