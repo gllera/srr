@@ -240,7 +240,7 @@ func Fetch(ctx context.Context, args string, client *http.Client, buf []byte, re
 	}
 
 	// The command runs under --cmd-timeout when the operator set one (see
-	// mod.SubprocessTimeout; unlimited by default — bounded only by run
+	// mod.CmdTimeout; unlimited by default — bounded only by run
 	// cancellation). The caller's shared download cache (Request.AssetDir)
 	// doubles as the command's working directory, so it can stash and reference
 	// files with relative paths. The environment is computed per call from the

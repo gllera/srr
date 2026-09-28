@@ -59,7 +59,7 @@ type assetFetcher struct {
 	peek     []string // asset-peek command (identify the asset up front); see runPeek
 
 	// procTimeout bounds a single asset-process AND asset-peek command invocation,
-	// separate from the shared SubprocessTimeout (--cmd-timeout) — which governs
+	// separate from the shared mod.CmdTimeout (--cmd-timeout) — which governs
 	// ingest/mod commands, never asset work — because media transcoding can run far
 	// longer than a feed/ingest command. Set from --asset-process-timeout in
 	// cmd_fetch.go; a zero value (the default) means UNLIMITED — no deadline,

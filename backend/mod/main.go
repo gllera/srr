@@ -85,20 +85,14 @@ func (t *tailBuffer) Tail() string {
 
 // CmdTimeout bounds a single external (shell) command invocation when > 0.
 // main sets it from the resolved --cmd-timeout / SRR_CMD_TIMEOUT global after
-// parsing; zero or negative (the default) means UNLIMITED.
-var CmdTimeout time.Duration
-
-// SubprocessTimeout is the effective external-command bound: --cmd-timeout /
-// SRR_CMD_TIMEOUT when > 0, else <= 0 = UNLIMITED — the default, matching
+// parsing; zero or negative (the default) means UNLIMITED — matching
 // --asset-process-timeout's philosophy: a legitimate source (a slow archive
 // backfill, a big media download inside an ingest command) can outlast any
 // fixed budget, and the command is still bounded by run cancellation
 // (SIGINT/SIGTERM) plus the WaitDelay/output-cap hardening. An operator who
-// wants a hang guard opts in with --cmd-timeout. Shared with the ingest
-// package, whose external-fetcher exec has the same exposure.
-func SubprocessTimeout() time.Duration {
-	return CmdTimeout
-}
+// wants a hang guard opts in with --cmd-timeout. RunSubprocess applies it, so
+// it bounds the ingest package's external-fetcher exec as well.
+var CmdTimeout time.Duration
 
 // subprocessWaitDelay is the grace period os/exec gives a subprocess to drain
 // its pipe after the context is cancelled (or the command exits while a
@@ -110,7 +104,7 @@ var subprocessWaitDelay = 5 * time.Second
 
 // RunSubprocess runs `/bin/sh -c args` with the given env and working directory
 // (dir == "" inherits the process cwd), feeding stdin and capturing stdout
-// capped at MaxSubprocessOutput. The command is bounded by SubprocessTimeout
+// capped at MaxSubprocessOutput. The command is bounded by CmdTimeout
 // when --cmd-timeout is set (> 0); unlimited by default, bounded only by ctx
 // cancellation. Returns the whitespace-trimmed stdout bytes; the caller decides
 // what an empty result means (a no-op vs an error) and how to wrap a run
@@ -124,7 +118,7 @@ var subprocessWaitDelay = 5 * time.Second
 // after cancellation and cmd.Run() returns promptly with a non-nil error.
 func RunSubprocess(ctx context.Context, args string, env []string, dir string, stdin io.Reader) ([]byte, error) {
 	cctx := ctx
-	if t := SubprocessTimeout(); t > 0 {
+	if t := CmdTimeout; t > 0 {
 		var cancel context.CancelFunc
 		cctx, cancel = context.WithTimeout(ctx, t)
 		defer cancel()
@@ -166,7 +160,7 @@ func RunSubprocessJSON(ctx context.Context, args string, env []string, dir strin
 // RunSubprocess — subprocessWaitDelay and a maxSubprocessOutput-capped stdout —
 // but via direct exec rather than /bin/sh, WITHOUT trimming (stdout may be binary,
 // e.g. a transcoded asset), and with an explicit per-invocation timeout instead of
-// the shared SubprocessTimeout. The asset-process command (assets.go) uses this
+// the shared CmdTimeout. The asset-process command (assets.go) uses this
 // with its own much longer bound (--asset-process-timeout), since media
 // transcoding can outlast a feed/ingest command. A timeout <= 0 means UNLIMITED:
 // no deadline is added and the command runs until it exits or ctx is cancelled

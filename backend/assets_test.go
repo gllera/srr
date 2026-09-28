@@ -245,7 +245,7 @@ func TestUploadCacheRefProcessTimesOutViaAssetTimeout(t *testing.T) {
 // even a command that far outruns the shared --cmd-timeout completes. Proves the
 // default asset-process timeout is uncapped (media transcode can run arbitrarily
 // long) — bounded only by run cancellation, not by any fallback timeout. Under the
-// old wiring a zero procTimeout fell back to SubprocessTimeout and this would have
+// old wiring a zero procTimeout fell back to --cmd-timeout and this would have
 // been killed and failed soft to the original.
 func TestUploadCacheRefProcessTimeoutUnlimited(t *testing.T) {
 	be := tempStore(t)
