@@ -26,8 +26,6 @@ export interface Resource<T> {
    value(): T | undefined
    pending(): boolean
    error(): unknown
-   refetch(): void
-   dispose(): void
 }
 
 // A flush that needs more passes than this is an effect cycle — a bug, not a retry.
@@ -318,18 +316,14 @@ export function resource<K, T>(
    const value = signal<T | undefined>(undefined)
    const busy = signal(false)
    const error = signal<unknown>(undefined)
-   const forced = signal(0)
    let token = 0
    let started = false
    let lastKey: K | undefined
-   let lastForced = 0
-   const stop = effect(() => {
+   effect(() => {
       const key = deps()
-      const f = forced()
-      if (started && f === lastForced && keyEquals(lastKey as K, key)) return
+      if (started && keyEquals(lastKey as K, key)) return
       started = true
       lastKey = key
-      lastForced = f
       const my = ++token
       busy.set(true)
       error.set(undefined)
@@ -360,12 +354,6 @@ export function resource<K, T>(
       value: () => value(),
       pending: () => busy(),
       error: () => error(),
-      refetch: () => forced.update((n) => n + 1),
-      dispose: () => {
-         token++
-         stop()
-         busy.set(false)
-      },
    }
 }
 

@@ -350,26 +350,6 @@ describe("resource (semantic 9)", () => {
       await tick()
       expect((r.error() as Error).message).toBe("sync")
    })
-
-   it("refetch() re-runs the loader for an unchanged key", async () => {
-      const loader = vi.fn(async () => 1)
-      const r = resource(() => "k", loader)
-      r.refetch()
-      await tick()
-      expect(loader).toHaveBeenCalledTimes(2)
-   })
-
-   it("dispose() drops an in-flight result", async () => {
-      let land: (v: number) => void = () => {}
-      const r = resource(
-         () => 1,
-         () => new Promise<number>((res) => (land = res)),
-      )
-      r.dispose()
-      land(5)
-      await tick()
-      expect(r.value()).toBeUndefined()
-   })
 })
 
 describe("onChange / diffed (the shared prime-then-diff primitive)", () => {
