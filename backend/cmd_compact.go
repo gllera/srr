@@ -198,7 +198,6 @@ func (o *DB) Compact(ctx context.Context, dryRun bool) error {
 	// Every new object is durable and every asset is reclaimed: adopt the staged
 	// names, sweep the grace window, and flip the root onto this generation.
 	c.Names = names
-	metaTailMemo.reset() // the meta tail moved to a fresh stem; drop the process memo keyed on the old one
 	if err := o.GC(ctx, globals.KeepManifests); err != nil {
 		slog.Warn("compact: gc sweep", "error", err)
 	}
