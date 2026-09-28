@@ -22,6 +22,19 @@ func (o *DB) fetcher(ctx context.Context) keyGetter {
 	return func(key string) ([]byte, error) { return o.readGz(ctx, key) }
 }
 
+// fetchAll fetches keys concurrently through gatherOrdered, in key order,
+// naming the failed object in the error — the read side's "N listed objects"
+// shape (the delta chain, the finalized idx packs).
+func fetchAll(fetch keyGetter, keys []string) ([][]byte, error) {
+	return gatherOrdered(len(keys), func(k int) ([]byte, error) {
+		buf, err := fetch(keys[k])
+		if err != nil {
+			return nil, fmt.Errorf("fetch %s: %w", keys[k], err)
+		}
+		return buf, nil
+	})
+}
+
 type idxBound struct {
 	packID     int
 	startChron int
@@ -122,13 +135,7 @@ func parseDeltaChain(fetch keyGetter, core *DBCore) (*deltaChain, error) {
 	// order regardless of completion order, so they are fetched concurrently:
 	// serially this was --max-deltas (12 by default) round-trips of latency,
 	// paid once per cycle on the locked path and again per read-tool run.
-	bufs, err := gatherOrdered(len(keys), func(k int) ([]byte, error) {
-		buf, err := fetch(keys[k])
-		if err != nil {
-			return nil, fmt.Errorf("fetch %s: %w", keys[k], err)
-		}
-		return buf, nil
-	})
+	bufs, err := fetchAll(fetch, keys)
 	if err != nil {
 		return nil, err
 	}
@@ -245,13 +252,7 @@ func loadIdxPacks(fetch keyGetter, core *DBCore) ([]*idxPack, []ArticleData, err
 		}
 		keys[p], sizes[p] = key, size
 	}
-	bufs, err := gatherOrdered(numFinalized, func(p int) ([]byte, error) {
-		buf, err := fetch(keys[p])
-		if err != nil {
-			return nil, fmt.Errorf("fetch %s: %w", keys[p], err)
-		}
-		return buf, nil
-	})
+	bufs, err := fetchAll(fetch, keys)
 	if err != nil {
 		return nil, nil, err
 	}
