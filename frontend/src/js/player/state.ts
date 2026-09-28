@@ -161,23 +161,17 @@ export function queuePos(mid: string, chron: number, index: number): number {
    return queue().findIndex((e) => e.mid === mid && e.chron === chron && e.index === index)
 }
 
-export function withoutEntry(mid: string, chron: number, index: number): readonly QueueEntry[] {
-   return queue().filter((e) => !(e.mid === mid && e.chron === chron && e.index === index))
-}
+// The cap, over a queuePos result: a NEW entry is refused once the playlist is
+// full, while a listed one (pos >= 0) can always move.
+export const refusesNew = (pos: number): boolean => pos < 0 && queue().length >= QUEUE_MAX
 
-// Snapshot an episode as a queue entry (the prev-track target, and the re-queue
-// when previoustrack steps back). Null when the element carries no src attribute
-// to rebuild from — the same reason a save refuses to persist one.
-export function entryOf(a: Active): QueueEntry | null {
-   const src = a.media.getAttribute("src") ?? ""
+export const mediaKind = (m: HTMLMediaElement): QueueEntry["kind"] => (m.tagName === "VIDEO" ? "video" : "audio")
+
+// Snapshot an article's media element as a playlist entry (a chip's add, the
+// chip menu's Play next). Null when the element carries no src attribute to
+// rebuild from — the same reason a save refuses to persist one.
+export function entryFrom(at: MountedArticle, index: number, m: HTMLMediaElement): QueueEntry | null {
+   const src = m.getAttribute("src") ?? ""
    if (!src) return null
-   return {
-      mid: a.mid,
-      chron: a.chron,
-      index: a.index,
-      src,
-      kind: a.media.tagName === "VIDEO" ? "video" : "audio",
-      title: a.title,
-      feedId: a.feedId,
-   }
+   return { mid: at.mid, chron: at.chron, index, src, kind: mediaKind(m), title: at.title, feedId: at.feedId }
 }

@@ -9,7 +9,7 @@ import { playerStateKey } from "../keys"
 import { lsSet } from "../storage"
 import { arrayEqual, diffed } from "../signals"
 import { URL_DENY } from "../urlish"
-import { active, cursor, entryKey, QUEUE_MAX, queue, RATES, ratePref, type QueueEntry } from "./state"
+import { active, cursor, entryKey, mediaKind, QUEUE_MAX, queue, RATES, ratePref, type QueueEntry } from "./state"
 
 // What survives a reload. `src`/`kind`/`title`/`feedId` ride along so the player
 // can render at boot with ZERO pack fetches, preserving the reader's O(1) boot.
@@ -17,18 +17,13 @@ import { active, cursor, entryKey, QUEUE_MAX, queue, RATES, ratePref, type Queue
 // or queue-only (`{queue}` with no src field at all) — restore treats the two
 // halves independently. Queue entries drop `mid`: it is implicit in the storage
 // key, which is per-mount exactly because chron is only unique within a mount.
-interface Persisted {
-   chron: number
-   index: number
+type SavedEntry = Omit<QueueEntry, "mid">
+interface Persisted extends SavedEntry {
    time: number
    rate: number
-   src: string
-   kind: "audio" | "video"
-   title: string
-   feedId: number
-   queue?: Omit<QueueEntry, "mid">[]
+   queue?: SavedEntry[]
    // The current entry's position in `queue` while nothing plays (the READY
-   // state); with an episode playing, `chron`/`index` above name it instead.
+   // state); with an episode playing, the head's own `chron`/`index` name it.
    c?: number
 }
 
@@ -62,7 +57,7 @@ export function save(): void {
          time: m.currentTime,
          rate: m.playbackRate,
          src: m.getAttribute("src") ?? "",
-         kind: m.tagName === "VIDEO" ? "video" : "audio",
+         kind: mediaKind(m),
          title: a.title,
          feedId: a.feedId,
       }
@@ -157,16 +152,7 @@ export interface SavedState {
    queue: QueueEntry[] | null
    // The READY cursor's index into `queue` (only meaningful without a head).
    cursor: number | null
-   head: {
-      src: string
-      chron: number
-      index: number
-      time: number
-      rate: number | null
-      kind: "audio" | "video"
-      title: string
-      feedId: number
-   } | null
+   head: (SavedEntry & { time: number; rate: number | null }) | null
 }
 
 export function readSaved(store: { mid: string; base: URL }): SavedState | null {

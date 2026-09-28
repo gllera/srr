@@ -33,6 +33,7 @@ import {
    cursorIndex,
    entryKey,
    entryLabel,
+   mediaKind,
    playback,
    queue,
    ratePref,
@@ -142,7 +143,7 @@ function paintChrome(): void {
    const ready = q[cursorIndex()] ?? q[0]
    const who = a ?? ready
    if (!who) return
-   const kind = a ? (a.media.tagName === "VIDEO" ? "video" : "audio") : ready.kind
+   const kind = a ? mediaKind(a.media) : ready.kind
    const paused = a ? playback().paused : true
    el.player.dataset.kind = kind
    stampSrc(el.player, who.feedId)

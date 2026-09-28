@@ -8,7 +8,18 @@ import { el } from "../els"
 import { restartAnimation } from "../motion"
 import { batch, onChange } from "../signals"
 import { dropEntry, insertNext, playCursor, playEntry } from "./engine"
-import { active, isGifIdiom, mounted, QUEUE_MAX, queue, queuePos, unfolded, type QueueEntry } from "./state"
+import {
+   active,
+   entryFrom,
+   isGifIdiom,
+   mounted,
+   QUEUE_MAX,
+   queue,
+   queuePos,
+   refusesNew,
+   unfolded,
+   type QueueEntry,
+} from "./state"
 import { setUnfolded } from "./view"
 
 // One chip, a glyph vocabulary: "+" add, the entry's 1-based queue POSITION
@@ -18,7 +29,7 @@ import { setUnfolded } from "./view"
 // dead-ending, so the cap never reads as a broken button. aria-pressed stays the
 // toggle truth.
 function setChipState(chip: HTMLButtonElement, pos: number): void {
-   const door = pos < 0 && queue().length >= QUEUE_MAX
+   const door = refusesNew(pos)
    chip.classList.toggle("srr-chip-door", door)
    chip.textContent = pos >= 0 ? String(pos + 1) : door ? "≡" : "+"
    chip.setAttribute("aria-pressed", String(pos >= 0))
@@ -40,14 +51,20 @@ function syncChipOffstage(m: HTMLMediaElement, chip: HTMLElement): void {
    chip.classList.toggle("srr-chip-offstage", m.tagName === "VIDEO" && !m.paused)
 }
 
+// A media element's chip: injectQueueChips inserts it directly after it.
+function chipAfter(m: HTMLMediaElement): HTMLButtonElement | null {
+   const sib = m.nextElementSibling
+   return sib instanceof HTMLButtonElement && sib.classList.contains("srr-queue-chip") ? sib : null
+}
+
 // play/pause don't bubble (the claim listener's rule), so the offstage sync
 // rides its own capture-phase pair instead of per-element listeners a re-render
 // would re-bind.
 export function onMediaStateForChips(e: Event): void {
    const t = e.target
    if (!(t instanceof HTMLMediaElement) || t.tagName !== "VIDEO") return
-   const sib = t.nextElementSibling
-   if (sib instanceof HTMLElement && sib.classList.contains("srr-queue-chip")) syncChipOffstage(t, sib)
+   const chip = chipAfter(t)
+   if (chip) syncChipOffstage(t, chip)
 }
 
 function pulseOnce(n: Element | null): void {
@@ -85,7 +102,7 @@ function chipMenuItems(index: number): MenuItem[] {
    if (!at) return []
    const m = mediaList(el.content)[index]
    if (!m?.getAttribute("src")) return []
-   const { mid, chron, title, feedId } = at
+   const { mid, chron } = at
    const stale = (): boolean => {
       const now = mounted()
       return !now || now.mid !== mid || now.chron !== chron
@@ -95,26 +112,18 @@ function chipMenuItems(index: number): MenuItem[] {
    const toNext = (): { media: HTMLMediaElement; entry: QueueEntry; added: boolean } | null => {
       if (stale()) return null
       const media = mediaList(el.content)[index]
-      const src = media?.getAttribute("src") ?? ""
-      if (!src) return null
-      if (queuePos(mid, chron, index) < 0 && queue().length >= QUEUE_MAX) return null
-      const listed = queue().find((e) => e.mid === mid && e.chron === chron && e.index === index)
-      const entry: QueueEntry = listed ?? {
-         mid,
-         chron,
-         index,
-         src,
-         kind: media.tagName === "VIDEO" ? "video" : "audio",
-         title,
-         feedId,
-      }
+      const fresh = media && entryFrom(at, index, media)
+      if (!fresh) return null
+      const pos = queuePos(mid, chron, index)
+      if (refusesNew(pos)) return null
+      const entry = queue()[pos] ?? fresh
       return { media, entry, added: insertNext(entry) }
    }
    return [
       {
          label: "Play next",
          // A NEW head entry would breach the cap; a queued one just moves.
-         disabled: queuePos(mid, chron, index) < 0 && queue().length >= QUEUE_MAX,
+         disabled: refusesNew(queuePos(mid, chron, index)),
          action: () => {
             const r = toNext()
             if (!r || startIfIdle()) return
@@ -126,7 +135,7 @@ function chipMenuItems(index: number): MenuItem[] {
          label: "Play now",
          // At the cap only an already-listed enclosure can play now (a new one
          // would breach it); the chip's own door covers pruning.
-         disabled: queuePos(mid, chron, index) < 0 && queue().length >= QUEUE_MAX,
+         disabled: refusesNew(queuePos(mid, chron, index)),
          action: () =>
             batch(() => {
                const r = toNext()
@@ -139,17 +148,16 @@ function chipMenuItems(index: number): MenuItem[] {
 function toggleQueued(index: number): void {
    const at = mounted()
    if (!at) return
-   const { mid, chron, title, feedId } = at
-   const listed = queue().find((e) => e.mid === mid && e.chron === chron && e.index === index)
+   const listed = queue()[queuePos(at.mid, at.chron, index)]
    if (listed) return dropEntry(listed)
    // The cap as a DOOR: a full queue unfolds the player, whose Up next list
    // is where to prune, instead of silently eating the tap (the chip already
    // reads ≡ / "Playlist full").
    if (queue().length >= QUEUE_MAX) return setUnfolded(true)
    const m = mediaList(el.content)[index]
-   const src = m?.getAttribute("src") ?? ""
-   if (!src) return
-   queue.set([...queue(), { mid, chron, index, src, kind: m.tagName === "VIDEO" ? "video" : "audio", title, feedId }])
+   const entry = m && entryFrom(at, index, m)
+   if (!entry) return
+   queue.set([...queue(), entry])
    if (startIfIdle()) return
    pulseAdd(m.nextElementSibling)
 }
@@ -190,8 +198,8 @@ export function injectQueueChips(): void {
       if (!m.getAttribute("src")) continue
       // On the rehome path the chip is already sitting after the element
       // (replaceWith swaps the node, not its siblings) — re-derive its state.
-      const existing = m.nextElementSibling
-      if (existing instanceof HTMLButtonElement && existing.classList.contains("srr-queue-chip")) {
+      const existing = chipAfter(m)
+      if (existing) {
          pairAnchor(m, existing, i)
          setChipState(existing, queuePos(mid, chron, i))
          syncChipOffstage(m, existing)
@@ -238,9 +246,8 @@ export function watchChips(): () => void {
       if (!at) return
       const list = mediaList(el.content)
       for (let i = 0; i < list.length; i++) {
-         const sib = list[i].nextElementSibling
-         if (sib instanceof HTMLButtonElement && sib.classList.contains("srr-queue-chip"))
-            setChipState(sib, queuePos(at.mid, at.chron, i))
+         const chip = chipAfter(list[i])
+         if (chip) setChipState(chip, queuePos(at.mid, at.chron, i))
       }
    })
 }
