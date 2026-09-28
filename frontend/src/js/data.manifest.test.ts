@@ -146,16 +146,13 @@ describe("root selection", () => {
       expect(derived.deltas).toEqual(["data/d1.gz"])
    })
 
-   it("synthesizes the retired counters from the LISTED names", async () => {
+   it("gates coverage on the LISTED names and synthesizes no retired counter", async () => {
       const data = await mount(baseFiles(manifestRoot))
       await data.init()
-      // nd/next_pid/hdrs/mp exist only so the coverage gates keep one
-      // implementation; nothing builds a key from them any more.
-      expect(data.db.nd).toBe(1)
-      expect(data.db.next_pid).toBe(1)
-      expect(data.db.hdrs).toBe(0)
-      expect(data.db.mp).toBe(0)
-      expect(data.metaReady()).toBe(true) // mp*5000 + mt + na === total_art
+      // The coverage gates read the names directly, so the normalized db
+      // carries none of the legacy name-derivation counters.
+      for (const counter of ["nd", "next_pid", "hdrs", "mp"]) expect(data.db).not.toHaveProperty(counter)
+      expect(data.metaReady()).toBe(true) // 0 named finalized shards·5000 + mt + na === total_art
    })
 
    it("a missing manifest on a v2 root is a hard error — there is nothing to fall back to", async () => {

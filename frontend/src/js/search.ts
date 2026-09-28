@@ -22,10 +22,9 @@ export interface ISearchHit {
    t: string
 }
 
-// The hdrs-style coverage gate: the backend publishes mp only after every
-// meta shard + summary save succeeded, so metaReady() checks that mp and mt
-// fully cover the store — meaning every meta shard (finalized + tail) is
-// present and consistent with this db.gz.
+// The coverage gate: metaReady() checks that the finalized meta shards the
+// store names, plus the tail (mt), fully cover the store — meaning every meta
+// shard (finalized + tail) is present and consistent with this db.gz.
 export function available(): boolean {
    return data.metaReady()
 }
@@ -345,9 +344,9 @@ export async function* search(
    const words = queryWords(q)
    if (words.length === 0) return
    // Self-gate: a boot deep-link (#!q:…) reaches search() via nav.fromHash
-   // before the interactive availability check runs. When meta bookkeeping
-   // (mp/mt) doesn't fully cover the store, scanning a partial index would give
-   // inconsistent results — yield nothing (fails safe) instead.
+   // before the interactive availability check runs. When the meta series (the
+   // named shards + mt) doesn't fully cover the store, scanning a partial index
+   // would give inconsistent results — yield nothing (fails safe) instead.
    if (!data.metaReady()) return
 
    const st = stateOf(activeStore())

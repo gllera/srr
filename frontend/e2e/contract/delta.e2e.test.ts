@@ -47,7 +47,7 @@ describe("contract: delta-segment tail", () => {
    })
 
    it("publishes the first batch as a delta segment, not tail packs", () => {
-      expect(reader.data.db.nd).toBe(1)
+      expect(reader.data.storeNames().deltas).toHaveLength(1)
       expect(reader.data.db.na).toBe(2)
       const names = storeNames(store)
       expect(names.deltas).toHaveLength(1)
@@ -98,7 +98,7 @@ describe("contract: delta-segment tail", () => {
       expect(new Set(calledPaths(reader.fetchMock))).toEqual(
          new Set(["db.gz", `manifest/${reader.data.db.m}.gz`, ...storeNames(store).deltas]),
       )
-      expect(reader.data.db.nd).toBe(2)
+      expect(reader.data.storeNames().deltas).toHaveLength(2)
 
       const before = reader.fetchMock.mock.calls.length
       const a = await reader.data.loadArticle(3)
@@ -112,7 +112,7 @@ describe("contract: delta-segment tail", () => {
       await srr(store, "fetch") // cycle 3: nd == MAX_DELTAS → consolidation
 
       expect(await reader.data.refresh()).toBe("updated")
-      expect(reader.data.db.nd ?? 0).toBe(0)
+      expect(reader.data.storeNames().deltas).toEqual([])
       expect(reader.data.db.na ?? 0).toBe(0)
       expect(reader.data.db.mt).toBe(6)
       const after = storeNames(store)

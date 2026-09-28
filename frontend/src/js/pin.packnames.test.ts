@@ -7,6 +7,7 @@ import {
    IDX_STATE_SIZE,
    PACK_SERIES_KINDS,
 } from "./format.gen"
+import type { LegacyRoot } from "./names"
 
 // --- helpers copied from data.edge.test.ts ---
 
@@ -90,7 +91,10 @@ const DATA_NOASSET = '{"f":0,"a":1,"c":"plain text, no assets here"}\n'
 // Nothing under test depends on that choice; it just keeps the fixtures legible.
 const HSUM_STEM = 900
 const SSUM_STEM = 901
-function manifestFor(db: Partial<IDB>) {
+// A store described in the legacy counters (mp, hdrs, next_pid), which
+// manifestFor translates into the listed names.
+type StoreDesc = Partial<IDB & LegacyRoot>
+function manifestFor(db: StoreDesc) {
    const total = db.total_art ?? 0
    const tc = total - (db.na ?? 0)
    const nfIdx = total > 0 ? Math.floor((total - 1) / IDX_PACK_SIZE) : 0
@@ -117,7 +121,7 @@ function manifestFor(db: Partial<IDB>) {
    }
 }
 
-async function mount(db: Partial<IDB>, packs: Record<string, ArrayBuffer | string> = {}) {
+async function mount(db: StoreDesc, packs: Record<string, ArrayBuffer | string> = {}) {
    const files = new Map<string, Uint8Array>()
    files.set("/db.gz", await gzip(JSON.stringify({ v: DB_FORMAT_VERSION, m: 1, t: 1 })))
    files.set("/manifest/1.gz", await gzip(JSON.stringify(manifestFor(db))))
@@ -198,7 +202,7 @@ describe("packNamesForFilter", () => {
       // numFinalizedMeta = floor((50001-1)/5000) = floor(50000/5000) = 10 shards
       const nArt = IDX_PACK_SIZE + 1
       const nMetaFinalized = Math.floor((nArt - 1) / META_PACK_SIZE) // 10
-      const db: Partial<IDB> = {
+      const db: StoreDesc = {
          total_art: nArt,
          seq: 1,
          next_pid: 2,
@@ -252,7 +256,7 @@ describe("packNamesForFilter", () => {
       // (→ boundsIdx++), and present in the latest pack — then filters on feed 5.
       const nArt = 2 * IDX_PACK_SIZE + 1 // 100001 → nfIdx=2, latest idx pack = 1 entry
       const nfMeta = Math.floor((nArt - 1) / META_PACK_SIZE) // 20
-      const db: Partial<IDB> = {
+      const db: StoreDesc = {
          total_art: nArt,
          seq: 1,
          next_pid: 4, // data packs 1..3 finalized; data/L1 = latest (bounds packId 4)
@@ -338,7 +342,7 @@ describe("packNamesForFilter", () => {
       // 3 articles: feed 0 has articles at chron 0, 2; feed 1 has chron 1
       // All in the latest pack (total_art=3, seq=1, no finalized)
       // data pack: id=1 (latest, next_pid=1)
-      const db: Partial<IDB> = {
+      const db: StoreDesc = {
          total_art: 3,
          seq: 1,
          next_pid: 1,
@@ -370,7 +374,7 @@ describe("packNamesForFilter", () => {
    })
 
    it("no includeLatest flag: still includes latest pack by default", async () => {
-      const db: Partial<IDB> = {
+      const db: StoreDesc = {
          total_art: 2,
          seq: 2,
          next_pid: 1,
@@ -396,7 +400,7 @@ describe("packNamesForFilter", () => {
       // A pinned scope must also cache the assets/ images its articles link to,
       // or they show broken offline. packNamesForFilter parses each pinned data
       // pack and emits every assets/<2hex>/<16hex> key it finds.
-      const db: Partial<IDB> = {
+      const db: StoreDesc = {
          total_art: 1,
          seq: 1,
          next_pid: 1,

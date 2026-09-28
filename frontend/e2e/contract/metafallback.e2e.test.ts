@@ -17,10 +17,10 @@ process.env.SRR_MAX_DELTAS = "0"
 // truth. This is the safety guarantee of the warn-only derived design — a
 // failed SyncMeta never breaks the list or search.
 //
-// We force metaReady()=false after a real srr fetch by patching db.mp/db.mt
-// to values that leave the store "uncovered" (mp=0, mt=0), then assert that
-// loadMeta(chronIdx) returns the same {f, w, t} card as the underlying data/
-// pack at every chronIdx.
+// We force metaReady()=false after a real srr fetch by patching db.mt to 0,
+// which leaves the store "uncovered" (it has no finalized meta shard at this
+// size), then assert that loadMeta(chronIdx) returns the same {f, w, t} card
+// as the underlying data/ pack at every chronIdx.
 
 describe("contract: meta fallback to data/", () => {
    let feeds: FeedServer
@@ -88,10 +88,9 @@ describe("contract: meta fallback to data/", () => {
    })
 
    it("loadMeta falls back to data/ when metaReady() is false", async () => {
-      // Force metaReady()=false by setting mp=0 and mt=0.
+      // Force metaReady()=false by setting mt=0 (no finalized shard is named).
       // (Real scenario: SyncMeta failed warn-only, or first run before any meta
-      // is written — both leave mp/mt at 0.)
-      reader.data.db.mp = 0
+      // is written — both leave the meta series uncovered.)
       reader.data.db.mt = 0
       // Clear the head projection too: it rides the same sync, so the
       // failed-sync scenario leaves it absent as well — and it would
@@ -112,7 +111,6 @@ describe("contract: meta fallback to data/", () => {
 
    it("loadMeta returns published over fetched_at when published is set", async () => {
       // All our items have a pubDate, so w should equal published (art.p).
-      reader.data.db.mp = 0
       reader.data.db.mt = 0
       reader.data.db.head = undefined
       const art0 = await reader.data.loadArticle(0)

@@ -31,6 +31,7 @@ import {
    legacyNames,
    manifestNames,
    type IManifestWire,
+   type LegacyRoot,
    type StoreNames,
    type SeriesList,
 } from "./names"
@@ -438,7 +439,9 @@ async function parseDb(store: Store, res: Response): Promise<Snapshot> {
 }
 
 function fromLegacyRoot(raw: IRootWire): Snapshot {
-   const legacy = raw as IDB
+   // The pre-cutover document carries its name-derivation counters inline; only
+   // legacyNames reads them — every coverage gate reads the names it returns.
+   const legacy = raw as IDB & Partial<LegacyRoot>
    return {
       db: legacy,
       names: legacyNames({
@@ -464,7 +467,6 @@ async function fromManifestRoot(store: Store, raw: IRootWire): Promise<Snapshot>
       )
    const man = await loadManifest(store, m)
    const resolved = manifestNames(man)
-   const finalizedMeta = resolved.meta.keys.length - (resolved.meta.tail >= 0 ? 1 : 0)
    const normalized: IDB = {
       v: raw.v ?? 0,
       m,
@@ -481,16 +483,10 @@ async function fromManifestRoot(store: Store, raw: IRootWire): Promise<Snapshot>
       wf: man.wf,
       wc: man.wc,
       feeds: (man.feeds ?? {}) as Record<number, IFeed>,
-      // The name-derivation counters the manifest RETIRES (§5.1). They are
-      // synthesized from the LISTED names purely so the reader's coverage
-      // gates (metaReady, idxSummaryDegraded, numFinalized*) keep exactly one
-      // implementation across both root shapes. NOTHING builds a key from them
-      // any more — `names` above is the only source of a pack name.
+      // The manifest RETIRES seq with the other name-derivation counters
+      // (§5.1); it stays 0 only because IDB requires it for refresh()'s legacy
+      // compare. The coverage gates read the listed names, never a counter.
       seq: 0,
-      nd: resolved.deltas.length,
-      next_pid: resolved.data.tail >= 0 ? resolved.data.tail : resolved.data.keys.length,
-      hdrs: resolved.hsum?.covers ?? 0,
-      mp: finalizedMeta,
    }
    // The pack↔delta seam, cross-checked on the NAMING side before a single
    // pack is addressed: a store whose delta chain holds articles must name the
@@ -596,7 +592,7 @@ async function applyDb(store: Store, snap: Snapshot): Promise<void> {
       }
    }
    if (headers === null) {
-      // Eager fallback: a store whose hdrs lags its finalized packs (old
+      // Eager fallback: a store whose summary lags its finalized packs (old
       // backend, warn-only summary failure, post-rebuild gap) or a failed
       // summary fetch. Fetch everything like the pre-summary reader did and
       // peel each pack's own header.
@@ -899,10 +895,11 @@ export function lastFetchedAt(store: Store = active): number {
 // idx packs on boot instead of using the fast summary path.
 export function idxSummaryDegraded(store: Store = active): boolean {
    const nf = numFinalizedIdx(store)
-   // Only an actively-advancing summary rebuild (hdrs partway) — NOT a steady
-   // pre-summary store (hdrs===0/absent, e.g. an old backend), which would pin a
+   const covers = store.names.hsum?.covers ?? 0
+   // Only an actively-advancing summary rebuild (covering partway) — NOT a steady
+   // pre-summary store (no summary named, e.g. an old backend), which would pin a
    // permanent, misleading "(optimizing index…)" banner the user can't act on.
-   return nf > 0 && (store.db.hdrs ?? 0) > 0 && (store.db.hdrs ?? 0) < nf
+   return nf > 0 && covers > 0 && covers < nf
 }
 
 // Fetches + gunzips one pack key. Every pack name is write-once — a stem is
@@ -1222,12 +1219,14 @@ export function hasArticles(store: Store = active): boolean {
 }
 
 // meta/ is a warn-only derived projection, so after a failed SyncMeta it can
-// lag db.gz for one fetch cycle. metaReady() reports whether mp+mt fully cover
-// the store — only then is every meta shard (finalized + tail) present and
-// consistent. The list and search both gate on it; the list falls back to data/.
+// lag db.gz for one fetch cycle. metaReady() reports whether the finalized
+// shards the store names (mp) plus the tail (mt) fully cover the store — only
+// then is every meta shard (finalized + tail) present and consistent. The list
+// and search both gate on it; the list falls back to data/.
 export function metaReady(store: Store = active): boolean {
    if (store.db.total_art === 0) return false
-   const mp = store.db.mp ?? 0
+   const meta = store.names.meta
+   const mp = meta.keys.length - (meta.tail >= 0 ? 1 : 0)
    // The meta series covers the consolidated region only; the resident delta
    // chain carries the rest (na) — coverage is complete when the three parts
    // sum to the store.

@@ -73,7 +73,7 @@ describe("contract: search", () => {
    })
 
    it("publishes coverage fields and the reader offers search", () => {
-      expect(reader.data.db.mp ?? 0).toBe(0) // no finalized packs at this size
+      expect(reader.data.storeNames().meta.tail).toBe(0) // no finalized shards at this size: the tail is the only one
       expect(reader.data.db.mt).toBe(TITLES.length)
       expect(search.available()).toBe(true)
    })

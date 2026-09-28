@@ -43,8 +43,9 @@ describe("contract: multi data-pack split", () => {
 
    it("produced several finalized data packs", () => {
       expect(reader.data.db.total_art).toBe(items.length)
-      // next_pid advances past 1 only when finalized packs exist beyond the latest.
-      expect(reader.data.db.next_pid).toBeGreaterThan(1)
+      // The data tail sits at next_pid, which advances past 1 only when finalized
+      // packs exist below it.
+      expect(reader.data.storeNames().data.tail).toBeGreaterThan(1)
    })
 
    it("every chronIdx resolves the correct pack+offset and content", async () => {

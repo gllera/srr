@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import { IDX_BOUNDARY_SIZE, IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_STATE_SIZE } from "./format.gen"
+import type { LegacyRoot } from "./names"
 
 // data.ts has a top-level db.gz fetch and private state set only by init(), so
 // its composition edges (clamp, empty store, the 50000 pack seam,
@@ -56,10 +57,11 @@ async function gzip(input: ArrayBuffer | string): Promise<Uint8Array> {
    return new Uint8Array(await new Response(stream).arrayBuffer())
 }
 
-// Mount a synthetic store: db.gz JSON + a map of pack path → buffer, all gzipped
-// and served by a stubbed global.fetch. Returns the freshly imported data module
+// Mount a synthetic store: db.gz JSON (a legacy root, so it may carry the
+// name-derivation counters) + a map of pack path → buffer, all gzipped and
+// served by a stubbed global.fetch. Returns the freshly imported data module
 // after a successful init().
-async function mount(db: Partial<IDB>, packs: Record<string, ArrayBuffer> = {}) {
+async function mount(db: Partial<IDB & LegacyRoot>, packs: Record<string, ArrayBuffer> = {}) {
    const files = new Map<string, Uint8Array>()
    files.set("/db.gz", await gzip(JSON.stringify(db)))
    for (const [path, buf] of Object.entries(packs)) files.set("/" + path, await gzip(buf))
