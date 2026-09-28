@@ -1211,15 +1211,18 @@ describe("playlist", () => {
       const list = q<HTMLElement>(".srr-player-list")
       const dock = q<HTMLButtonElement>(".srr-player-dock")
       list.querySelector<HTMLButtonElement>(".srr-player-row-remove")?.focus()
-      const globalKeymap = vi.fn()
+      // app.ts's keymap stands down for a defaultPrevented key, so "claimed" is
+      // what the document listener sees.
+      const claimed: boolean[] = []
+      const globalKeymap = (e: KeyboardEvent) => claimed.push(e.defaultPrevented)
       document.addEventListener("keydown", globalKeymap)
       try {
          // A control, not a modal: an unclaimed key goes on to the app.
-         list.dispatchEvent(new KeyboardEvent("keydown", { key: "d", bubbles: true }))
-         expect(globalKeymap).toHaveBeenCalledTimes(1)
+         list.dispatchEvent(new KeyboardEvent("keydown", { key: "d", bubbles: true, cancelable: true }))
+         expect(claimed).toEqual([false])
          // Escape folds — and must not ALSO drop the reader to the list.
-         list.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))
-         expect(globalKeymap).toHaveBeenCalledTimes(1)
+         list.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))
+         expect(claimed).toEqual([false, true])
          expect(bar().classList.contains("srr-player-folded")).toBe(true)
          expect(dock.getAttribute("aria-expanded")).toBe("false")
          // Focus followed the close onto the one control still visible: the
@@ -1894,45 +1897,38 @@ describe("the seek bar", () => {
    })
 
    // The seek bar is a tabindex=0 role=slider DIV, so app.ts's document-level
-   // keydown — bubble-phase, typing-guarded on tag names only, with no
-   // defaultPrevented check — sees every key it handles. A key that ALSO ran
-   // the global action would seek AND step to the next article. Every key the
-   // handler claims must therefore stop at the bar.
-   it("never lets a handled key reach app.ts's document-level keymap", () => {
+   // keydown — bubble-phase, typing-guarded on tag names only — sees every key
+   // it handles, and stands down only for a defaultPrevented one. A key that
+   // ALSO ran the global action would seek AND step to the next article. Every
+   // key the handler handles must therefore be claimed.
+   it("claims every handled key, so app.ts's document-level keymap stands down", () => {
       const [m] = putAudio()
       withDuration(m, 200)
       claim(m)
       m.currentTime = 50
       const seek = q<HTMLElement>(".srr-player-seek")
 
-      const globalKeymap = vi.fn()
-      document.addEventListener("keydown", globalKeymap)
-      try {
-         for (const key of ["ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home"]) {
-            seek.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }))
-            expect(
-               globalKeymap,
-               `${key} reached the document keymap — it would also run the global action`,
-            ).not.toHaveBeenCalled()
-         }
-      } finally {
-         document.removeEventListener("keydown", globalKeymap)
+      for (const key of ["ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home"]) {
+         const e = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true })
+         seek.dispatchEvent(e)
+         expect(e.defaultPrevented, `${key} left unclaimed — it would also run the global action`).toBe(true)
       }
    })
 
    // ...while a key it does NOT claim must still reach the global keymap: the
-   // guard above is scoped to the slider's own axis, not a blanket swallow (a
+   // claim above is scoped to the slider's own axis, not a blanket swallow (a
    // modal owns every key — lightbox.ts — but a CONTROL owns only its own).
    it("lets an unhandled key through to the global keymap", () => {
       const [m] = putAudio()
       claim(m)
       const seek = q<HTMLElement>(".srr-player-seek")
 
-      const globalKeymap = vi.fn()
+      const claimed: boolean[] = []
+      const globalKeymap = (e: KeyboardEvent) => claimed.push(e.defaultPrevented)
       document.addEventListener("keydown", globalKeymap)
       try {
-         seek.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))
-         expect(globalKeymap).toHaveBeenCalledTimes(1)
+         seek.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))
+         expect(claimed).toEqual([false])
       } finally {
          document.removeEventListener("keydown", globalKeymap)
       }

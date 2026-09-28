@@ -990,20 +990,21 @@ describe("type-to-filter (RDR9)", () => {
       threeFeeds()
       const picker = await mount()
       picker.open()
-      // app.ts's global handler is a document listener — the picker stopping
-      // propagation IS "handled, don't close".
-      const global = vi.fn()
+      // app.ts's global handler is a document listener that stands down for a
+      // defaultPrevented key — the picker claiming the Escape IS "handled, don't close".
+      const claimed: boolean[] = []
+      const global = (e: KeyboardEvent) => claimed.push(e.defaultPrevented)
       document.addEventListener("keydown", global)
       try {
          type("ambito")
          key($(".srr-picker-search-input"), "Escape")
          expect($<HTMLInputElement>(".srr-picker-search-input").value).toBe("")
          expect(visible()).toEqual(["", "news", "1", "2", "3"])
-         expect(global).not.toHaveBeenCalled() // the overlay stays open
+         expect(claimed).toEqual([true]) // the overlay stays open
          expect(picker.isOpen()).toBe(true)
          // Query already empty → not ours; app.ts sees it and closes the overlay.
          key($(".srr-picker-search-input"), "Escape")
-         expect(global).toHaveBeenCalledTimes(1)
+         expect(claimed).toEqual([true, false])
       } finally {
          document.removeEventListener("keydown", global)
       }

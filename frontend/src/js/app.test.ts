@@ -4262,8 +4262,8 @@ describe("search input keys — leaving / applying from the pinned bar", () => {
       await flush()
       // exitSearch ran (selectFilter("") → applyFilter([]))…
       expect(nav.applyFilter).toHaveBeenCalledWith([])
-      // …and stopPropagation kept the document Escape ladder from also firing (it
-      // would have entered the reader via enterReader → nav.last / nav.goTo).
+      // …and its preventDefault kept the document Escape ladder from also firing
+      // (it would have entered the reader via enterReader → nav.last / nav.goTo).
       expect(nav.last).not.toHaveBeenCalled()
       expect(nav.goTo).not.toHaveBeenCalled()
       expect(document.body.classList.contains("srr-view-list")).toBe(true)
@@ -4422,6 +4422,34 @@ describe("reader keymap — + / - (text size)", () => {
       expect(key("+", { ctrlKey: true }).defaultPrevented).toBe(false)
       expect(key("-", { metaKey: true }).defaultPrevented).toBe(false)
       expect(localStorage.getItem("srr-reading")).toBeNull()
+   })
+})
+
+// A widget that owns a key (the seek slider, a playlist handle, the pane grip)
+// claims it with preventDefault in its own bubble-phase listener; the document
+// keymap stands down for it instead of also stepping the article.
+describe("keymap — a key a widget already claimed", () => {
+   beforeEach(clearServiceWorker)
+   it("runs nothing for a defaultPrevented key", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
+      hashTo("#2")
+      await flush()
+      const widget = document.createElement("div")
+      widget.addEventListener("keydown", (e) => e.preventDefault())
+      document.body.appendChild(widget)
+      try {
+         nav.right.mockClear()
+         widget.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }))
+         await flush()
+         expect(nav.right).not.toHaveBeenCalled()
+         // Positive control: the same key unclaimed steps.
+         document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }))
+         await flush()
+         expect(nav.right).toHaveBeenCalled()
+      } finally {
+         widget.remove()
+      }
    })
 })
 

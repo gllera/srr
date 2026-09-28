@@ -62,9 +62,8 @@ export function setup(deps: SearchDeps): void {
          e.preventDefault()
          applySearchQuery(el.searchInput.value)
       } else if (e.key === "Escape") {
-         // Stop the document-level Escape handler from also acting; leave search.
+         // Claimed, so the document-level Escape handler stands down; leave search.
          e.preventDefault()
-         e.stopPropagation()
          void exitSearch()
       }
    })

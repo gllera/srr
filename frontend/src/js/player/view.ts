@@ -297,11 +297,9 @@ function grip(row: HTMLElement, entry: QueueEntry): HTMLButtonElement {
       const delta = e.key === "ArrowUp" ? -1 : e.key === "ArrowDown" ? 1 : 0
       if (delta) {
          e.preventDefault()
-         e.stopPropagation()
          moveQueued(entry, delta)
       } else if (e.key === "Delete" || e.key === "Backspace") {
          e.preventDefault()
-         e.stopPropagation()
          removeFromKeyboard(entry)
       }
    })
@@ -531,17 +529,10 @@ function bindSeek(): void {
       else endScrub() // the drag ended somewhere we never saw the lift
    })
    for (const ev of ["pointerup", "pointercancel"] as const) el.playerSeek.addEventListener(ev, endScrub)
-   // stopPropagation beside every preventDefault — the dialog discipline
-   // dropdown.ts / search-ui.ts / lightbox.ts already spell out, applied to a
-   // control instead of a modal. The seek bar is a tabindex=0 role=slider DIV,
-   // so it takes focus from Tab AND from a plain press on the track, and
-   // app.ts's document-level keydown is bubble-phase with a tag-name-only
-   // typing guard (INPUT/TEXTAREA/SELECT/contentEditable) and no
-   // defaultPrevented check — a slider DIV walks straight through it. Without
-   // this, one ArrowRight both seeks +5s AND runs the global action: in the
-   // reader it steps to the NEXT ARTICLE, navigating away from the episode
-   // being scrubbed. ArrowUp/ArrowDown are in the step set for the same reason
-   // AND for the ARIA slider pattern, which expects them to step the value.
+   // Every handled key is claimed with preventDefault, which app.ts's
+   // document-level keymap honours: one ArrowRight seeks +5s and never also
+   // steps the reader to the next article. ArrowUp/ArrowDown step too, per the
+   // ARIA slider pattern.
    el.playerSeek.addEventListener("keydown", (e) => {
       const step =
          e.key === "ArrowRight" || e.key === "ArrowUp"
@@ -555,11 +546,9 @@ function bindSeek(): void {
                   : 0
       if (step) {
          e.preventDefault()
-         e.stopPropagation()
          skip(step)
       } else if (e.key === "Home") {
          e.preventDefault()
-         e.stopPropagation()
          seekTo(0)
       }
    })
@@ -619,7 +608,6 @@ function bindControls(): void {
    el.player.addEventListener("keydown", (e) => {
       if (e.key !== "Escape" || !unfolded()) return
       e.preventDefault()
-      e.stopPropagation()
       setUnfolded(false)
    })
    bindSeek()

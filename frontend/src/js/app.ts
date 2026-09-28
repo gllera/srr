@@ -1146,6 +1146,10 @@ async function init() {
 
    window.addEventListener("hashchange", () => void route(location.hash.substring(1)))
    document.addEventListener("keydown", (e) => {
+      // A widget that owns a key (the seek slider, a playlist handle, the pane
+      // grip, the search bar's Escape…) claims it with preventDefault; this
+      // bubble-phase keymap stands down for it rather than also acting on it.
+      if (e.defaultPrevented) return
       if (e.key === "Tab" && el.popup.classList.contains("srr-open")) {
          wrapTabFocus(e, el.popup, "button:not(.srr-hidden)")
          return

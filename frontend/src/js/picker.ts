@@ -134,13 +134,11 @@ export function setup(el: HTMLElement, h: PickerHooks): void {
    // Escape is progressive: with a query up it clears the query and the overlay
    // STAYS — after typing, the first Escape means "undo the narrowing", not
    // "throw the panel away". Once the query is empty it is not handled here at
-   // all, so it bubbles on to app.ts's document-level handler, which closes the
-   // overlay exactly as it always did. Bubble phase on the overlay root: app.ts
-   // listens on `document`, so stopping propagation here IS "handled".
+   // all, so app.ts's document-level handler closes the overlay exactly as it
+   // always did; a claimed (preventDefault) Escape is one it stands down for.
    root.addEventListener("keydown", (e) => {
       if (e.key !== "Escape" || query === "") return
       e.preventDefault()
-      e.stopPropagation()
       setQuery("")
    })
    // Delegated filter pick: every row carries data-value (feed id / tag / "" /
