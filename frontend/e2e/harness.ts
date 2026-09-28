@@ -107,12 +107,16 @@ export function storeNames(dir: string): StoreNames {
 // new series until someone remembers to extend it, which is exactly what the
 // `watch` series (FMT5) hit. Summaries included, since a test asserting "the
 // generation's objects are present" means all of them.
-export function storeObjectKeys(dir: string): string[] {
-   const n = storeNames(dir)
+export function namedKeys(n: StoreNames): string[] {
    const keys = [...n.deltas]
    for (const list of n.series.values()) keys.push(...list.keys.filter(Boolean))
    for (const sum of [n.hsum, n.ssum]) if (sum) keys.push(sum.key)
    return keys
+}
+
+// The same walk over the generation a store dir currently names.
+export function storeObjectKeys(dir: string): string[] {
+   return namedKeys(storeNames(dir))
 }
 
 // total_art read straight from a store's db.gz, or -1 if it isn't a readable

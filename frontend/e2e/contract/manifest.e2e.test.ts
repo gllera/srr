@@ -3,7 +3,17 @@ import { join } from "node:path"
 import { gunzipSync } from "node:zlib"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
-import { feedServer, inspectValidate, makeStore, readDb, readRoot, srr, storeNames, type FeedServer } from "../harness"
+import {
+   feedServer,
+   inspectValidate,
+   makeStore,
+   namedKeys,
+   readDb,
+   readRoot,
+   srr,
+   storeNames,
+   type FeedServer,
+} from "../harness"
 import { nItems, rssFeed } from "../fixtures"
 import { mountReader } from "./mount"
 
@@ -148,14 +158,12 @@ describe("contract: generation-manifest root", () => {
       const reader = await mountReader(store)
       const names = reader.data.storeNames()
       const pins = await reader.data.packNamesForFilter(new Map())
-      // Walked through the series MAP, not an idx/data/meta literal: that
-      // spelling is the one names.ts documents as the bug listedNames() exists
-      // to prevent, and it also skipped the two summaries the pin deliberately
-      // includes. The backend-only singletons (seen/aref) are correctly absent
-      // from the pin, which is why this is not raw listedNames().
-      const listed = [...names.deltas]
-      for (const list of names.series.values()) listed.push(...list.keys.filter(Boolean))
-      for (const sum of [names.hsum, names.ssum]) if (sum) listed.push(sum.key)
+      // Walked through the series MAP (namedKeys), not an idx/data/meta literal:
+      // that spelling is the one names.ts documents as the bug listedNames()
+      // exists to prevent, and it also skipped the two summaries the pin
+      // deliberately includes. The backend-only singletons (seen/aref) are
+      // correctly absent from the pin, which is why this is not raw listedNames().
+      const listed = namedKeys(names)
       for (const key of listed) expect(pins, `pin set must name ${key}`).toContain(key)
    })
 
