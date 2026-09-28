@@ -186,6 +186,11 @@ func validateSecretScopes(scopes []string) error {
 // is valid only in a non-default recipe (allowDefault); the default recipe is
 // what it expands to, so it forbids self-reference. Run after filterPipe.
 func validatePipe(steps []string, allowDefault bool) error {
+	// The common case — a feed with no pipe override — has nothing to check,
+	// and mod.New() below instantiates every built-in.
+	if len(steps) == 0 {
+		return nil
+	}
 	names := mod.Builtins()
 	builtin := make([]string, 0, len(steps))
 	for _, s := range steps {
