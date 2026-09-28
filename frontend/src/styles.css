@@ -590,17 +590,21 @@ video {
    visibility: hidden;
    animation: none;
 }
-/* ⌄ — HIDES the view (it never stops or clears anything; emptying the
-   playlist is what takes the player away). The full-screen views' shared
-   close (.srr-dismiss-icon); a chevron also keeps it apart from the rows' ✕,
-   which means "remove". */
-.srr-player-close {
+/* ⌄ — the full-screen views' shared dismiss (.srr-dismiss-icon, below), one
+   box for the player's and the filter picker's. The player's HIDES the view (it
+   never stops or clears anything; emptying the playlist is what takes the
+   player away); a chevron also keeps it apart from the rows' ✕, which means
+   "remove". The negative margin lines the chevron's ink up with the left edge
+   of the content below it. */
+.srr-player-close,
+.srr-picker-close {
    flex: none;
    display: inline-flex;
    align-items: center;
    justify-content: center;
    width: 2.75rem;
    height: 2.75rem;
+   margin-left: -0.6rem;
    padding: 0;
    border: none;
    border-radius: var(--radius);
@@ -611,9 +615,6 @@ video {
       color: var(--fg);
       background: var(--hover);
    }
-}
-.srr-player-close {
-   margin-left: -0.6rem;
 }
 /* The dismiss chevron (⌄) — the close control of every FULL-SCREEN view: the
    player, the filter picker and the image viewer, always at the top left
@@ -2384,25 +2385,6 @@ body:not(.srr-split) .srr-pane-toggle {
    stroke-width: 1.6;
    stroke-linecap: round;
    stroke-linejoin: round;
-}
-.srr-picker-close {
-   display: inline-flex;
-   align-items: center;
-   justify-content: center;
-   min-width: 2.75rem;
-   min-height: 2.75rem;
-   /* The chevron's ink lines up with the rows' left edge below it. */
-   margin-left: -0.6rem;
-   padding: 0;
-   border: none;
-   border-radius: var(--radius);
-   background: none;
-   color: var(--muted);
-   cursor: pointer;
-   &:hover {
-      color: var(--fg);
-      background: var(--hover);
-   }
 }
 /* List surface — a scannable feed of headline rows. The list is a bidirectional
    infinite window anchored at the reader's position: newer ("next") rows page in
