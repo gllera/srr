@@ -81,11 +81,7 @@ export function onPlay(e: Event): void {
       // cursor just moves onto it.
       cursor.set(entryKey({ mid: at.mid, chron: at.chron, index }))
       pauseOthers(m)
-      // Apply the device's standing speed preference, but only when it was
-      // actually set: at the default 1 we leave the element alone so a rate FEB2
-      // restored (or one set through native in-content controls) is not reset.
-      const rate = readRate()
-      if (rate !== 1) m.playbackRate = rate
+      applyRatePref(m)
       finishClaim(m)
    })
 }
@@ -93,8 +89,15 @@ export function onPlay(e: Event): void {
 // The other half of "one thing audible at a time": the episode starting pauses
 // any outside media still playing (never the GIF idiom — decorations loop on).
 function pauseOthers(m: HTMLMediaElement): void {
-   for (const o of document.querySelectorAll<HTMLMediaElement>("audio, video"))
-      if (o !== m && !o.paused && !isGifIdiom(o)) o.pause()
+   for (const o of mediaList(document)) if (o !== m && !o.paused && !isGifIdiom(o)) o.pause()
+}
+
+// Apply the device's standing speed preference, but only when it was actually
+// set: at the default 1 we leave the element alone so a rate FEB2 restored (or
+// one set through native in-content controls) is not reset.
+function applyRatePref(m: HTMLMediaElement): void {
+   const rate = readRate()
+   if (rate !== 1) m.playbackRate = rate
 }
 
 // One episode at a time — the module's central invariant, in one place. Hand the
@@ -210,8 +213,7 @@ function onBufferClear(): void {
 function finishCurrent(): void {
    batch(() => {
       if (hasNext()) return advance(true)
-      release()
-      discardAdopted()
+      releaseOutgoing()
    })
    save()
 }
@@ -271,8 +273,7 @@ function onError(): void {
 // boot-restore detached path). Returns false — with the current episode
 // untouched — when the entry is unplayable, so advance() can skip it.
 export function playEntry(entry: QueueEntry, autoplay: boolean): boolean {
-   const at = mounted()
-   const live = at && at.mid === entry.mid && at.chron === entry.chron ? mediaList(el.content)[entry.index] : undefined
+   const live = liveMedia(entry)
    let src: string | null = null
    if (!live) {
       // In-session captures came off a sanitized element and persisted ones
@@ -291,8 +292,7 @@ export function playEntry(entry: QueueEntry, autoplay: boolean): boolean {
          resumeRemembered(m, entry)
          el.playerMedia.replaceChildren(m)
       }
-      const rate = readRate()
-      if (rate !== 1) m.playbackRate = rate
+      applyRatePref(m)
       const claim: Active = {
          mid: entry.mid,
          chron: entry.chron,
@@ -307,6 +307,14 @@ export function playEntry(entry: QueueEntry, autoplay: boolean): boolean {
    })
    if (autoplay) void play()
    return true
+}
+
+// The entry's element in the mounted article — there only when the entry's own
+// article is the one on screen, where claiming it in place costs no second
+// element and no re-buffer.
+function liveMedia(e: { mid: string; chron: number; index: number }): HTMLMediaElement | undefined {
+   const at = mounted()
+   return at && at.mid === e.mid && at.chron === e.chron ? mediaList(el.content)[e.index] : undefined
 }
 
 // Seek a freshly built (detached) element to where FEB2 last saw this episode,
@@ -478,14 +486,12 @@ export function close(): void {
    if (!a && !queue().length) return
    const mid = a?.mid ?? data.activeStore().mid
    a?.media.pause()
-   const wasAdopted = a !== null && !el.content.contains(a.media)
    batch(() => {
       queue.set([])
       cursor.set(null)
       unfolded.set(false)
-      release()
+      releaseOutgoing()
       clearSaved(mid)
-      if (wasAdopted) discardAdopted()
    })
 }
 
@@ -499,10 +505,8 @@ export function removeCurrent(): void {
    const q = queue()
    const i = cursorIndex()
    if (a) a.media.pause()
-   const wasAdopted = !!a && !el.content.contains(a.media)
    batch(() => {
-      if (a) release()
-      if (wasAdopted) discardAdopted()
+      releaseOutgoing()
       if (i >= 0) {
          const rest = [...q.slice(0, i), ...q.slice(i + 1)]
          queue.set(rest)
@@ -548,34 +552,28 @@ export function restorePersisted(): void {
    // (localStorage is untrusted input), invalid ones dropped.
    const list: QueueEntry[] = saved.queue ? [...saved.queue] : []
    const head = saved.head
-   if (head) {
-      // The interrupted episode is a playlist member. A blob from before the
-      // playlist kept played entries held it OUTSIDE the list — put it back at
-      // the front, so it is not lost to the new model.
-      const hk = entryKey({ mid: store.mid, chron: head.chron, index: head.index })
-      if (!list.some((e) => entryKey(e) === hk))
-         list.unshift({
-            mid: store.mid,
-            chron: head.chron,
-            index: head.index,
-            src: head.src,
-            kind: head.kind,
-            title: head.title,
-            feedId: head.feedId,
-         })
+   const headEntry: QueueEntry | null = head && {
+      mid: store.mid,
+      chron: head.chron,
+      index: head.index,
+      src: head.src,
+      kind: head.kind,
+      title: head.title,
+      feedId: head.feedId,
    }
-   const c = head
-      ? entryKey({ mid: store.mid, chron: head.chron, index: head.index })
-      : saved.cursor !== null && list[saved.cursor]
-        ? entryKey(list[saved.cursor])
-        : null
+   const hk = headEntry && entryKey(headEntry)
+   // The interrupted episode is a playlist member. A blob from before the
+   // playlist kept played entries held it OUTSIDE the list — put it back at the
+   // front, so it is not lost to the new model.
+   if (headEntry && !list.some((e) => entryKey(e) === hk)) list.unshift(headEntry)
+   const c = hk ?? (saved.cursor !== null && list[saved.cursor] ? entryKey(list[saved.cursor]) : null)
    quietly(() =>
       batch(() => {
          queue.set(list)
          cursor.set(c)
       }),
    )
-   if (!head) {
+   if (!head || !headEntry) {
       // No restorable active half. A playlist alone still presents the player
       // (the READY state, on its saved cursor); nothing at all clears the blob.
       if (!queue().length) return clearSaved(store.mid)
@@ -600,18 +598,16 @@ export function restorePersisted(): void {
    // playsinline/poster/controls the sanitizer force-sets. Claim the element
    // that is already there instead. There is no second element.
    const at = mounted()
-   if (at && at.mid === store.mid && at.chron === head.chron) {
-      const live = mediaList(el.content)[head.index]
-      if (live) {
-         quietly(() =>
-            batch(() => {
-               active.set({ ...at, index: head.index, media: live })
-               finishClaim(live)
-            }),
-         )
-         seek(live)
-         return
-      }
+   const live = liveMedia(headEntry)
+   if (at && live) {
+      quietly(() =>
+         batch(() => {
+            active.set({ ...at, index: head.index, media: live })
+            finishClaim(live)
+         }),
+      )
+      seek(live)
+      return
    }
 
    // No upper bound check on the chron: the store may have been compacted or the
