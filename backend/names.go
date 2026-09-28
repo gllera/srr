@@ -417,10 +417,29 @@ func (n *ManifestNames) keys() []string {
 		}
 	}
 	out = append(out, n.deltaKeys()...)
-	for _, k := range []string{n.seenKey(), n.arefKey(), n.hsumKey(), n.ssumKey()} {
-		if k != "" {
-			out = append(out, k)
-		}
+	for _, r := range n.singletons() {
+		out = append(out, n.resolve(r.key()))
+	}
+	return out
+}
+
+// singletons lists the optional singletons the table names — seen, aref, hsum,
+// ssum, each narrowed to its StemRef, unresolved — skipping absent ones. keys()
+// and `srr inspect`'s M3/M4 checks all walk this one list, so a new singleton
+// is added here once rather than at every site that enumerates them.
+func (n *ManifestNames) singletons() []StemRef {
+	var out []StemRef
+	if n.Seen != nil {
+		out = append(out, *n.Seen)
+	}
+	if n.ARef != nil {
+		out = append(out, *n.ARef)
+	}
+	if n.HSum != nil {
+		out = append(out, StemRef{Series: n.HSum.Series, Stem: n.HSum.Stem})
+	}
+	if n.SSum != nil {
+		out = append(out, StemRef{Series: n.SSum.Series, Stem: n.SSum.Stem})
 	}
 	return out
 }
@@ -433,26 +452,21 @@ func (n *ManifestNames) clone() *ManifestNames {
 		out.Series[name] = &SeriesNames{Base: s.Base, Stems: slices.Clone(s.Stems), Tail: s.Tail}
 	}
 	out.Deltas = DeltaNames{Series: n.Deltas.Series, Stems: slices.Clone(n.Deltas.Stems)}
-	if n.Seen != nil {
-		s := *n.Seen
-		out.Seen = &s
-	}
-	if n.ARef != nil {
-		s := *n.ARef
-		out.ARef = &s
-	}
-	if n.HSum != nil {
-		s := *n.HSum
-		out.HSum = &s
-	}
-	if n.SSum != nil {
-		s := *n.SSum
-		out.SSum = &s
-	}
+	out.Seen, out.ARef = clonePtr(n.Seen), clonePtr(n.ARef)
+	out.HSum, out.SSum = clonePtr(n.HSum), clonePtr(n.SSum)
 	for k, v := range n.Next {
 		out.Next[k] = v
 	}
 	return out
+}
+
+// clonePtr copies the value p points at, nil staying nil.
+func clonePtr[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	c := *p
+	return &c
 }
 
 // --- convenience accessors on the core -------------------------------------

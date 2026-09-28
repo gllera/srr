@@ -164,17 +164,8 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 			checkStem(series, stem)
 		}
 	}
-	if names.Seen != nil {
-		checkStem(names.Seen.Series, names.Seen.Stem)
-	}
-	if names.ARef != nil {
-		checkStem(names.ARef.Series, names.ARef.Stem)
-	}
-	if names.HSum != nil {
-		checkStem(names.HSum.Series, names.HSum.Stem)
-	}
-	if names.SSum != nil {
-		checkStem(names.SSum.Series, names.SSum.Stem)
+	for _, r := range names.singletons() {
+		checkStem(r.Series, r.Stem)
 	}
 	for _, stem := range names.Deltas.Stems {
 		checkStem(names.Deltas.Series, stem)
@@ -222,17 +213,8 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 			probe = append(probe, k)
 		}
 	}
-	if names.Seen != nil {
-		probe = append(probe, names.Seen.key())
-	}
-	if names.ARef != nil {
-		probe = append(probe, names.ARef.key())
-	}
-	if names.HSum != nil {
-		probe = append(probe, names.HSum.key())
-	}
-	if names.SSum != nil {
-		probe = append(probe, names.SSum.key())
+	for _, r := range names.singletons() {
+		probe = append(probe, r.key())
 	}
 	slices.Sort(probe)
 	for _, k := range probe {
