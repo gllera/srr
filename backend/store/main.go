@@ -149,6 +149,14 @@ var feHashedRe = regexp.MustCompile(`^[^/]+\.[0-9a-f]{8,}\.[a-z0-9]+$`)
 // listing may ever classify as an upgrade orphan.
 func HashedFrontendAsset(key string) bool { return feHashedRe.MatchString(key) }
 
+// EntryPage reports whether key is a frontend entry page — a *.html file at the
+// store root (index.html, admin.html). Its name is stable across builds while
+// the hashed bundle it references changes, so it must revalidate, and
+// `srr frontend update` uploads it only after every asset it could reference.
+func EntryPage(key string) bool {
+	return strings.HasSuffix(key, ".html") && !strings.Contains(key, "/")
+}
+
 // cacheControlForKey returns the HTTP Cache-Control directive a backend should
 // attach when writing key, or "" for keys with no caching policy (e.g. the
 // lock marker). Backends that carry HTTP metadata (S3) emit it; filesystem
@@ -177,10 +185,11 @@ func cacheControlForKey(key string) string {
 		// on every fetch cycle. Must-revalidate so clients always see the
 		// latest window. Not in PackSeries/packKeyRe — NOT immutable.
 		return cacheRevalidate
-	case key == "index.html" || key == "admin.html" || key == "manifest.webmanifest" || key == "sitemap.txt":
+	case EntryPage(key) || key == "manifest.webmanifest" || key == "sitemap.txt":
 		// The self-hosted frontend's mutable root files (`srr frontend update`):
-		// the SPA entry point, the admin shell, its manifest, and the sitemap
-		// manifest are rewritten on every upgrade, so revalidate.
+		// the entry pages (the SPA's index.html, the admin shell), the PWA
+		// manifest, and the sitemap manifest are rewritten on every upgrade, so
+		// revalidate.
 		return cacheRevalidate
 	case strings.HasPrefix(key, "assets/") || packKeyRe.MatchString(key) || feHashedRe.MatchString(key):
 		return CacheImmutable

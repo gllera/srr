@@ -3,6 +3,7 @@ package main
 import (
 	"archive/tar"
 	"bytes"
+	"cmp"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -242,7 +243,7 @@ func frontendUpdate(ctx context.Context, backend store.Backend, client *http.Cli
 	if err != nil {
 		return err
 	}
-	newKeys := sortedKeys(newFiles)
+	newKeys := slices.Sorted(maps.Keys(newFiles))
 
 	// Prefer the STORE over the bookkeeping: sitemap.txt exists only because
 	// there was no way to ask a store what it holds, and a manifest of past
@@ -267,9 +268,10 @@ func frontendUpdate(ctx context.Context, backend store.Backend, client *http.Cli
 		return fmt.Errorf("writing pending sitemap: %w", err)
 	}
 
-	// Upload index.html last so a reader mid-update never sees a new entry point
-	// referencing a not-yet-uploaded asset. Abort on any error — the old files and
-	// the pending manifest remain, so the old reader works and the next run finishes.
+	// Upload the entry pages last (index.html the very last) so a reader
+	// mid-update never sees a new entry point referencing a not-yet-uploaded
+	// asset. Abort on any error — the old files and the pending manifest remain,
+	// so the old reader works and the next run finishes.
 	for _, key := range uploadOrder(newKeys) {
 		meta := store.ObjectMeta{ContentType: mimeForKey(key)}
 		if err := backend.AtomicPut(ctx, key, bytes.NewReader(newFiles[key]), meta); err != nil {
@@ -363,10 +365,6 @@ func writeSitemap(ctx context.Context, backend store.Backend, keys []string) err
 	return backend.AtomicPut(ctx, sitemapKey, strings.NewReader(body), store.ObjectMeta{ContentType: mimeForKey(sitemapKey)})
 }
 
-func sortedKeys(m map[string][]byte) []string {
-	return slices.Sorted(maps.Keys(m))
-}
-
 func toSet(keys []string) map[string]bool {
 	s := make(map[string]bool, len(keys))
 	for _, k := range keys {
@@ -384,30 +382,22 @@ func union(a, b []string) []string {
 	return slices.Sorted(maps.Keys(s))
 }
 
-// uploadOrder keeps the (already sorted) keys but moves every root-level
-// entry page (a *.html file at the bundle root, e.g. index.html or admin.html)
-// to the end, after every non-HTML file — so a page never lands ahead of the
-// hashed bundle it references and a reader mid-update never sees a page
-// pointing at a missing script or stylesheet. index.html, the reader's own
-// entry, stays the very last key of all (existing callers/tests pin that).
+// uploadOrder keeps the (already sorted) keys but moves every entry page
+// (store.EntryPage: index.html, admin.html) after every other file — so a page
+// never lands ahead of the hashed bundle it references and a reader mid-update
+// never sees a page pointing at a missing script or stylesheet. index.html, the
+// reader's own entry, is the very last key of all.
 func uploadOrder(keys []string) []string {
-	out := make([]string, 0, len(keys))
-	var htmlPages []string
-	hasIndex := false
-	for _, k := range keys {
-		if k == "index.html" {
-			hasIndex = true
-			continue
+	rank := func(k string) int {
+		switch {
+		case k == "index.html":
+			return 2
+		case store.EntryPage(k):
+			return 1
 		}
-		if strings.HasSuffix(k, ".html") && !strings.Contains(k, "/") {
-			htmlPages = append(htmlPages, k)
-			continue
-		}
-		out = append(out, k)
+		return 0
 	}
-	out = append(out, htmlPages...)
-	if hasIndex {
-		out = append(out, "index.html")
-	}
+	out := slices.Clone(keys)
+	slices.SortStableFunc(out, func(a, b string) int { return cmp.Compare(rank(a), rank(b)) })
 	return out
 }

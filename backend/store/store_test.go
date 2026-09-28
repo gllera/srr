@@ -600,6 +600,7 @@ func TestCacheControlForKeyFrontend(t *testing.T) {
 		// Mutable root files: revalidate.
 		{"index.html", cacheRevalidate},
 		{"admin.html", cacheRevalidate},
+		{"privacy.html", cacheRevalidate}, // any root entry page (EntryPage), not a name list
 		{"manifest.webmanifest", cacheRevalidate},
 		{"sitemap.txt", cacheRevalidate},
 		// Content-hashed root assets: immutable.
