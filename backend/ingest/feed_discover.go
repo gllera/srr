@@ -17,14 +17,12 @@ import (
 // Uses golang.org/x/net/html.NewTokenizer for robustness against malformed
 // and partial HTML (already in go.mod via x/net).
 func discoverFeedLink(htmlData []byte, baseURL string) (string, bool) {
-	base, err := url.Parse(baseURL)
-	if err != nil {
-		// If the base URL can't be parsed we can still return an absolute href.
-		base = nil
-	}
+	// An unparseable baseURL leaves base nil (url.Parse returns nil on error);
+	// an absolute href is still returned.
+	base, _ := url.Parse(baseURL)
 	// A <base href> in the document overrides baseURL for relative resolution
 	// (HTML spec). First one wins; resolved against the page URL if itself relative.
-	var baseOverride *url.URL
+	baseSeen := false
 
 	z := html.NewTokenizer(bytes.NewReader(htmlData))
 	for {
@@ -42,15 +40,15 @@ func discoverFeedLink(htmlData []byte, baseURL string) (string, bool) {
 			switch string(name) {
 			case "base":
 				for k, v := range tagAttrs(z) {
-					if baseOverride == nil && strings.EqualFold(string(k), "href") {
-						if h := strings.TrimSpace(string(v)); h != "" {
-							if u, perr := url.Parse(h); perr == nil {
-								if base != nil {
-									baseOverride = base.ResolveReference(u)
-								} else {
-									baseOverride = u
-								}
+					if baseSeen || !strings.EqualFold(string(k), "href") {
+						continue
+					}
+					if h := strings.TrimSpace(string(v)); h != "" {
+						if u, err := url.Parse(h); err == nil {
+							if base != nil {
+								u = base.ResolveReference(u)
 							}
+							base, baseSeen = u, true
 						}
 					}
 				}
@@ -71,11 +69,7 @@ func discoverFeedLink(htmlData []byte, baseURL string) (string, bool) {
 				if href == "" || !isAlternateRel(rel) || !isFeedType(typ) {
 					continue
 				}
-				effectiveBase := base
-				if baseOverride != nil {
-					effectiveBase = baseOverride
-				}
-				resolved := resolveHref(href, effectiveBase)
+				resolved := resolveHref(href, base)
 				if resolved == "" {
 					continue
 				}

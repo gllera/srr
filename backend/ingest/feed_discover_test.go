@@ -30,6 +30,40 @@ func TestDiscoverFeedLinkRelativeResolvedAgainstBase(t *testing.T) {
 	}
 }
 
+// A relative <base href> is itself resolved against the page URL, and relative
+// feed hrefs then resolve against that result rather than the page URL.
+func TestDiscoverFeedLinkRelativeBaseHref(t *testing.T) {
+	html := `<html><head>
+<base href="/sub/dir/">
+<link rel="alternate" type="application/rss+xml" href="feed.xml">
+</head></html>`
+	got, ok := discoverFeedLink([]byte(html), "https://example.com/blog/post")
+	if !ok {
+		t.Fatal("expected to find a feed link, got false")
+	}
+	if want := "https://example.com/sub/dir/feed.xml"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// Only the first <base href> counts (HTML spec); a later one is ignored, while a
+// <base> whose href is empty does not claim that slot.
+func TestDiscoverFeedLinkSecondBaseIgnored(t *testing.T) {
+	html := `<html><head>
+<base href="">
+<base href="https://first.example/a/">
+<base href="https://second.example/b/">
+<link rel="alternate" type="application/rss+xml" href="feed.xml">
+</head></html>`
+	got, ok := discoverFeedLink([]byte(html), "https://example.com/")
+	if !ok {
+		t.Fatal("expected to find a feed link, got false")
+	}
+	if want := "https://first.example/a/feed.xml"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
 func TestDiscoverFeedLinkAtomType(t *testing.T) {
 	html := `<html><head>
 <link rel="alternate" type="application/atom+xml" href="https://example.com/atom.xml">
