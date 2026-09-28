@@ -440,8 +440,8 @@ func (g *hostGate) acquire(u string) func() {
 // fetchedFeed pairs a fan-out feed (the read-only snapshot object the workers
 // mutated) with the pre-fan-out values the locked write phase guards on: the
 // URL the live store should still hold, the fetch state that must not have
-// advanced underneath, and the AssetBytes baseline the upload delta is
-// measured from.
+// advanced underneath (whose FailStreak is also the notify hook's pre-cycle
+// streak), and the AssetBytes baseline the upload delta is measured from.
 type fetchedFeed struct {
 	feed            *Feed
 	priorURL        string
@@ -664,12 +664,11 @@ func newFetchClient(workers int) *http.Client {
 
 // fetchResults carries the read-only fetch phase's outcome across the store
 // scopes of runFetch: the snapshot feeds the fan-out mutated (plus their
-// pre-fan-out guard records for applyFetched), and the run-scoped objects the
-// locked write phase still reports on (notify, asset counters, the progress
-// line, the cache dir for the post-commit sweep).
+// pre-fan-out guard records for applyFetched and the notify hook), and the
+// run-scoped objects the locked write phase still reports on (asset counters,
+// the progress line, the cache dir for the post-commit sweep).
 type fetchResults struct {
 	fetched  []fetchedFeed
-	notify   *notifyState
 	assets   *assetFetcher
 	progress *fetchProgress
 	cacheDir string
@@ -849,11 +848,6 @@ func (o *FetchCmd) fetchPhase(ctx context.Context, db *DB, client *http.Client, 
 		}
 	}
 
-	// Pre-fetch failure streaks, so the summary phase can spot the
-	// threshold crossings and recoveries this cycle produced. nil (and inert)
-	// unless a notify command is configured.
-	notify := snapshotNotify(feeds)
-
 	// Live stats on the terminal status line while the cycle runs (feeds
 	// done/total, new articles, failures, asset jobs). No-op when stderr
 	// isn't a tty (service/cron runs), so logs stay clean. Assigned to res
@@ -911,7 +905,6 @@ func (o *FetchCmd) fetchPhase(ctx context.Context, db *DB, client *http.Client, 
 	}
 
 	res.fetched = fetched
-	res.notify = notify
 	res.assets = assets
 	res.cacheDir = cacheDir
 	return nil
@@ -1069,10 +1062,8 @@ func (o *FetchCmd) commitPhase(ctx context.Context, db *DB, res *fetchResults) e
 
 	// Failure counting stays on the SNAPSHOT feeds — the fan-out's outcome is
 	// what this cycle did, whether or not every record survived the fold.
-	snapshot := make([]*Feed, len(res.fetched))
 	failed := 0
-	for i, rec := range res.fetched {
-		snapshot[i] = rec.feed
+	for _, rec := range res.fetched {
 		if rec.feed.FetchError != "" {
 			failed++
 		}
@@ -1080,13 +1071,13 @@ func (o *FetchCmd) commitPhase(ctx context.Context, db *DB, res *fetchResults) e
 	res.progress.finish()
 	slog.Info("fetch complete",
 		"new_articles", len(articles),
-		"fetched", len(snapshot)-failed,
+		"fetched", len(res.fetched)-failed,
 		"failed", failed,
 	)
 	// Alert on the outages/recoveries this cycle produced. Last, after the
 	// batch is durable: an operator's notify command must never be able to
 	// affect what got stored. WithoutCancel so a shutdown mid-summary still
 	// delivers the alert the cycle already decided to send.
-	res.notify.fire(context.WithoutCancel(ctx), snapshot)
+	fireNotify(context.WithoutCancel(ctx), res.fetched)
 	return nil
 }

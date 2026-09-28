@@ -43,9 +43,9 @@ func TestNotifyFiresOnCrossingAndRecovery(t *testing.T) {
 
 	step := func(streak int, ferr string) {
 		t.Helper()
-		state := snapshotNotify([]*Feed{ch})
+		rec := fetchedFeed{feed: ch, priorState: fetchState(ch)}
 		ch.FailStreak, ch.FetchError = streak, ferr
-		state.fire(ctx, []*Feed{ch})
+		fireNotify(ctx, []fetchedFeed{rec})
 	}
 
 	step(1, "boom") // below threshold — silent
@@ -80,19 +80,17 @@ func TestNotifyFiresOnCrossingAndRecovery(t *testing.T) {
 	}
 }
 
-// With no notify command configured the whole feature is inert — no snapshot,
-// no subprocess, no per-feed work.
+// With no notify command configured the whole feature is inert — no subprocess,
+// no per-feed work, even on a crossing that would otherwise alert.
 func TestNotifyDisabledByDefault(t *testing.T) {
 	saved := globals
 	globals = &Globals{Store: t.TempDir()}
 	t.Cleanup(func() { globals = saved })
 
-	ch := &Feed{Title: "X", FailStreak: 5}
-	state := snapshotNotify([]*Feed{ch})
-	if state != nil {
-		t.Fatal("snapshotNotify returned state with no notify command configured")
-	}
-	state.fire(ctx, []*Feed{ch}) // must not panic on the nil receiver
+	ch := &Feed{Title: "X"}
+	rec := fetchedFeed{feed: ch, priorState: fetchState(ch)}
+	ch.FailStreak = 1
+	fireNotify(ctx, []fetchedFeed{rec})
 }
 
 // Feed titles and error text are attacker-influenced: they must ride the
@@ -104,9 +102,9 @@ func TestNotifyDoesNotInterpolateFeedText(t *testing.T) {
 		URL:        "https://evil.example/f",
 		FetchError: "$(id)",
 	}
-	state := snapshotNotify([]*Feed{ch})
+	rec := fetchedFeed{feed: ch, priorState: fetchState(ch)}
 	ch.FailStreak = 1
-	state.fire(ctx, []*Feed{ch})
+	fireNotify(ctx, []fetchedFeed{rec})
 
 	got := read()
 	if len(got) != 1 {

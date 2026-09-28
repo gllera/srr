@@ -30,51 +30,31 @@ const (
 	notifyRecover notifyEvent = "recover"
 )
 
-// notifyState is the pre-fetch snapshot a cycle needs to detect transitions:
-// the failure streak each selected feed carried BEFORE this cycle ran.
-type notifyState struct {
-	prev map[int]int
-}
-
-// snapshotNotify records the pre-fetch streaks. Returns nil (and every method
-// no-ops) when no notify command is configured, so the whole feature costs one
-// nil check on the default path.
-func snapshotNotify(feeds []*Feed) *notifyState {
+// fireNotify runs the notify command for every feed that crossed the threshold
+// or recovered during this cycle, comparing each fan-out feed's streak with the
+// one its guard record captured before the fan-out (priorState). A no-op when no
+// notify command is configured, so the whole feature costs one check on the
+// default path. Warn-only: a broken notify command must never affect the fetch
+// outcome — the articles are already durable by now.
+func fireNotify(ctx context.Context, fetched []fetchedFeed) {
 	if globals.Notify == "" {
-		return nil
-	}
-	prev := make(map[int]int, len(feeds))
-	for _, ch := range feeds {
-		prev[ch.id] = ch.FailStreak
-	}
-	return &notifyState{prev: prev}
-}
-
-// fire runs the notify command for every feed that crossed the threshold or
-// recovered during this cycle. Warn-only: a broken notify command must never
-// affect the fetch outcome — the articles are already durable by now.
-func (n *notifyState) fire(ctx context.Context, feeds []*Feed) {
-	if n == nil {
 		return
 	}
 	threshold := max(globals.NotifyAfter, 1)
-	for _, ch := range feeds {
-		was, ok := n.prev[ch.id]
-		if !ok {
-			continue // added mid-cycle; nothing to compare against
-		}
+	for _, rec := range fetched {
+		ch, was := rec.feed, rec.priorState.FailStreak
 		switch {
 		case ch.FailStreak == threshold && was < threshold:
 			// The crossing itself, exactly once per outage.
-			n.run(ctx, ch, notifyFail)
+			runNotify(ctx, ch, notifyFail)
 		case ch.FailStreak == 0 && was >= threshold:
 			// Recovered from an outage we alerted about.
-			n.run(ctx, ch, notifyRecover)
+			runNotify(ctx, ch, notifyRecover)
 		}
 	}
 }
 
-func (n *notifyState) run(ctx context.Context, ch *Feed, event notifyEvent) {
+func runNotify(ctx context.Context, ch *Feed, event notifyEvent) {
 	// The notify hook is operator-global config (--notify), trusted like the
 	// srr.yaml that declares it — it gets EVERY secret scope, unlike per-feed
 	// pipe/ingest commands, whose grant is the feed's `secrets` axis.
