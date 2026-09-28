@@ -62,6 +62,8 @@ const dropdown = vi.hoisted(() => {
          b.addEventListener("click", onClick)
          return b
       },
+      // The drag handle's glyph: any element will do, the suite never reads it.
+      svgIcon: () => document.createElementNS("http://www.w3.org/2000/svg", "svg"),
    }
 })
 vi.mock("./dropdown", () => dropdown)

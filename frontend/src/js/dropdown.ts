@@ -56,6 +56,20 @@ export function btn(className: string, label: string, text: string, onClick: () 
    return b
 }
 
+// The one-path glyph an icon button wears (the player's drag handle, the
+// full-screen views' ⌄): a 24×24 viewBox, hidden from assistive tech, since
+// the button carries the accessible name.
+export function svgIcon(d: string, className?: string): SVGSVGElement {
+   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg")
+   if (className) svg.setAttribute("class", className)
+   svg.setAttribute("viewBox", "0 0 24 24")
+   svg.setAttribute("aria-hidden", "true")
+   const path = document.createElementNS("http://www.w3.org/2000/svg", "path")
+   path.setAttribute("d", d)
+   svg.append(path)
+   return svg
+}
+
 // The one URL-editor dialog body shared by the image-proxy and sync modals: a
 // URL input plus the action row — Save commits after `valid`, Disable commits
 // "" to turn the feature off (shown only when a value is currently set —

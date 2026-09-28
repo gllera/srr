@@ -1,4 +1,4 @@
-import { wrapTabFocus } from "./dropdown"
+import { btn, svgIcon, wrapTabFocus } from "./dropdown"
 
 // ── Image lightbox (RDR7) ─────────────────────────────────────────────────────
 // Content images used to be inert: a phone could pinch the whole page, and the
@@ -108,20 +108,10 @@ function ensureOverlay(): HTMLElement {
    img.alt = ""
    s.appendChild(img)
 
-   const x = document.createElement("button")
-   x.type = "button"
-   x.className = "srr-lightbox-close"
-   x.setAttribute("aria-label", "close image viewer")
+   const x = btn("srr-lightbox-close", "close image viewer", "", () => close())
    // ⌄ at the top left, the full-screen views' shared dismiss (the player's and
    // the picker's); first in the DOM so Tab order follows what is seen.
-   const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg")
-   icon.setAttribute("class", "srr-dismiss-icon")
-   icon.setAttribute("viewBox", "0 0 24 24")
-   icon.setAttribute("aria-hidden", "true")
-   const chev = document.createElementNS("http://www.w3.org/2000/svg", "path")
-   chev.setAttribute("d", "M6 9.5l6 6 6-6")
-   icon.append(chev)
-   x.append(icon)
+   x.append(svgIcon("M6 9.5l6 6 6-6", "srr-dismiss-icon"))
 
    d.append(x, s)
    // Wired once, at build time — the viewer is hidden (display:none) whenever it
@@ -130,7 +120,6 @@ function ensureOverlay(): HTMLElement {
       if (e.target === d) close() // the backdrop itself, never the card
    })
    s.addEventListener("click", onStage)
-   x.addEventListener("click", () => close())
    // Capture-phase, ahead of the stage/backdrop handlers: the click a drag's
    // finger-lift synthesizes must neither toggle the zoom nor dismiss.
    d.addEventListener(

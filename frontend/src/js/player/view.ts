@@ -3,7 +3,7 @@
 // is an effect over state.ts; the handlers only write state or call the engine
 // (and persist, at a scrub's lift).
 import * as data from "../data"
-import { bindSecondaryPress, btn } from "../dropdown"
+import { bindSecondaryPress, btn, svgIcon } from "../dropdown"
 import { el } from "../els"
 import { stampSrc } from "../fmt"
 import { prefersReducedMotion } from "../motion"
@@ -204,9 +204,19 @@ function renderList(q: readonly QueueEntry[], ci: number, paused: boolean): void
          row.className = "srr-player-row"
          if (current) row.classList.add("srr-player-row-now")
          else if (ci >= 0 && i < ci) row.classList.add("srr-player-row-played")
-         const play = document.createElement("button")
-         play.type = "button"
-         play.className = "srr-player-row-play"
+         // The current row's press is the transport's own toggle; any other
+         // row's plays it now (it stays listed).
+         const verb = current ? (paused ? "Play" : "Pause") : "Play now"
+         const play = btn(
+            "srr-player-row-play",
+            `${verb} — ${entryLabel(entry.title)} · ${data.feedTitle(entry.feedId)}`,
+            "",
+            () => {
+               if (current) toggle()
+               else playNow(entry)
+               el.playerToggle.focus()
+            },
+         )
          stampSrc(play, entry.feedId)
          const source = document.createElement("span")
          source.className = "srr-player-row-source"
@@ -215,16 +225,7 @@ function renderList(q: readonly QueueEntry[], ci: number, paused: boolean): void
          name.className = "srr-player-row-name"
          name.textContent = entryLabel(entry.title)
          play.append(source, name)
-         // The current row's press is the transport's own toggle; any other
-         // row's plays it now (it stays listed).
-         const verb = current ? (paused ? "Play" : "Pause") : "Play now"
-         play.setAttribute("aria-label", `${verb} — ${entryLabel(entry.title)} · ${data.feedTitle(entry.feedId)}`)
          if (current) play.setAttribute("aria-current", "true")
-         play.addEventListener("click", () => {
-            if (current) toggle()
-            else playNow(entry)
-            el.playerToggle.focus()
-         })
          // ✕ is for a mouse; on a touch screen it is visually hidden (kept for
          // screen readers and shown on keyboard focus) since a swipe removes.
          const remove = btn("srr-player-row-remove", `Remove from playlist — ${entryLabel(entry.title)}`, "×", () =>
@@ -291,13 +292,7 @@ function grip(row: HTMLElement, entry: QueueEntry): HTMLButtonElement {
    b.setAttribute("aria-label", `Move or remove — ${label}`)
    b.setAttribute("aria-keyshortcuts", "ArrowUp ArrowDown Delete")
    b.title = "Drag to reorder"
-   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg")
-   svg.setAttribute("viewBox", "0 0 24 24")
-   svg.setAttribute("aria-hidden", "true")
-   const path = document.createElementNS("http://www.w3.org/2000/svg", "path")
-   path.setAttribute("d", "M5 8h14M5 12h14M5 16h14")
-   svg.append(path)
-   b.append(svg)
+   b.append(svgIcon("M5 8h14M5 12h14M5 16h14"))
    b.addEventListener("keydown", (e) => {
       const delta = e.key === "ArrowUp" ? -1 : e.key === "ArrowDown" ? 1 : 0
       if (delta) {
