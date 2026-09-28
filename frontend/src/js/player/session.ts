@@ -41,7 +41,8 @@ function bindHandlers(): void {
    }
    try {
       ms.setActionHandler("seekto", (e) => {
-         if (typeof e.seekTime === "number") seekTo(e.seekTime)
+         // A fastSeek is one step of a platform scrub: save at its last step.
+         if (typeof e.seekTime === "number") seekTo(e.seekTime, !e.fastSeek)
       })
    } catch {}
 }

@@ -458,14 +458,16 @@ export function skip(delta: number): void {
    seekTo(a.media.currentTime + delta)
 }
 
-export function seekTo(t: number): void {
+// `persist` false is a scrub's per-move seek: a drag is one moment, so its lift
+// writes the blob once (view.ts) rather than every move at pointer rate.
+export function seekTo(t: number, persist = true): void {
    const a = active()
    if (!a) return
    const m = a.media
    const max = Number.isFinite(m.duration) ? m.duration : Infinity
    trySeek(m, Math.max(0, Math.min(t, max)))
    sample()
-   save()
+   if (persist) save()
 }
 
 export function cycleRate(): void {

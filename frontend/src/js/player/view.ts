@@ -1,6 +1,7 @@
 // player/view.ts — the player's own surface: the sheet (folded corner button /
 // full player), its clock and scrubber, and the Up next list. Every paint here
-// is an effect over state.ts; the handlers only write state or call the engine.
+// is an effect over state.ts; the handlers only write state or call the engine
+// (and persist, at a scrub's lift).
 import * as data from "../data"
 import { bindSecondaryPress, btn } from "../dropdown"
 import { el } from "../els"
@@ -24,6 +25,7 @@ import {
    SKIP_SECONDS,
    toggle,
 } from "./engine"
+import { save } from "./persist"
 import {
    active,
    buffering,
@@ -501,15 +503,27 @@ function attachRowSwipe(row: HTMLElement, entry: QueueEntry): void {
 // pointermove — interleaved with the clock effect's width write on the fill —
 // forced a layout on every move of the scrub.
 let seekRect: DOMRect | null = null
+// A drag's per-move seeks skip the srr-player blob write (seekTo's `persist`) —
+// a scrub is one moment, its lift — and this records that the lift owes one.
+let scrubUnsaved = false
 
-function seekFromPointer(e: PointerEvent): void {
+function seekFromPointer(e: PointerEvent, persist = true): void {
    // The element's own duration, not the last sample: a drag must never scale
    // against a length the next timeupdate has not reported yet.
    const dur = active()?.media.duration ?? NaN
    if (!Number.isFinite(dur) || dur <= 0) return
    const r = seekRect ?? el.playerSeek.getBoundingClientRect()
    if (r.width <= 0) return
-   seekTo(((e.clientX - r.left) / r.width) * dur)
+   seekTo(((e.clientX - r.left) / r.width) * dur, persist)
+   if (!persist) scrubUnsaved = true
+}
+
+// The drag is over: drop the held box and save the position the scrub left.
+function endScrub(): void {
+   seekRect = null
+   if (!scrubUnsaved) return
+   scrubUnsaved = false
+   save()
 }
 
 function bindSeek(): void {
@@ -521,13 +535,10 @@ function bindSeek(): void {
    })
    el.playerSeek.addEventListener("pointermove", (e) => {
       // buttons is a bitmask: nonzero means a button is still held (a drag).
-      if (e.buttons) seekFromPointer(e)
-      else seekRect = null // the drag ended somewhere we never saw the lift
+      if (e.buttons) seekFromPointer(e, false)
+      else endScrub() // the drag ended somewhere we never saw the lift
    })
-   for (const ev of ["pointerup", "pointercancel"] as const)
-      el.playerSeek.addEventListener(ev, () => {
-         seekRect = null
-      })
+   for (const ev of ["pointerup", "pointercancel"] as const) el.playerSeek.addEventListener(ev, endScrub)
    // stopPropagation beside every preventDefault — the dialog discipline
    // dropdown.ts / search-ui.ts / lightbox.ts already spell out, applied to a
    // control instead of a modal. The seek bar is a tabindex=0 role=slider DIV,
