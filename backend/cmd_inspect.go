@@ -63,7 +63,7 @@ func (o *InspectCmd) Run() error {
 		defer cleanup()
 	}
 
-	core, err := loadCore(fetch)
+	core, err := loadStore(fetch)
 	if err != nil {
 		return err
 	}
@@ -135,7 +135,7 @@ func (o *InspectCmd) openFetcher(ctx context.Context) (keyGetter, func(), error)
 // cacheManifests memoizes manifest bodies for ONE inspect run. --validate
 // walks the same K-generation window three separate times — the M2 hole scan,
 // the orphan reachability set and the chron-permanence check — and reads the
-// current manifest again on top of the one loadCore already fetched, so on an
+// current manifest again on top of the one loadStore already fetched, so on an
 // --url store that is ~60 redundant GET+gunzip round-trips at the default K.
 //
 // Sound because manifest names are write-once and never reused (M3): inside a
@@ -197,14 +197,6 @@ func httpFetcher(ctx context.Context, base string) keyGetter {
 		}
 		return data, nil
 	}
-}
-
-// loadCore resolves the store root exactly as the writer does — one resolver
-// (root.go loadStore), so the checker can never disagree with the writer about
-// what a store's objects are called. It range-checks the addressing integers on
-// the way through (validateCore).
-func loadCore(fetch keyGetter) (*DBCore, error) {
-	return loadStore(fetch)
 }
 
 func loadDataPack(fetch keyGetter, key string) ([]ArticleData, error) {

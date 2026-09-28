@@ -10,7 +10,7 @@ import (
 )
 
 // buildCoreGz encodes a hostile store state as a gzip-compressed manifest
-// blob, suitable for use as a fake keyGetter in loadCore tests.
+// blob, suitable for use as a fake keyGetter in loadStore tests.
 func buildCoreGz(t *testing.T, man Manifest) []byte {
 	t.Helper()
 	raw, err := json.Marshal(man)
@@ -29,7 +29,7 @@ func buildCoreGz(t *testing.T, man Manifest) []byte {
 }
 
 // fakeFetcher returns a keyGetter serving a minimal v3 root plus the manifest
-// it names, and "not found" for any other key, so loadCore tests never reach
+// it names, and "not found" for any other key, so loadStore tests never reach
 // loadIdxPacks.
 func fakeFetcher(manGz []byte) keyGetter {
 	return func(key string) ([]byte, error) {
@@ -43,11 +43,11 @@ func fakeFetcher(manGz []byte) keyGetter {
 	}
 }
 
-// B8: a db.gz with total_art < 0 must be rejected by loadCore with a clear
-// error — without panicking. Before the fix, loadCore returns nil error and
+// B8: a db.gz with total_art < 0 must be rejected by loadStore with a clear
+// error — without panicking. Before the fix, loadStore returns nil error and
 // the corrupt core reaches loadIdxPacks → parseIdxPack with a negative
-// packSize → makeslice panic. After the fix, loadCore itself returns an error.
-func TestLoadCoreRejectsNegativeTotalArticles(t *testing.T) {
+// packSize → makeslice panic. After the fix, loadStore itself returns an error.
+func TestLoadStoreRejectsNegativeTotalArticles(t *testing.T) {
 	man := Manifest{
 		Version:             dbFormatVersion,
 		Num:                 1,
@@ -56,7 +56,7 @@ func TestLoadCoreRejectsNegativeTotalArticles(t *testing.T) {
 		Names:               newManifestNames(),
 	}
 	gz := buildCoreGz(t, man)
-	_, err := loadCore(fakeFetcher(gz))
+	_, err := loadStore(fakeFetcher(gz))
 	if err == nil {
 		t.Fatal("expected error for negative total_art, got nil")
 	}
@@ -65,12 +65,12 @@ func TestLoadCoreRejectsNegativeTotalArticles(t *testing.T) {
 	}
 }
 
-// B11: a db.gz with a feed id >= feedIDCeiling must be rejected by loadCore
+// B11: a db.gz with a feed id >= feedIDCeiling must be rejected by loadStore
 // with a clear error — without allocating a ~4 GB ownFeedCounts slice.
-// Before the fix, loadCore returns nil error; the hostile id passes through
+// Before the fix, loadStore returns nil error; the hostile id passes through
 // feedSlots → parseIdxPack, which allocates make([]uint32, id+1). After the
-// fix, loadCore rejects the id before any pack loading.
-func TestLoadCoreRejectsOversizedFeedID(t *testing.T) {
+// fix, loadStore rejects the id before any pack loading.
+func TestLoadStoreRejectsOversizedFeedID(t *testing.T) {
 	oversized := feedIDCeiling + 1 // e.g. 65537 — beyond the u16 ceiling
 	man := Manifest{
 		Version:             dbFormatVersion,
@@ -81,7 +81,7 @@ func TestLoadCoreRejectsOversizedFeedID(t *testing.T) {
 		Feeds:               map[int]FeedPublic{oversized: {URL: "https://example.com/x"}},
 	}
 	gz := buildCoreGz(t, man)
-	_, err := loadCore(fakeFetcher(gz))
+	_, err := loadStore(fakeFetcher(gz))
 	if err == nil {
 		t.Fatal("expected error for feed id >= feedIDCeiling, got nil")
 	}

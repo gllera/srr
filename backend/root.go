@@ -279,7 +279,8 @@ func errFutureFormat(key string, v int) error {
 // returns the in-memory core, INCLUDING its object-name table. It is the single
 // root resolver: NewDB and the read-only tools (`srr inspect`, `srr art`)
 // both go through it, so the writer and the checkers can never disagree about
-// what a store's objects are called.
+// what a store's objects are called. It range-checks the addressing integers
+// on the way through (validateCore).
 //
 // The returned core carries no configuration for a v3 store — that lives in
 // config.gz, which only the callers that need it read (NewDB always; inspect

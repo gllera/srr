@@ -988,7 +988,7 @@ func TestWatchRosterAdoptedOnIdleCycle(t *testing.T) {
 
 // TestInspectValidateCLIPathReadsConfigSidecar exercises the ACTUAL CLI entry
 // point — InspectCmd.Run(), through openFetcher's real NewDB(ctx, false) →
-// loadCore → root.go's loadStore/parseStoreRoot reconstruction — rather than
+// root.go's loadStore/parseStoreRoot reconstruction — rather than
 // calling checkWatchNames/checkManifest directly against an already-open
 // *DB's core (what TestCheckWatchNames above does). That distinction is the
 // whole bug: parseStoreRoot builds a brand-new DBCore straight from db.gz +
@@ -1057,9 +1057,9 @@ func TestCheckManifestSkipsWatchOnFutureConfigSidecar(t *testing.T) {
 		return gunzip(bytes.NewReader(raw))
 	}
 
-	core, err := loadCore(fetch)
+	core, err := loadStore(fetch)
 	if err != nil {
-		t.Fatalf("loadCore: %v", err)
+		t.Fatalf("loadStore: %v", err)
 	}
 	var buf bytes.Buffer
 	issues := (&InspectCmd{out: &buf}).checkManifest(fetch, core)
@@ -1105,9 +1105,9 @@ func TestCheckManifestCorruptConfigSidecarReportsOnce(t *testing.T) {
 		}
 		return gunzip(bytes.NewReader(raw))
 	}
-	core, err := loadCore(fetch)
+	core, err := loadStore(fetch)
 	if err != nil {
-		t.Fatalf("loadCore: %v", err)
+		t.Fatalf("loadStore: %v", err)
 	}
 
 	var buf bytes.Buffer
@@ -1141,9 +1141,9 @@ func TestCheckManifestLeavesCoreConfigUntouched(t *testing.T) {
 		}
 		return gunzip(bytes.NewReader(raw))
 	}
-	core, err := loadCore(fetch)
+	core, err := loadStore(fetch)
 	if err != nil {
-		t.Fatalf("loadCore: %v", err)
+		t.Fatalf("loadStore: %v", err)
 	}
 	before, err := json.Marshal(core.StoreConfig)
 	if err != nil {
