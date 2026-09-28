@@ -18,9 +18,9 @@ export interface SSEEvent {
    data: unknown
 }
 
-// ApiError carries the HTTP status of a failed api() call, so callers can tell
-// "the API answered and said no" (401/403/409/…) from "nothing that looks like
-// the API answered at all" — see apiLooksMissing below.
+// ApiError carries the HTTP status of a failed api() or streamSSE() call, so
+// callers can tell "the API answered and said no" (401/403/409/…) from "nothing
+// that looks like the API answered at all" — see apiLooksMissing below.
 export class ApiError extends Error {
    constructor(
       message: string,
@@ -102,11 +102,11 @@ export const apiGet = (p: string): Promise<unknown> => api("GET", p)
 // streamSSE POSTs to path and invokes onEvent({event, data}) for each SSE
 // frame; an optional AbortSignal cancels the stream (and, server-side, the
 // fetch cycle it drives — the handler runs under the request context). A
-// pre-stream failure raises through the SAME envelope api() uses, 409 lock
-// affordance included — see errorMessage above.
+// pre-stream failure raises the SAME ApiError api() does, from the same
+// envelope, 409 lock affordance included — see errorMessage above.
 export async function streamSSE(path: string, onEvent: (ev: SSEEvent) => void, signal?: AbortSignal): Promise<void> {
    const res = await fetch(path, { method: "POST", signal })
-   if (!res.ok) throw new Error(errorMessage(res, await res.text()))
+   if (!res.ok) throw new ApiError(errorMessage(res, await res.text()), res.status)
    const reader = res.body!.getReader()
    const dec = new TextDecoder()
    let buf = ""

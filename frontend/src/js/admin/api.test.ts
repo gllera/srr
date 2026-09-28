@@ -4,11 +4,11 @@
 // from "the API is there and it said no" (401/403 — an expired forward-auth
 // session — and 409 — the fetch loop holds the store lock), because store.ts's
 // boot() only appends the "needs `srr serve`" hint in the former case; in the
-// latter it would mislead. api() itself must throw an ApiError carrying the
-// HTTP status so that classification is possible at all.
+// latter it would mislead. api() and streamSSE() must throw an ApiError
+// carrying the HTTP status so that classification is possible at all.
 
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { api, apiLooksMissing, ApiError } from "./api"
+import { api, apiLooksMissing, ApiError, streamSSE } from "./api"
 
 afterEach(() => {
    vi.unstubAllGlobals()
@@ -39,5 +39,17 @@ describe("api()", () => {
          message: "not found",
       })
       await expect(api("GET", "/api/missing")).rejects.toBeInstanceOf(ApiError)
+   })
+})
+
+describe("streamSSE()", () => {
+   it("rejects a pre-stream failure with the same ApiError api() raises", async () => {
+      vi.stubGlobal(
+         "fetch",
+         vi.fn(async () => ({ ok: false, status: 409, text: async () => JSON.stringify({ error: "store locked" }) })),
+      )
+      const err = await streamSSE("/api/fetch", () => {}).catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(ApiError)
+      expect(err).toMatchObject({ status: 409, message: "store locked" })
    })
 })
