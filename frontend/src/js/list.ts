@@ -1168,6 +1168,9 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    const savedSet = savedNow()
 
    const rows = chronsDesc.map((c) => rowEl(c, null, seen, savedSet)) // skeletons, in order
+   // The immediate anchor (reader return, or a split pane's cold build beside an
+   // open article — see the settle below); landOnceMode is its anchored complement.
+   const immediate = anchoredMid && anchorNow
    // A split pane built cold beside an open article (a reload of a `#pos` link)
    // takes the immediate anchor below, which scrolls onto rows whose heights are
    // still settling and follows the seed frame by frame — every one of those
@@ -1177,7 +1180,7 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    // until the settle commits, so it appears once, already on its row. The narrow
    // reader return keeps painting as it goes: there the list IS the page, and a
    // blank page reads worse than a settling one.
-   if (anchoredMid && anchorNow && isSplit()) veil(my)
+   if (immediate && isSplit()) veil(my)
    mountRows(rows)
 
    // Position the surface, then hand it over (interactive) before the fills land.
@@ -1197,7 +1200,7 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    // a landing computed for the OLD anchor: it must yield to followCursor instead
    // of overwriting it (the checkpoints below compare against this).
    const armedChron = nav.currentChron()
-   if (anchoredMid && anchorNow) scrollChronToView(seed)
+   if (immediate) scrollChronToView(seed)
    else sc.to(0)
    notifyScroll()
    userScrolled = false
@@ -1228,7 +1231,7 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
       if (my !== tok || !pendingFill.length) return
       pinHeights(pendingFill.splice(0))
       relabelDividers()
-      if (anchoredMid && anchorNow) reassertAnchor(seed)
+      if (immediate) reassertAnchor(seed)
    }
    const anchorIdx = chronsDesc.indexOf(seed)
    const fillOrder = chronsDesc.map((_, k) => k).sort((a, b) => Math.abs(a - anchorIdx) - Math.abs(b - anchorIdx))
@@ -1248,7 +1251,7 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    // pinHeights — before the land-once measurement below).
    if (pendingFill.length) pinHeights(pendingFill.splice(0))
    relabelDividers()
-   if (anchoredMid && anchorNow) reassertAnchor(seed)
+   if (immediate) reassertAnchor(seed)
 
    // Both anchored modes finish by CONVERGING THE MEASUREMENT over frames:
    // content-visibility rows paint taller and web fonts reflow AFTER the fill,
@@ -1270,7 +1273,6 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    //   FOLLOWS the target each frame it moves, keeping the row in view.
    // Anything else (the newest-default -1) has nothing to land: the observer is
    // already live (started above), so this is the whole of render's tail.
-   const immediate = anchoredMid && anchorNow
    if (!landOnceMode && !immediate) return
    const allRows = (): HTMLElement[] => (rowsEl ? [...rowsEl.querySelectorAll<HTMLElement>("a.srr-row")] : [])
    const commit = (): void => {
