@@ -99,9 +99,6 @@ const isCacheable = (res: Response): boolean => res.ok && res.type !== "opaque"
 // purge the home store's packs. The URLs are never fetched — just cache keys.
 const metaManKey = (mid: string): string => `https://srr.invalid/${mid}/manifest`
 const metaNamesKey = (mid: string): string => `https://srr.invalid/${mid}/names`
-// The pre-multi-store GLOBAL keys, upgraded to the home root's on first activate.
-const LEGACY_MAN_KEY = "https://srr.invalid/manifest"
-const LEGACY_NAMES_KEY = "https://srr.invalid/names"
 
 // Deployment root, e.g. "/srr/" or "/srr.tmp/" (or "/" in e2e) — so we never touch
 // a sibling deployment sharing the origin.
@@ -213,13 +210,12 @@ sw.addEventListener("install", () => {
 })
 
 sw.addEventListener("activate", (event) => {
-   // Drop caches left by older versions, upgrade the pre-multi-store META keys,
-   // enable navigation preload, then control open clients right away.
+   // Drop caches left by older versions, enable navigation preload, then
+   // control open clients right away.
    event.waitUntil(
       caches
          .keys()
          .then((keys) => Promise.all(keys.filter((k) => !KEEP.has(k)).map((k) => caches.delete(k))))
-         .then(() => upgradeMetaKeys())
          // Navigation preload: without it, a cold start pays for BOOTING this
          // worker before the shell request even leaves — the worker is on the
          // critical path of the navigation it exists to speed up. With it the
@@ -234,27 +230,6 @@ sw.addEventListener("activate", (event) => {
          .then(() => sw.clients.claim()),
    )
 })
-
-// One-shot on first activation after S38 (§5.6): the last-adopted-generation
-// record was a single GLOBAL META entry; it becomes per-root. Copy the legacy
-// global keys to the HOME root's (mid "0") entries and delete the originals.
-// Skipping this would make the first boot read the home store's adopted
-// generation as 0, decide the store changed, and purge the PACKS bucket — every
-// user's offline copies, for no reason.
-async function upgradeMetaKeys(): Promise<void> {
-   try {
-      const cache = await openCache(META)
-      for (const legacy of [LEGACY_MAN_KEY, LEGACY_NAMES_KEY]) {
-         const hit = await cache.match(legacy)
-         if (!hit) continue
-         const dst = legacy === LEGACY_MAN_KEY ? metaManKey("0") : metaNamesKey("0")
-         if (!(await cache.match(dst))) await cache.put(dst, hit.clone())
-         await cache.delete(legacy)
-      }
-   } catch {
-      // best-effort — a failed upgrade at worst costs one home-store re-purge
-   }
-}
 
 // A pinnable name is either a write-once pack name (parsePackName) or a
 // content-hash asset key (RE_ASSET): the page's packNamesForFilter enumerates
