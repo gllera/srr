@@ -17,7 +17,7 @@
 // profile: a phone's large text synced onto a 27" monitor is a worse default
 // than the monitor's own.
 import { READING_KEY } from "./keys"
-import { lsGet, lsSet } from "./storage"
+import { lsJson, lsSet } from "./storage"
 
 export type Width = "narrow" | "normal" | "wide"
 export type Leading = "compact" | "normal" | "relaxed"
@@ -47,13 +47,8 @@ const oneOf = <T extends string>(v: unknown, table: Record<T, string>, fallback:
 // whatever it does not validly carry — a device-local convenience must never
 // break a render.
 export function readPrefs(): ReadingPrefs {
-   let raw: Record<string, unknown> = {}
-   try {
-      const parsed: unknown = JSON.parse(lsGet(READING_KEY) || "{}")
-      if (parsed && typeof parsed === "object") raw = parsed as Record<string, unknown>
-   } catch {
-      /* corrupt → defaults */
-   }
+   const parsed = lsJson(READING_KEY) // absent or corrupt → defaults
+   const raw = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {}
    const size = typeof raw.size === "number" && Number.isInteger(raw.size) ? raw.size : DEFAULT_SIZE
    return {
       size: Math.min(SIZES.length - 1, Math.max(0, size)),

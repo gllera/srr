@@ -17,6 +17,7 @@
 // snapshot, refreshed by `sample()` from the claimed element's own events.
 import { computed, shallowEqual, signal } from "../signals"
 import { PLAYER_RATE_KEY } from "../keys"
+import { lsGet } from "../storage"
 
 export interface PlayerDeps {
    // The title button — jump to the article that owns the active media.
@@ -143,7 +144,7 @@ export const pausedNow = computed(() => (active() ? playback().paused : true))
 export const RATES = [1, 1.25, 1.5, 2]
 
 export function readRate(): number {
-   const raw = Number(localStorage.getItem(PLAYER_RATE_KEY))
+   const raw = Number(lsGet(PLAYER_RATE_KEY))
    // Only a value actually on the ladder is honoured — a hand-edited 0 or NaN
    // would otherwise freeze or crash playback.
    return RATES.includes(raw) ? raw : 1

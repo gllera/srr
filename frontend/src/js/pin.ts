@@ -9,6 +9,7 @@
 // mount passes its own mid and keeps a separate registry.
 
 import { HOME_MID, pinsKey } from "./keys"
+import { lsJson, lsSet } from "./storage"
 
 export interface PinEntry {
    names: string[]
@@ -16,37 +17,26 @@ export interface PinEntry {
 }
 
 function loadRegistry(mid: string): Map<string, PinEntry> {
-   try {
-      const raw = localStorage.getItem(pinsKey(mid))
-      if (!raw) return new Map()
-      const obj = JSON.parse(raw) as unknown
-      if (typeof obj !== "object" || obj === null || Array.isArray(obj)) return new Map()
-      const map = new Map<string, PinEntry>()
-      for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
-         if (
-            typeof v === "object" &&
-            v !== null &&
-            !Array.isArray(v) &&
-            Array.isArray((v as Record<string, unknown>).names) &&
-            typeof (v as Record<string, unknown>).ts === "number"
-         ) {
-            map.set(k, v as PinEntry)
-         }
+   const obj = lsJson(pinsKey(mid))
+   const map = new Map<string, PinEntry>()
+   if (typeof obj !== "object" || obj === null || Array.isArray(obj)) return map
+   for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+      if (
+         typeof v === "object" &&
+         v !== null &&
+         !Array.isArray(v) &&
+         Array.isArray((v as Record<string, unknown>).names) &&
+         typeof (v as Record<string, unknown>).ts === "number"
+      ) {
+         map.set(k, v as PinEntry)
       }
-      return map
-   } catch {
-      return new Map()
    }
+   return map
 }
 
+// Best-effort: a quota error drops the write (lsSet swallows it).
 function saveRegistry(map: Map<string, PinEntry>, mid: string): void {
-   try {
-      const obj: Record<string, PinEntry> = {}
-      for (const [k, v] of map) obj[k] = v
-      localStorage.setItem(pinsKey(mid), JSON.stringify(obj))
-   } catch {
-      // quota errors — best-effort
-   }
+   lsSet(pinsKey(mid), JSON.stringify(Object.fromEntries(map)))
 }
 
 export function pinFilter(key: string, names: string[], mid = HOME_MID): void {

@@ -1,19 +1,27 @@
-// storage.ts — the shared localStorage shapes: the JSON integer-set (★ Saved,
-// the picker's ★ Favorites) and the per-key ordering-timestamp map (the LWW
-// seam profile.ts merges srr-seen-ts / srr-saved-ts by). A LEAF module
-// (imports nothing), like keys.ts — which stays names-only on purpose.
+// storage.ts — the shared localStorage shapes: the tolerant JSON read, the JSON
+// integer-set (★ Saved, the picker's ★ Favorites) and the number map (srr-seen,
+// and the per-key ordering-timestamp maps profile.ts merges srr-seen-ts /
+// srr-saved-ts by). A LEAF module (imports nothing), like keys.ts — which stays
+// names-only on purpose.
 
-// A JSON integer array under `key`, as a Set. Absent, corrupt or throwing
-// storage (private mode, disabled by policy) reads as empty — these are
-// device-local conveniences and must never be able to break a render.
-export function readIdSet(key: string): Set<number> {
+// The JSON value under `key`, or undefined when it is absent, corrupt, or the
+// storage throws (private mode, disabled by policy). Each caller checks the
+// shape it wants: these are device-local conveniences and must never be able
+// to break a render.
+export function lsJson(key: string): unknown {
+   const raw = lsGet(key)
+   if (!raw) return undefined
    try {
-      const raw = localStorage.getItem(key)
-      const arr: unknown = raw ? JSON.parse(raw) : []
-      return new Set(Array.isArray(arr) ? arr.filter((n): n is number => Number.isInteger(n)) : [])
+      return JSON.parse(raw)
    } catch {
-      return new Set()
+      return undefined
    }
+}
+
+// A JSON integer array under `key`, as a Set; anything else reads as empty.
+export function readIdSet(key: string): Set<number> {
+   const arr = lsJson(key)
+   return new Set(Array.isArray(arr) ? arr.filter((n): n is number => Number.isInteger(n)) : [])
 }
 
 export function writeIdSet(key: string, ids: Set<number>): void {
@@ -25,22 +33,23 @@ export function writeIdSet(key: string, ids: Set<number>): void {
    }
 }
 
+// A JSON object map under `key`; anything that is not a plain object (absent,
+// corrupt, an array, null) reads as {}. Its values are the caller's to trust or
+// clean (profile.ts's strict readers drop a malformed entry key by key).
+export function readNumMap(key: string): Record<string, number> {
+   const map = lsJson(key)
+   return map !== null && typeof map === "object" && !Array.isArray(map) ? (map as Record<string, number>) : {}
+}
+
 // Stamp `ids` at NOW (unix seconds) in the ordering map under `key` — the
 // unix-second that lets sync order a key's latest local action against other
 // devices (profile.ts's per-key LWW). A corrupt map is replaced rather than
 // crashed on; a device that cannot stamp degrades to the blob-level ordering.
 export function stampTsMap(key: string, ids: readonly (string | number)[]): void {
-   try {
-      const raw = localStorage.getItem(key)
-      const parsed: unknown = raw ? JSON.parse(raw) : {}
-      const map =
-         parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-            ? (parsed as Record<string, number>)
-            : {}
-      const now = Math.floor(Date.now() / 1000)
-      for (const id of ids) map[id] = now
-      localStorage.setItem(key, JSON.stringify(map))
-   } catch {}
+   const map = readNumMap(key)
+   const now = Math.floor(Date.now() / 1000)
+   for (const id of ids) map[id] = now
+   lsSet(key, JSON.stringify(map))
 }
 
 // The raw string get/set, best-effort like everything else here: storage that

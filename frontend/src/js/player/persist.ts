@@ -6,7 +6,7 @@
 import * as data from "../data"
 import { isRelative, resolvePackRelative } from "../fmt"
 import { playerStateKey } from "../keys"
-import { lsSet } from "../storage"
+import { lsJson, lsSet } from "../storage"
 import { arrayEqual, diffed } from "../signals"
 import { URL_DENY } from "../urlish"
 import { active, cursor, entryKey, mediaKind, QUEUE_MAX, queue, RATES, ratePref, type QueueEntry } from "./state"
@@ -156,14 +156,7 @@ export interface SavedState {
 }
 
 export function readSaved(store: { mid: string; base: URL }): SavedState | null {
-   let saved: Persisted
-   try {
-      const raw = localStorage.getItem(playerStateKey(store.mid))
-      if (!raw) return null
-      saved = JSON.parse(raw) as Persisted
-   } catch {
-      return null
-   }
+   const saved = lsJson(playerStateKey(store.mid)) as Persisted | undefined
    if (!saved || typeof saved !== "object") return null
    const q = Array.isArray(saved.queue)
       ? saved.queue

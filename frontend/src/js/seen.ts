@@ -13,7 +13,7 @@ import { seenKey, seenTsKey } from "./keys"
 import * as model from "./model"
 import { feedIdOf } from "./route"
 import { onChange } from "./signals"
-import { stampTsMap } from "./storage"
+import { readNumMap, stampTsMap } from "./storage"
 import * as sync from "./sync"
 
 // The seen map's key grammar, owned HERE with the shape it indexes: one
@@ -50,12 +50,7 @@ export function readSeen(): Record<string, number> {
 // picker's store rollup tallies a NON-active store's frontier). This module
 // owns the localStorage shape, so the parse lives here, never at a caller.
 export function readSeenFor(mid: string): Record<string, number> {
-   try {
-      const raw = localStorage.getItem(seenKey(mid))
-      return raw ? JSON.parse(raw) : {}
-   } catch {
-      return {}
-   }
+   return readNumMap(seenKey(mid))
 }
 
 // Persist a mutated seen map and stamp the per-key ordering timestamps
@@ -557,8 +552,7 @@ export function pruneSeen() {
       }
       // The per-key ordering timestamps shadow the seen map — any st key whose
       // seen entry is gone (pruned above, or never existed) is dead weight too.
-      const rawSt = localStorage.getItem(seenTsK())
-      const st: Record<string, number> = rawSt ? JSON.parse(rawSt) : {}
+      const st = readNumMap(seenTsK())
       let stChanged = false
       for (const key of Object.keys(st))
          if (seen[key] === undefined) {

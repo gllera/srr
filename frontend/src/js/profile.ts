@@ -73,7 +73,7 @@ import {
 } from "./mounts"
 import * as model from "./model"
 import { batch, shallowEqual } from "./signals"
-import { lsGet, lsSet, readIdSet } from "./storage"
+import { lsGet, lsJson, lsSet, readIdSet, readNumMap } from "./storage"
 import { isValidHttpish, normalizeHttpish } from "./urlish"
 
 // The portable profile is the HOME store's device state (the blob's top-level
@@ -88,7 +88,7 @@ const PROFILE_TS_KEY = profileTsKey(HOME_MID)
 // serves both the top-level fields and every peer substate.
 
 function readSeen(): Record<string, number> {
-   return parseAny(lsGet(SEEN_KEY)) as Record<string, number>
+   return readNumMap(SEEN_KEY)
 }
 
 // The per-key seen timestamps (srr-seen-ts): unix-second of each seen key's
@@ -96,7 +96,7 @@ function readSeen(): Record<string, number> {
 // == 0 == "no ordering information" (pre-upgrade state) — merges fall back to
 // the legacy raise-only max for it.
 function readSeenTs(): Record<string, number> {
-   return parseAny(lsGet(SEEN_TS_KEY)) as Record<string, number>
+   return readNumMap(SEEN_TS_KEY)
 }
 
 // Parse an incoming st-shaped value (a blob's `st` field) into a clean map;
@@ -135,7 +135,7 @@ function readSavedOrder(mid = HOME_MID): number[] {
 // an un-save on device B are indistinguishable at merge time and the blob-level
 // `ts` silently drops whichever device's blob was older.
 function readSavedTs(mid = HOME_MID): Record<string, number> {
-   return cleanTsMap(parseAny(lsGet(savedTsKey(mid))))
+   return cleanTsMap(lsJson(savedTsKey(mid)))
 }
 
 // Tombstone cap. A MEMBER's stamp is never dropped (it is what defends a save
@@ -463,8 +463,8 @@ interface StoreSubstate {
 // Read one mount's substate from its namespaced keys (seen@mid / st@mid /
 // saved@mid / profile-ts@mid). Returns null when the store holds nothing local.
 function readSubstate(mid: string): StoreSubstate | null {
-   const seen = parseMap(lsGet(seenKey(mid)))
-   const st = cleanTsMap(parseAny(lsGet(seenTsKey(mid))))
+   const seen = coerceNumMap(lsJson(seenKey(mid)))
+   const st = cleanTsMap(lsJson(seenTsKey(mid)))
    const saved = readSavedOrder(mid)
    const ts = posInt(lsGet(profileTsKey(mid)))
    if (Object.keys(seen).length === 0 && saved.length === 0 && ts === 0) return null
@@ -482,16 +482,6 @@ export function coerceNumMap(o: unknown): Record<string, number> {
    return out
 }
 
-function parseMap(raw: string): Record<string, number> {
-   return coerceNumMap(parseAny(raw))
-}
-function parseAny(raw: string): unknown {
-   try {
-      return raw ? JSON.parse(raw) : {}
-   } catch {
-      return {}
-   }
-}
 // Merge one incoming peer substate into a mount's namespaced keys, by the SAME
 // rules as the home store: seen+st per-key LWW (mergeSeenMid) and saved+sd
 // through the shared mergeSaved (per-key LWW over the blob-level base, or the
@@ -517,13 +507,13 @@ function mergeSubstate(mid: string, sub: unknown, mode: "merge" | "sync"): boole
 }
 
 // mergeSeenMid is mergeSeen for a mount id's namespaced keys — the same
-// mergeSeenInto adopt loop, but over the strict readers (parseMap/cleanTsMap
+// mergeSeenInto adopt loop, but over the strict readers (coerceNumMap/cleanTsMap
 // drop malformed entries key by key rather than degrading the whole map).
 function mergeSeenMid(mid: string, incoming: unknown, incomingTs: Record<string, number>): boolean {
    try {
       if (incoming === null || typeof incoming !== "object" || Array.isArray(incoming)) return false
-      const existing = parseMap(lsGet(seenKey(mid)))
-      const existingTs = cleanTsMap(parseAny(lsGet(seenTsKey(mid))))
+      const existing = coerceNumMap(lsJson(seenKey(mid)))
+      const existingTs = cleanTsMap(lsJson(seenTsKey(mid)))
       const { changed, tsChanged } = mergeSeenInto(
          existing,
          existingTs,
