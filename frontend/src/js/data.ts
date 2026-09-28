@@ -746,8 +746,9 @@ async function fetchDeltas(store: Store): Promise<IArticle[]> {
 //
 // An in-place rebuild needs no signal of its own — it writes NEW names, so it
 // moves `m` like everything else, which is exactly what retired `gen`. The SW's
-// checkManifest rides this same response, reconciling its cache before our
-// subsequent pack refetches.
+// manifest reconciliation rides this same response: it caches manifest/<m>.gz
+// before answering, then evicts only objects neither this generation nor the
+// previous one names, so it never races our subsequent pack refetches.
 export async function refresh(store: Store = active): Promise<"unchanged" | "updated"> {
    const snap = await loadDb(store)
    const raw = snap.db

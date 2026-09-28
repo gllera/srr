@@ -501,7 +501,7 @@ every cycle; `srr inspect --validate` reports either while it lasts.
 LANE itself — reading a plane through the `wf`/`wc` coverage gate and offering
 it as a filter. Everything under it is in place: `names.ts` looks series up by
 name and so ignores an extra one safely, the SW's route regex already matches
-`watch/<stem>.gz` via `PACK_SERIES_KINDS`, and `sw.ts`'s `checkManifest` now
+`watch/<stem>.gz` via `PACK_SERIES_KINDS`, and `sw.ts`'s `readAdoptable` now
 DERIVES its live set from the manifest's names map (`names.ts listedNames`)
 rather than spelling out `idx/data/meta/deltas/hsum/ssum` — so a cached
 `watch/` object survives manifest adoption, as will any series added later.

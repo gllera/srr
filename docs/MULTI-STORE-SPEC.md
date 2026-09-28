@@ -392,8 +392,8 @@ everything that *counts* or *evicts*:
 
 ### 5.4 Per-root GC mirroring
 
-`checkManifest` runs off a db.gz response; that response now belongs to a
-specific root. Everything it does becomes root-scoped:
+`readAdoptable`/`adoptManifest` run off a db.gz response; that response now
+belongs to a specific root. Everything they do becomes root-scoped:
 
 - `GEN_KEY`/`SEQ_KEY`/`MAN_KEY` → `https://srr.invalid/<mid>/{gen,seq,manifest}`.
 - Every purge and prune filters cached keys by that root's prefix — a peer's
@@ -543,7 +543,7 @@ reader fetches: `db.gz`, `manifest/*`, `idx/*`, `data/*`, `meta/*`, `assets/*`.
 |---|---|
 | `Access-Control-Allow-Origin` | The reader origin (or `*` for a public store with `cred:false`). With `cred:true` it **must** be the exact origin — `*` is illegal with credentials. |
 | `Access-Control-Allow-Credentials: true` | Required iff the mount is `cred:true`. |
-| `Access-Control-Expose-Headers: ETag` | **Recommended.** `ETag` is *not* CORS-safelisted, so without this the SW's `validator()` shortcut in `dbNetworkFirst` silently degrades to `Last-Modified` (which *is* safelisted). Not fatal — `checkManifest` is best-effort and falls through to the full parse — but it costs a gunzip on every poll. |
+| `Access-Control-Expose-Headers: ETag` | **Recommended.** `ETag` is *not* CORS-safelisted, so without this the SW's `validator()` shortcut in `dbNetworkFirst` silently degrades to `Last-Modified` (which *is* safelisted). Not fatal — `readAdoptable` is best-effort and falls through to the full parse — but it costs a gunzip on every poll. |
 
 Every reader request is a **simple** GET (no custom headers), so **no preflight
 is involved** — and the design keeps it that way deliberately (§7.3).

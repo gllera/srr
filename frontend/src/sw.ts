@@ -13,7 +13,7 @@
 //      bytes later → cache-first, unconditionally. Only `db.gz` is mutable →
 //      network-first (offline → last cached). The article series are bounded
 //      per series (enforceCacheBounds), lowest-stem (oldest) evicted first;
-//      everything else is reconciled against the manifest (checkManifest).
+//      everything else is reconciled against the manifest (adoptManifest).
 //   shell  (srr-shell-vN)   the app itself: the `/…/` navigation + content-hashed
 //                           JS/CSS. Runtime-cached (no build-time manifest — keeps
 //                           this SW hand-written and zero-dep). Hashed JS/CSS are
@@ -446,7 +446,7 @@ async function navigationResponse(req: Request, event: FetchEvent): Promise<Resp
 const ASSET_KEEP = 500 // self-hosted images/files: order of ~100 MB at typical sizes
 
 // Only the ARTICLE series are rolling-window bounded, and each carries BOTH its
-// budgets in one row: a series absent from this table is owned by checkManifest
+// budgets in one row: a series absent from this table is owned by adoptManifest
 // instead (`manifest` and `seen` are reconciled against what the adopted
 // generation names — the `seen` sidecar is never fetched by the reader at all,
 // its series exists here only so the route grammar knows it). One table rather
@@ -550,7 +550,8 @@ async function readMetaNames(key: string): Promise<string[]> {
 
 // The two halves of that reconciliation, split so the periodic warm can put
 // work BETWEEN them (cache the new generation's objects before adopting it).
-// The fetch path composes them back together immediately below, unchanged.
+// The fetch path (dbNetworkFirst) runs them back to back, the write half off
+// the response the page is waiting on.
 interface Adoptable {
    m: number
    // Lazy: only the 12-hourly periodic warm resolves this. The fetch path adopts
@@ -634,27 +635,24 @@ async function adoptManifest(root: Root, a: Adoptable): Promise<void> {
    ])
 }
 
-async function checkManifest(dbRes: Response, root: Root): Promise<void> {
-   try {
-      const a = await readAdoptable(dbRes, root)
-      if (a) await adoptManifest(root, a)
-   } catch {
-      // best-effort — leave caches as-is
-   }
-}
-
-// db.gz gets its own network-first variant that awaits the manifest check
-// BEFORE resolving: the page awaits db.gz (data.ts init) before requesting
-// any idx pack, so a purge that completes first is race-free. Offline (fetch
-// threw) the check is unreachable — correct, there is no new gen/seq to
-// discover and the cached db.gz/pack pair stays mutually consistent.
+// db.gz gets its own network-first variant, which splits the reconciliation
+// around its response. The READ half is awaited, so manifest/<m>.gz is cached
+// before the page — which asks for it next — gets db.gz. The WRITE half
+// (adoptManifest's PACKS walk, evictions and META record) runs after the
+// response, under waitUntil: every name is write-once, so it deletes only
+// objects named by neither the new generation nor the previous one, and the
+// page reading the new generation requests none of those; a put landing after
+// its keys() snapshot is never deleted either. (Awaiting it dates from names
+// reused with new bytes, when a purge had to land before the page's fetches.)
+// Offline (fetch threw) there is nothing to reconcile — no new generation to
+// discover, and the cached db.gz/pack pair stays mutually consistent.
 //
 // validator: an unchanged ETag/Last-Modified against the cached copy means
-// unchanged bytes — same gen/seq/hdrs/mp — so the common no-change load
+// unchanged bytes — the same root pointer `m` — so the common no-change load
 // skips the gunzip+parse (and the redundant cache.put) on the boot critical
 // path; the await stays a cheap header compare. No validator (or a changed
-// one) falls through to the full check. checkManifest is best-effort anyway,
-// so trusting the validator weakens nothing.
+// one) falls through to the full check. The reconciliation is best-effort
+// anyway, so trusting the validator weakens nothing.
 function validator(r: Response): string | null {
    return r.headers.get("etag") ?? r.headers.get("last-modified")
 }
@@ -666,17 +664,18 @@ async function dbNetworkFirst(req: Request, event: FetchEvent, root: Root): Prom
       if (isCacheable(res)) {
          const v = validator(res)
          const prev = v ? await cache.match(req) : undefined
+         let a: Adoptable | null = null
          if (!prev || validator(prev) !== v) {
             cache.put(req, res.clone())
-            await checkManifest(res, root)
+            // Best-effort: a failed read leaves the caches as they are.
+            a = await readAdoptable(res, root).catch(() => null)
          }
-         // Size backstop rides the same online-db.gz signal (the packs bucket
-         // grows from archive navigation even when db.gz is unchanged), but
-         // off the critical path — the page is waiting on this response.
-         // waitUntil keeps the worker alive; new puts after the keys()
-         // snapshot are never deleted, so it can't race the page's pack
-         // fetches.
-         event.waitUntil(enforceCacheBounds())
+         // The adoption (see above), then the size backstop, which rides the
+         // same online-db.gz signal (the packs bucket grows from archive
+         // navigation even when db.gz is unchanged) and likewise never deletes
+         // a put made after its keys() snapshot. waitUntil keeps the worker
+         // alive for both.
+         event.waitUntil((a ? adoptManifest(root, a) : Promise.resolve()).catch(() => {}).then(enforceCacheBounds))
       }
       return res
    } catch (err) {
