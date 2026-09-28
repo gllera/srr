@@ -63,9 +63,8 @@ func printFieldNamed(v reflect.Value, name string) bool {
 }
 
 // printFields prints each field as "name: value", optionally annotated with the
-// env var that sets it. envName derives that name per field (the kong env: tag
-// for globals, the derived SRR_<SCHEME>_<FIELD> for backend configs); pass nil
-// to print values only.
+// env var that sets it. envName derives that name per field (globalEnvName for
+// the globals); pass nil to print values only, as the backend sections do.
 func printFields(v reflect.Value, indent string, envName func(reflect.StructField) string) {
 	t := v.Type()
 	for i := range t.NumField() {

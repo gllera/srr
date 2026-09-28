@@ -194,23 +194,6 @@ func TestGlobalEnvName(t *testing.T) {
 	}
 }
 
-// Backend env names are the conventional SRR_<SCHEME>_<FIELD> derivation by
-// construction, so they always match the expected name and are suppressed.
-func TestBackendEnvNameFor(t *testing.T) {
-	type cfg struct {
-		Region    string `yaml:"region"`
-		AccessKey string `yaml:"access-key-id"`
-		NoTag     string ``
-	}
-	tt := reflect.TypeOf(cfg{})
-	envName := backendEnvNameFor("s3")
-	for _, i := range []int{0, 1, 2} {
-		if got := envName(tt.Field(i)); got != "" {
-			t.Errorf("backendEnvNameFor(s3)(%s) = %q, want \"\" (conventional)", tt.Field(i).Name, got)
-		}
-	}
-}
-
 // maskSecret must render an unset (nil/empty) secret map as empty, and any
 // populated one as the fixed placeholder — never the values (the http backend's
 // secret-tagged `headers` map rides the no-arg print through it).

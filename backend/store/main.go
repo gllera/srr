@@ -418,8 +418,8 @@ func LoadConfigs(data []byte) error {
 // backend config field — the scheme and the field's yaml key upper-cased with
 // dashes turned to underscores — or "" for a field with no yaml tag. It is the
 // single source of truth for the backend env-override grammar: loadEnv reads
-// this key, and `srr config` derives it the same way (via cmd_config.go) to
-// detect — and omit — the conventional name, so the two can never drift.
+// this key, and because it is always that conventional derivation `srr config`
+// never needs to annotate a backend field with it.
 func EnvName(scheme string, f reflect.StructField) string {
 	tag, _, _ := strings.Cut(f.Tag.Get("yaml"), ",")
 	if tag == "" {
@@ -428,12 +428,11 @@ func EnvName(scheme string, f reflect.StructField) string {
 	return "SRR_" + strings.ToUpper(scheme) + "_" + strings.ToUpper(strings.ReplaceAll(tag, "-", "_"))
 }
 
-// loadEnv overrides config fields with SRR_<SCHEME>_<FIELD> env vars (the names
-// `srr config` prints — see EnvName). Returns an error when an override is
-// present for a field it can't apply — a malformed int, or a field kind with no
-// override support — so the "env beats YAML" invariant can never silently fail
-// to apply (e.g. a new int field that would otherwise be YAML-settable but
-// un-overridable by env).
+// loadEnv overrides config fields with SRR_<SCHEME>_<FIELD> env vars (see
+// EnvName). Returns an error when an override is present for a field it can't
+// apply — a malformed int, or a field kind with no override support — so the
+// "env beats YAML" invariant can never silently fail to apply (e.g. a new int
+// field that would otherwise be YAML-settable but un-overridable by env).
 func loadEnv(scheme string, cfg any) error {
 	v := reflect.ValueOf(cfg).Elem()
 	t := v.Type()

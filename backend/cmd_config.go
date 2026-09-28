@@ -18,16 +18,12 @@ type ConfigCmd struct {
 	Key string `arg:"" optional:"" help:"Config key to print (omit for all)."`
 }
 
-// expectedEnv is the conventional env-var name for a field shown as `name`
-// under `scheme` (empty for globals): SRR_[<SCHEME>_]<SCREAMING_SNAKE(name)>.
-// It mirrors store.EnvName's grammar so cmd_config can tell whether an env name
-// is mechanically derivable from the displayed field name.
-func expectedEnv(scheme, name string) string {
-	env := "SRR_"
-	if scheme != "" {
-		env += strings.ToUpper(scheme) + "_"
-	}
-	return env + strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+// expectedEnv is the conventional env-var name for a global shown as `name`:
+// SRR_<SCREAMING_SNAKE(name)>. It mirrors store.EnvName's grammar (less the
+// scheme) so cmd_config can tell whether an env name is mechanically derivable
+// from the displayed field name.
+func expectedEnv(name string) string {
+	return "SRR_" + strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
 }
 
 // globalEnvName returns the env var that sets a global flag (its kong env: tag),
@@ -35,28 +31,10 @@ func expectedEnv(scheme, name string) string {
 // is no need to print what the reader can derive. A hand-rolled tag that breaks
 // the convention is still returned so it stays visible.
 func globalEnvName(f reflect.StructField) string {
-	return unlessConventional("", f, f.Tag.Get("env"))
-}
-
-// backendEnvNameFor returns a per-field env-name deriver for a backend config
-// section, bound to scheme. store.EnvName (the name store.loadEnv reads) is the
-// conventional SRR_<SCHEME>_<FIELD> derivation by construction, so it always
-// matches expectedEnv and is suppressed — backend env names are never printed.
-func backendEnvNameFor(scheme string) func(reflect.StructField) string {
-	return func(f reflect.StructField) string {
-		return unlessConventional(scheme, f, store.EnvName(scheme, f))
+	if env := f.Tag.Get("env"); env != expectedEnv(fieldName(f)) {
+		return env
 	}
-}
-
-// unlessConventional drops an env name the reader can derive from the field
-// name itself, keeping a hand-rolled one that breaks the convention visible.
-// The two derivers differ only in where the raw name comes from — a kong tag
-// or store.EnvName — so the suppression rule lives here once.
-func unlessConventional(scheme string, f reflect.StructField, env string) string {
-	if env == expectedEnv(scheme, fieldName(f)) {
-		return ""
-	}
-	return env
+	return ""
 }
 
 // printSecretScope prints one scope's secrets, sorted by name, with values
@@ -87,9 +65,12 @@ func (o *ConfigCmd) Run() error {
 
 	if o.Key == "" {
 		printFields(gv, "", globalEnvName)
+		// Backend sections carry no env annotation: store.EnvName is the
+		// conventional SRR_<SCHEME>_<FIELD> derivation by construction, so there
+		// is never a deviating name to show.
 		for _, scheme := range schemes {
 			fmt.Printf("%s:\n", scheme)
-			printFields(reflect.ValueOf(cfgs[scheme]).Elem(), "  ", backendEnvNameFor(scheme))
+			printFields(reflect.ValueOf(cfgs[scheme]).Elem(), "  ", nil)
 		}
 		if len(secrets) > 0 {
 			fmt.Println("secrets:")
@@ -128,7 +109,7 @@ func (o *ConfigCmd) Run() error {
 	// A whole backend section by scheme ("s3"), then a single field ("s3.region"),
 	// both resolved against the registry rather than the active store's scheme.
 	if cfg, ok := cfgs[o.Key]; ok {
-		printFields(reflect.ValueOf(cfg).Elem(), "", backendEnvNameFor(o.Key))
+		printFields(reflect.ValueOf(cfg).Elem(), "", nil)
 		return nil
 	}
 
