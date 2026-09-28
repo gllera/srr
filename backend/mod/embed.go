@@ -253,13 +253,12 @@ func embedBandcamp(parts []string) (embedTarget, bool) {
 // embedReplacement builds the <p> that stands in for the iframe: optional
 // linked thumbnail, then a labelled text link. html.Render escapes values.
 func embedReplacement(t embedTarget, label string) *html.Node {
-	p := &html.Node{Type: html.ElementNode, Data: "p", DataAtom: atom.P}
+	p := newElem(atom.P)
 	if t.thumb != "" {
 		a := embedAnchor(t.link)
-		a.AppendChild(&html.Node{Type: html.ElementNode, Data: "img", DataAtom: atom.Img,
-			Attr: []html.Attribute{{Key: "src", Val: t.thumb}, {Key: "alt", Val: label}}})
+		a.AppendChild(newElem(atom.Img, html.Attribute{Key: "src", Val: t.thumb}, html.Attribute{Key: "alt", Val: label}))
 		p.AppendChild(a)
-		p.AppendChild(&html.Node{Type: html.ElementNode, Data: "br", DataAtom: atom.Br})
+		p.AppendChild(newElem(atom.Br))
 	}
 	a := embedAnchor(t.link)
 	a.AppendChild(&html.Node{Type: html.TextNode, Data: "▶ " + label})
@@ -268,6 +267,5 @@ func embedReplacement(t embedTarget, label string) *html.Node {
 }
 
 func embedAnchor(link string) *html.Node {
-	return &html.Node{Type: html.ElementNode, Data: "a", DataAtom: atom.A,
-		Attr: []html.Attribute{{Key: "href", Val: link}}}
+	return newElem(atom.A, html.Attribute{Key: "href", Val: link})
 }

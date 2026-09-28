@@ -44,7 +44,7 @@ func parseBodyHTML(content string) *html.Node {
 	if err != nil {
 		return nil
 	}
-	body := &html.Node{Type: html.ElementNode, Data: "body", DataAtom: atom.Body}
+	body := newElem(atom.Body)
 	for _, n := range nodes {
 		if n.Parent != nil {
 			n.Parent.RemoveChild(n)
@@ -52,6 +52,12 @@ func parseBodyHTML(content string) *html.Node {
 		body.AppendChild(n)
 	}
 	return body
+}
+
+// newElem builds a detached element node. Data is derived from the atom, so
+// the two can never disagree the way a hand-written literal lets them.
+func newElem(a atom.Atom, attrs ...html.Attribute) *html.Node {
+	return &html.Node{Type: html.ElementNode, Data: a.String(), DataAtom: a, Attr: attrs}
 }
 
 // renderBodyHTML renders body's children back to an HTML string. ok=false on

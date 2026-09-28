@@ -100,23 +100,20 @@ func prependEnclosures(raw RawFeedItem, body *html.Node) bool {
 		}
 	}
 
-	block := &html.Node{Type: html.ElementNode, Data: "body", DataAtom: atom.Body}
+	block := newElem(atom.Body)
 	wrap := func(el *html.Node) {
-		p := &html.Node{Type: html.ElementNode, Data: "p", DataAtom: atom.P}
+		p := newElem(atom.P)
 		p.AppendChild(el)
 		block.AppendChild(p)
 	}
 	if img != nil {
-		wrap(&html.Node{Type: html.ElementNode, Data: "img", DataAtom: atom.Img,
-			Attr: []html.Attribute{{Key: "src", Val: img.url}}})
+		wrap(newElem(atom.Img, html.Attribute{Key: "src", Val: img.url}))
 	}
 	if vid != nil {
-		wrap(&html.Node{Type: html.ElementNode, Data: "video", DataAtom: atom.Video,
-			Attr: []html.Attribute{{Key: "controls", Val: ""}, {Key: "src", Val: vid.url}}})
+		wrap(newElem(atom.Video, html.Attribute{Key: "controls", Val: ""}, html.Attribute{Key: "src", Val: vid.url}))
 	}
 	if aud != nil {
-		wrap(&html.Node{Type: html.ElementNode, Data: "audio", DataAtom: atom.Audio,
-			Attr: []html.Attribute{{Key: "controls", Val: ""}, {Key: "src", Val: aud.url}}})
+		wrap(newElem(atom.Audio, html.Attribute{Key: "controls", Val: ""}, html.Attribute{Key: "src", Val: aud.url}))
 	}
 	if block.FirstChild == nil {
 		return false

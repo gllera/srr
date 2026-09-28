@@ -89,11 +89,7 @@ func RewriteAttrs(content string, fn func(marker string) (string, bool, error)) 
 // ParseBodyFragment parses content as an HTML body fragment. Callers treat a
 // parse failure as "leave the content alone" — published content is immutable.
 func ParseBodyFragment(content string) ([]*html.Node, error) {
-	return html.ParseFragment(strings.NewReader(content), &html.Node{
-		Type:     html.ElementNode,
-		Data:     "body",
-		DataAtom: atom.Body,
-	})
+	return html.ParseFragment(strings.NewReader(content), newElem(atom.Body))
 }
 
 // VisitAssetAttrs calls fn on each attribute in the assetAttrs
