@@ -274,6 +274,26 @@ func loadIdxPacks(fetch keyGetter, core *DBCore) ([]*idxPack, []ArticleData, err
 	return out, deltas, nil
 }
 
+// loadIdxPack fetches and parses the idx pack at position p — the one-pack
+// read the writer's chron walks (walkArticles, resolveOutWindow) take as they
+// go. The pack's PHYSICAL entry count comes from idxKeyAndSize and rides the
+// result as packSize.
+func loadIdxPack(fetch keyGetter, core *DBCore, p, slots int) (*idxPack, error) {
+	key, size, err := idxKeyAndSize(core, p)
+	if err != nil {
+		return nil, err
+	}
+	buf, err := fetch(key)
+	if err != nil {
+		return nil, err
+	}
+	pack, err := parseIdxPack(buf, p, size, slots)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", key, err)
+	}
+	return pack, nil
+}
+
 // parseIdxPack is the byte-for-byte mirror of
 // frontend/src/js/idx.ts makeIdxPack().parse(). The BYTES are decoded by the
 // generated idxDecode (idx_layout.gen.go, emitted from the one layout

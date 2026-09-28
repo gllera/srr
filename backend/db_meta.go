@@ -143,19 +143,11 @@ func (o *DB) walkArticles(ctx context.Context, from, to int, fn func(chron int, 
 	cur := newDataPackCursor(o)
 	for pto := min(to, tc); from < pto; {
 		p := from / idxPackSize
-		key, size, err := idxKeyAndSize(c, p)
+		pack, err := loadIdxPack(o.fetcher(ctx), c, p, slots)
 		if err != nil {
 			return err
 		}
-		buf, err := o.readGz(ctx, key)
-		if err != nil {
-			return err
-		}
-		pack, err := parseIdxPack(buf, p, size, slots)
-		if err != nil {
-			return fmt.Errorf("parse %s: %w", key, err)
-		}
-		for end := min(pto, p*idxPackSize+size); from < end; from++ {
+		for end := min(pto, p*idxPackSize+pack.packSize); from < end; from++ {
 			packID, off := pack.getPackRef(from)
 			ad, err := cur.at(ctx, from, packID, off)
 			if err != nil {

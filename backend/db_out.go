@@ -524,20 +524,12 @@ func (o *DB) resolveOutWindow(ctx context.Context, include map[int]bool, limit i
 		if skip(p) {
 			continue
 		}
-		key, size, err := idxKeyAndSize(c, p)
+		pack, err := loadIdxPack(o.fetcher(ctx), c, p, slots)
 		if err != nil {
 			return nil, err
-		}
-		buf, err := o.readGz(ctx, key)
-		if err != nil {
-			return nil, err
-		}
-		pack, err := parseIdxPack(buf, p, size, slots)
-		if err != nil {
-			return nil, fmt.Errorf("parse %s: %w", key, err)
 		}
 		base := p * idxPackSize
-		for i := min(size, tc-base) - 1; i >= 0 && len(out) < limit; i-- {
+		for i := min(pack.packSize, tc-base) - 1; i >= 0 && len(out) < limit; i-- {
 			chron := base + i
 			if !live(chron, int(pack.feedIDs[i])) {
 				continue
