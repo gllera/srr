@@ -136,6 +136,17 @@ export interface Store extends StoreContext {
    bgRefresh: boolean
 }
 
+// The per-snapshot parse caches: sized here once, for makeStore and for
+// applyDb, which recreates them wholesale on every snapshot swap.
+function freshCaches() {
+   return {
+      dataCache: makeLRU<Promise<IArticle[]>>(20),
+      metaCache: makeLRU<Promise<IMetaWire[]>>(20),
+      watchCache: makeLRU<Promise<WatchPlane>>(8),
+      groupCache: {} as Partial<Record<"active" | "all", GroupResult>>,
+   }
+}
+
 function makeStore(ctx: StoreContext): Store {
    const s = {
       ...ctx,
@@ -149,10 +160,7 @@ function makeStore(ctx: StoreContext): Store {
       deltaLoad: Promise.resolve([] as IArticle[]),
       slots: 1,
       expiredCounts: new Uint32Array(0),
-      dataCache: makeLRU<Promise<IArticle[]>>(20),
-      metaCache: makeLRU<Promise<IMetaWire[]>>(20),
-      watchCache: makeLRU<Promise<WatchPlane>>(8),
-      groupCache: {} as Partial<Record<"active" | "all", GroupResult>>,
+      ...freshCaches(),
       manifests: makeLRU<Promise<IManifestWire>>(1),
       bgRefresh: false,
    }
@@ -539,10 +547,7 @@ async function applyDb(store: Store, snap: Snapshot): Promise<void> {
    store.expiredCounts = new Uint32Array(store.slots)
    for (const ch of Object.values(store.db.feeds)) store.expiredCounts[ch.id] = ch.xp ?? 0
 
-   store.dataCache = makeLRU<Promise<IArticle[]>>(20)
-   store.metaCache = makeLRU<Promise<IMetaWire[]>>(20)
-   store.watchCache = makeLRU<Promise<WatchPlane>>(8)
-   store.groupCache = {}
+   Object.assign(store, freshCaches())
    // Reset idxFetches with the other derived caches — BEFORE the empty-store
    // early return — so a re-run against a total_art===0 store can never leave it
    // undefined for a later data path (nf===0 here, so this is makeLRU(1)).
