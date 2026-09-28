@@ -12,7 +12,14 @@
 // hash, the title, the save button) and the two cross-surface follow-ups (the
 // frontier-undo offer, the unread badge) arrive through ReaderDeps, so the
 // module graph stays acyclic with app.ts at the top.
-import { buildContent, mediaList, paintMasthead, stampContentHost, type ArticleRefs } from "./article-view"
+import {
+   buildContent,
+   mediaList,
+   paintMasthead,
+   stampContentHost,
+   whenMetadata,
+   type ArticleRefs,
+} from "./article-view"
 import { makeLRU } from "./cache"
 import * as data from "./data"
 import { el } from "./els"
@@ -278,20 +285,16 @@ function restoreMediaState(mid: string, chron: number): void {
    mediaList(el.content).forEach((m, i) => {
       const s = saved[i]
       if (!s || s.time <= 0) return
-      // currentTime is only settable once the element knows its duration;
-      // before that the assignment is dropped (or throws in some engines).
-      const apply = () => {
+      // Until the element knows its metadata the restore is only QUEUED, and
+      // pendingRestore is what lets a harvest in between report it.
+      if (m.readyState < HTMLMediaElement.HAVE_METADATA) pendingRestore.set(m, s)
+      whenMetadata(m, () => {
          pendingRestore.delete(m)
          try {
             m.currentTime = s.time
             m.playbackRate = s.rate
          } catch {}
-      }
-      if (m.readyState >= HTMLMediaElement.HAVE_METADATA) apply()
-      else {
-         pendingRestore.set(m, s)
-         m.addEventListener("loadedmetadata", apply, { once: true })
-      }
+      })
    })
 }
 

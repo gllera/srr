@@ -4,7 +4,7 @@
 // It writes state (state.ts) and never paints: every surface re-derives from
 // those writes through the effects the other player modules register. Multi-atom
 // updates run in batch() so the effects see one consistent state, once.
-import { mediaList } from "../article-view"
+import { mediaList, whenMetadata } from "../article-view"
 import * as data from "../data"
 import { el } from "../els"
 import { PLAYER_RATE_KEY } from "../keys"
@@ -107,6 +107,15 @@ function releaseOutgoing(): void {
    const outgoingAdopted = a !== null && !el.content.contains(a.media)
    release()
    if (outgoingAdopted) discardAdopted()
+}
+
+// A currentTime write that may not land: before metadata it is not settable
+// (dropped, or thrown in some engines). seekTo cannot wait for metadata; the
+// restore path covers its miss.
+function trySeek(m: HTMLMediaElement, t: number): void {
+   try {
+      m.currentTime = t
+   } catch {}
 }
 
 // The tail every claim ends with, whatever route reached it (a queued in-content
@@ -232,11 +241,7 @@ function onError(): void {
             "loadedmetadata",
             () => {
                if (active() !== a) return
-               if (t > 0) {
-                  try {
-                     m.currentTime = t
-                  } catch {}
-               }
+               if (t > 0) trySeek(m, t)
                // collapseBrokenMedia hid an in-content <video> on the same
                // error event; a working retry earns the frame back.
                m.classList.remove("srr-broken")
@@ -311,17 +316,13 @@ export function playEntry(entry: QueueEntry, autoplay: boolean): boolean {
 function resumeRemembered(m: HTMLMediaElement, entry: QueueEntry): void {
    const pos = deps().readPosition(entry.mid, entry.chron, entry.index)
    if (!pos || !(pos.time > 0)) return
-   const apply = (): void => {
-      const dur = m.duration
-      if (Number.isFinite(dur) && pos.time >= dur - RESUME_END_S) return
-      try {
-         m.currentTime = pos.time
-      } catch {}
-   }
    // currentTime is only settable once metadata is known (the FEB2 pattern) —
    // and the end guard needs the duration anyway.
-   if (m.readyState >= 1) apply()
-   else m.addEventListener("loadedmetadata", apply, { once: true })
+   whenMetadata(m, () => {
+      const dur = m.duration
+      if (Number.isFinite(dur) && pos.time >= dur - RESUME_END_S) return
+      trySeek(m, pos.time)
+   })
 }
 
 // Is there an entry AFTER the current one? (With no current entry, the whole
@@ -454,11 +455,7 @@ export function seekTo(t: number): void {
    if (!a) return
    const m = a.media
    const max = Number.isFinite(m.duration) ? m.duration : Infinity
-   try {
-      m.currentTime = Math.max(0, Math.min(t, max))
-   } catch {
-      // currentTime is not settable before metadata; the restore path covers it.
-   }
+   trySeek(m, Math.max(0, Math.min(t, max)))
    sample()
    save()
 }
@@ -586,15 +583,11 @@ export function restorePersisted(): void {
    }
    const seek = (m: HTMLMediaElement): void => {
       if (head.rate !== null) m.playbackRate = head.rate
-      const apply = (): void => {
-         try {
-            m.currentTime = head.time
-         } catch {}
+      // A live in-content element may already know its metadata.
+      whenMetadata(m, () => {
+         trySeek(m, head.time)
          sample()
-      }
-      // HAVE_METADATA. A live in-content element may already be past it.
-      if (m.readyState >= 1) apply()
-      else m.addEventListener("loadedmetadata", apply, { once: true })
+      })
    }
 
    // The persisted episode's OWN article may already be on screen — and that is

@@ -25,6 +25,15 @@ export function mediaList(root: ParentNode): HTMLMediaElement[] {
    return [...root.querySelectorAll<HTMLMediaElement>("audio,video")]
 }
 
+// Run `fn` once a media element knows its metadata — now if it already does,
+// else at its `loadedmetadata`. currentTime is only settable from then on (before
+// it the write is dropped, or throws in some engines) and the duration arrives
+// with it, so FEB2's restore and the player's seeks all wait on this one gate.
+export function whenMetadata(m: HTMLMediaElement, fn: () => void): void {
+   if (m.readyState >= HTMLMediaElement.HAVE_METADATA) fn()
+   else m.addEventListener("loadedmetadata", fn, { once: true })
+}
+
 // The nodes one article surface owns. The real reader passes its `el` refs; the
 // pager passes the ones it built. Same shape, same classes, same CSS.
 export interface ArticleRefs {
