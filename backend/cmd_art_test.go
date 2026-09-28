@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"compress/gzip"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -516,19 +515,7 @@ func artDropLastRecord(t *testing.T, db *DB) {
 	if len(lines) < 2 {
 		t.Fatalf("latest data pack holds %d record(s); the fixture must keep the newest article here", len(lines))
 	}
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	for _, l := range lines[:len(lines)-1] {
-		if _, err := gz.Write(l); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := gz.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
-		t.Fatalf("rewrite latest data pack: %v", err)
-	}
+	rewriteGz(t, path, bytes.Join(lines[:len(lines)-1], nil))
 }
 
 // TestArtListMissingRecord pins the deliberate asymmetry between the two

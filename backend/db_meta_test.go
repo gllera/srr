@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -602,17 +601,7 @@ func TestSyncMetaTailCountMismatchRebuilds(t *testing.T) {
 
 	// Overwrite that tail with a single line so its count (1) disagrees with the
 	// stale MetaTail (2), tripping the count-mismatch rebuild.
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	if _, err := gz.Write([]byte(`{"f":1,"w":1,"t":"stale"}` + "\n")); err != nil {
-		t.Fatal(err)
-	}
-	if err := gz.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, tailK(c, metaSeries)), buf.Bytes(), 0o644); err != nil {
-		t.Fatalf("corrupt tail: %v", err)
-	}
+	rewriteGz(t, filepath.Join(dir, tailK(c, metaSeries)), []byte(`{"f":1,"w":1,"t":"stale"}`+"\n"))
 	metaTailMemo.reset() // force the GET path — this test covers the count-mismatch rebuild
 
 	if err := db.SyncMeta(ctx, nil); err != nil {
@@ -644,21 +633,11 @@ func TestWalkArticlesRejectsTruncatedDataPack(t *testing.T) {
 
 	// Rewrite the latest data pack to hold only 1 entry while idx still promises
 	// 2, so chron 1 resolves to an offset past the data pack.
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
 	line, err := jsonEncode(&ArticleData{FeedID: 1, FetchedAt: 1700000000, Published: 1000, Title: "A1", Content: "c1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := gz.Write(line); err != nil {
-		t.Fatal(err)
-	}
-	if err := gz.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, tailK(c, dataSeries)), buf.Bytes(), 0o644); err != nil {
-		t.Fatalf("corrupt data pack: %v", err)
-	}
+	rewriteGz(t, filepath.Join(dir, tailK(c, dataSeries)), line)
 
 	err = db.walkArticles(ctx, 0, c.TotalArticles, func(int, *ArticleData) error { return nil })
 	if err == nil || !strings.Contains(err.Error(), "beyond data pack") {

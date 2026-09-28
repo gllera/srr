@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -110,15 +109,9 @@ func decompressGz(t *testing.T, path string) []byte {
 	if err != nil {
 		t.Fatalf("ReadFile(%s): %v", path, err)
 	}
-	reader, err := gzip.NewReader(bytes.NewReader(data))
+	content, err := gunzip(bytes.NewReader(data))
 	if err != nil {
-		t.Fatalf("gzip.NewReader: %v", err)
-	}
-	defer reader.Close()
-
-	content, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatalf("ReadAll: %v", err)
+		t.Fatalf("gunzip %s: %v", path, err)
 	}
 	return content
 }
@@ -826,15 +819,7 @@ func TestNewDBRejectsUrllessFeed(t *testing.T) {
 
 	// Legacy shape: feed carries feeds[] but no top-level url.
 	legacy := `{"feeds":{"1":{"title":"Old","feeds":[{"url":"http://example.com/feed"}],"total_art":0,"add_idx":0}}}`
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	if _, err := gz.Write([]byte(legacy)); err != nil {
-		t.Fatalf("gzip write: %v", err)
-	}
-	gz.Close()
-	if err := os.WriteFile(filepath.Join(dir, "db.gz"), buf.Bytes(), 0o644); err != nil {
-		t.Fatalf("write db.gz: %v", err)
-	}
+	writeLegacyDB(t, dir, legacy)
 
 	_, err := NewDB(ctx, false)
 	if err == nil {
@@ -969,11 +954,7 @@ func TestDBNullFeedsInJSON(t *testing.T) {
 	testGlobals(t, Globals{Store: dir})
 
 	core := `{"fetched_at":0,"total_art":0,"next_pid":0,"pack_off":0,"feeds":null}` + "\n"
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	gz.Write([]byte(core))
-	gz.Close()
-	os.WriteFile(filepath.Join(dir, "db.gz"), buf.Bytes(), 0644)
+	rewriteGz(t, filepath.Join(dir, "db.gz"), []byte(core))
 
 	db, err := NewDB(ctx, false)
 	if err != nil {
@@ -1033,11 +1014,7 @@ func TestDBOpenCorruptedGzipValidInner(t *testing.T) {
 	dir := t.TempDir()
 	testGlobals(t, Globals{Store: dir})
 
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	gz.Write([]byte("{invalid json"))
-	gz.Close()
-	os.WriteFile(filepath.Join(dir, "db.gz"), buf.Bytes(), 0644)
+	rewriteGz(t, filepath.Join(dir, "db.gz"), []byte("{invalid json"))
 
 	_, err := NewDB(ctx, false)
 	if err == nil {
@@ -1050,13 +1027,7 @@ func TestReadGzReturnsDecompressedBytes(t *testing.T) {
 
 	// Write a gzip blob via the backend so we exercise the same path
 	// readGz uses to read it back.
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	gz.Write([]byte("hello readGz"))
-	gz.Close()
-	if err := os.WriteFile(filepath.Join(dir, "blob.gz"), buf.Bytes(), 0o644); err != nil {
-		t.Fatalf("write blob: %v", err)
-	}
+	rewriteGz(t, filepath.Join(dir, "blob.gz"), []byte("hello readGz"))
 
 	got, err := db.readGz(ctx, "blob.gz")
 	if err != nil {
@@ -1124,15 +1095,7 @@ func TestNewDBSeedsDefaultRecipe(t *testing.T) {
 // gzip path, so tests can hand NewDB a hand-built (e.g. pre-recipes) db.gz.
 func writeLegacyDB(t *testing.T, dir, jsonStr string) {
 	t.Helper()
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	if _, err := gz.Write([]byte(jsonStr)); err != nil {
-		t.Fatalf("gzip write: %v", err)
-	}
-	gz.Close()
-	if err := os.WriteFile(filepath.Join(dir, "db.gz"), buf.Bytes(), 0o644); err != nil {
-		t.Fatalf("write db.gz: %v", err)
-	}
+	rewriteGz(t, filepath.Join(dir, "db.gz"), []byte(jsonStr))
 }
 
 func TestNewDBLegacyPipeIngest(t *testing.T) {

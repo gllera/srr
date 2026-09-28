@@ -2,10 +2,8 @@ package main
 
 import (
 	"bytes"
-	"compress/gzip"
 	"encoding/json"
 	"fmt"
-	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -17,16 +15,8 @@ import (
 
 func readManifest(t *testing.T, dir string, m int) Manifest {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(dir, manifestKey(m)))
-	if err != nil {
-		t.Fatalf("read manifest %d: %v", m, err)
-	}
-	gz, err := gzip.NewReader(bytes.NewReader(raw))
-	if err != nil {
-		t.Fatalf("manifest %d gzip: %v", m, err)
-	}
 	var man Manifest
-	if err := json.NewDecoder(gz).Decode(&man); err != nil {
+	if err := json.Unmarshal(decompressGz(t, filepath.Join(dir, manifestKey(m))), &man); err != nil {
 		t.Fatalf("manifest %d decode: %v", m, err)
 	}
 	return man
@@ -155,12 +145,7 @@ func TestManifestMirrorsDBCoreState(t *testing.T) {
 		t.Errorf("feed public fields missing from manifest: %+v", f)
 	}
 	// ...and its config half is not, anywhere in the bytes.
-	raw, err := os.ReadFile(filepath.Join(dir, manifestKey(core.ManifestNum)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	gz, _ := gzip.NewReader(bytes.NewReader(raw))
-	body, _ := io.ReadAll(gz)
+	body := decompressGz(t, filepath.Join(dir, manifestKey(core.ManifestNum)))
 	for _, leaked := range []string{`"recipe"`, `"pipe"`, `"dd"`, `"dt"`, `"ingest"`} {
 		if bytes.Contains(body, []byte(leaked)) {
 			t.Errorf("manifest leaks backend-only config key %s: %s", leaked, body)
@@ -766,11 +751,7 @@ func TestConfigSidecarWrittenOnConfigChangeOnly(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		gz, err := gzip.NewReader(bytes.NewReader(raw))
-		if err != nil {
-			return nil, err
-		}
-		return io.ReadAll(gz)
+		return gunzip(bytes.NewReader(raw))
 	})
 	if err != nil {
 		t.Fatal(err)

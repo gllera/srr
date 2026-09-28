@@ -2,9 +2,7 @@ package main
 
 import (
 	"bytes"
-	"compress/gzip"
 	"encoding/binary"
-	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -13,19 +11,11 @@ import (
 // blob, suitable for use as a fake keyGetter in loadStore tests.
 func buildCoreGz(t *testing.T, man Manifest) []byte {
 	t.Helper()
-	raw, err := json.Marshal(man)
+	gz, err := gzipJSON(man)
 	if err != nil {
-		t.Fatalf("json.Marshal: %v", err)
+		t.Fatalf("gzipJSON: %v", err)
 	}
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	if _, err := gz.Write(raw); err != nil {
-		t.Fatalf("gz.Write: %v", err)
-	}
-	if err := gz.Close(); err != nil {
-		t.Fatalf("gz.Close: %v", err)
-	}
-	return buf.Bytes()
+	return gz
 }
 
 // fakeFetcher returns a keyGetter serving a minimal v3 root plus the manifest

@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1087,17 +1086,7 @@ func TestCheckManifestCorruptConfigSidecarReportsOnce(t *testing.T) {
 	watchSet(t, db, "two", "title=/two/")
 	watchPut(t, db, f, "hit a", "miss", "two b")
 
-	var gz bytes.Buffer
-	zw := gzip.NewWriter(&gz)
-	if _, err := zw.Write([]byte("{not json")); err != nil {
-		t.Fatalf("gzip: %v", err)
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatalf("gzip: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, configFileKey), gz.Bytes(), 0o644); err != nil {
-		t.Fatalf("overwrite %s: %v", configFileKey, err)
-	}
+	rewriteGz(t, filepath.Join(dir, configFileKey), []byte("{not json"))
 	fetch := func(key string) ([]byte, error) {
 		raw, err := os.ReadFile(filepath.Join(dir, key))
 		if err != nil {

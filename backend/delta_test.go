@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"compress/gzip"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -512,18 +511,16 @@ func TestDeltaByteCapForcesConsolidation(t *testing.T) {
 }
 
 // rewriteGz gzip-compresses raw and writes it to path, replacing the store
-// object in place — used to plant a structurally-corrupt pack under a live db.gz.
+// object in place — the file-fixture writer for a hand-built object (a
+// structurally-corrupt pack under a live db.gz, a legacy or unparseable root
+// or sidecar), framed exactly as the writer's own gzipBytes frames it.
 func rewriteGz(t *testing.T, path string, raw []byte) {
 	t.Helper()
-	var buf bytes.Buffer
-	gw := gzip.NewWriter(&buf)
-	if _, err := gw.Write(raw); err != nil {
+	gz, err := gzipBytes(raw)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := gw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(path, gz, 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
