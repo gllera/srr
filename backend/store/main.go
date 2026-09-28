@@ -524,7 +524,7 @@ const tempSweepMaxAge = 24 * time.Hour
 //
 // What makes this safe is the CALLER's discipline, not anything here: both mod
 // and now come from the same directory listing, now being the caller's own
-// just-created staging file (see sweepTempLeftovers). One clock, one call. An
+// just-created staging file (see staleTempLeftovers). One clock, one call. An
 // SFTP server or an NFS mount whose clock runs behind this host's would
 // otherwise make every in-flight staging file look ancient — and asset uploads
 // run concurrently within a single process, so two live temps in one directory
@@ -536,6 +536,43 @@ const tempSweepMaxAge = 24 * time.Hour
 // reference file with the epoch, so now.Sub(mod) is 0 and nothing is swept.
 func staleTemp(mod, now time.Time) bool {
 	return !mod.IsZero() && now.Sub(mod) >= tempSweepMaxAge
+}
+
+// staleTempLeftovers selects, from one listing of a directory, the
+// uniqueTempName staging leftovers old enough to sweep — the selection the
+// Local and SFTP sweeps share; each only lists, removes and logs.
+//
+// ownTemp names the caller's OWN staging file, just created in that directory:
+// its mtime in this very listing is the reference "now", so both sides of
+// staleTemp's comparison come from one clock and one call — the store's, which
+// on an NFS/SMB mount or over SFTP is the server's, not this host's. If our
+// own entry is missing from the listing (or its info cannot be read) nothing
+// is selected: no reference, no judgement. Info is read lazily — only for
+// ownTemp and the name-matched regular candidates — so a local listing costs
+// no extra lstat per entry.
+func staleTempLeftovers(entries []fs.DirEntry, ownTemp string) []string {
+	var now time.Time
+	for _, e := range entries {
+		if e.Name() == ownTemp {
+			if fi, err := e.Info(); err == nil {
+				now = fi.ModTime()
+			}
+			break
+		}
+	}
+	if now.IsZero() {
+		return nil
+	}
+	var stale []string
+	for _, e := range entries {
+		if e.Name() == ownTemp || !e.Type().IsRegular() || !isTempLeftover(e.Name()) {
+			continue
+		}
+		if fi, err := e.Info(); err == nil && staleTemp(fi.ModTime(), now) {
+			stale = append(stale, e.Name())
+		}
+	}
+	return stale
 }
 
 // isTempLeftover reports whether a directory entry name is a uniqueTempName

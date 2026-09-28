@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/url"
@@ -749,35 +750,26 @@ func (d *SFTP) AtomicPut(ctx context.Context, key string, r io.Reader, _ ObjectM
 // sweepTempLeftovers is the Local backend's sweep over SFTP: it removes
 // uniqueTempName staging files a hard-killed predecessor stranded in dir
 // (rename never ran; the unique names mean nothing overwrites them and no GC
-// speaks them), age-gated by staleTemp. ownTemp names the caller's own staging
-// file, just created in dir, and its mtime in THIS listing is the reference
-// "now" — the server's clock, read without an extra round-trip, so the gate
-// never compares a remote mtime against this host's clock. Best-effort and
-// silent on errors — janitor work must never fail the AtomicPut that
-// triggered it. Unlike the Local sweep (os.ReadDir is ~free), the ReadDir here
-// pages the whole directory over the wire, so AtomicPut gates it to at most
-// once per directory per handle (sweptDirs) — the first put still reclaims
-// crash leftovers, and no later put can find new ones.
+// speaks them), selected by staleTempLeftovers. ownTemp names the caller's own
+// staging file, just created in dir, and its mtime in THIS listing is the
+// reference "now" — the server's clock, read without an extra round-trip, so
+// the gate never compares a remote mtime against this host's clock.
+// Best-effort and silent on errors — janitor work must never fail the
+// AtomicPut that triggered it. Unlike the Local sweep (os.ReadDir is ~free),
+// the ReadDir here pages the whole directory over the wire, so AtomicPut gates
+// it to at most once per directory per handle (sweptDirs) — the first put
+// still reclaims crash leftovers, and no later put can find new ones.
 func (d *SFTP) sweepTempLeftovers(c *sftp.Client, dir, ownTemp string) {
-	entries, err := c.ReadDir(dir)
+	infos, err := c.ReadDir(dir)
 	if err != nil {
 		return
 	}
-	var now time.Time
-	for _, fi := range entries {
-		if fi.Name() == ownTemp {
-			now = fi.ModTime()
-			break
-		}
+	entries := make([]fs.DirEntry, len(infos))
+	for i, fi := range infos {
+		entries[i] = fs.FileInfoToDirEntry(fi)
 	}
-	if now.IsZero() {
-		return
-	}
-	for _, fi := range entries {
-		if fi.Name() == ownTemp || !fi.Mode().IsRegular() || !isTempLeftover(fi.Name()) || !staleTemp(fi.ModTime(), now) {
-			continue
-		}
-		file := path.Join(dir, fi.Name())
+	for _, name := range staleTempLeftovers(entries, ownTemp) {
+		file := path.Join(dir, name)
 		if err := c.Remove(file); err == nil {
 			slog.Info("removed stale atomic-write leftover", "file", file)
 		}

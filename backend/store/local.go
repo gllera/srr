@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"time"
 )
 
 func init() {
@@ -181,40 +180,18 @@ func (d *Local) PutIfVersion(ctx context.Context, key string, r io.Reader, meta 
 // in-flight staging file).
 //
 // ownTemp names the caller's OWN staging file, just created in dir: its mtime
-// in this very listing is the reference "now". Both sides of the age
-// comparison then come from one clock and one call — the store's, which on an
-// NFS/SMB mount is the server's, not this host's. A skewed clock would
-// otherwise make every in-flight staging file look ancient, and concurrent
-// asset uploads inside ONE process already put several in a shard. If our own
-// entry is missing from the listing the sweep is skipped: no reference, no
-// judgement. Best-effort and silent on errors — janitor work must never fail
-// or noise up the AtomicPut that triggered it.
+// in this very listing is the reference "now" (see staleTempLeftovers, which
+// owns that selection). Concurrent asset uploads inside ONE process already
+// put several live staging files in a shard, so a skewed reference would
+// matter even with a single writer. Best-effort and silent on errors —
+// janitor work must never fail or noise up the AtomicPut that triggered it.
 func sweepTempLeftovers(dir, ownTemp string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
-	var now time.Time
-	for _, e := range entries {
-		if e.Name() == ownTemp {
-			if fi, err := e.Info(); err == nil {
-				now = fi.ModTime()
-			}
-			break
-		}
-	}
-	if now.IsZero() {
-		return
-	}
-	for _, e := range entries {
-		if e.Name() == ownTemp || !e.Type().IsRegular() || !isTempLeftover(e.Name()) {
-			continue
-		}
-		fi, err := e.Info()
-		if err != nil || !staleTemp(fi.ModTime(), now) {
-			continue
-		}
-		file := filepath.Join(dir, e.Name())
+	for _, name := range staleTempLeftovers(entries, ownTemp) {
+		file := filepath.Join(dir, name)
 		if err := os.Remove(file); err == nil {
 			slog.Info("removed stale atomic-write leftover", "file", file)
 		}
