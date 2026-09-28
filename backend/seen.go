@@ -484,19 +484,15 @@ func (o *DB) loadSeen(ctx context.Context) *seenPool {
 	return newSeenPool()
 }
 
-// tryLoadSeen reads+parses one seen key. ok=false on missing/read/gzip/parse
-// error so the caller falls through to the next slot. A genuinely-absent object
-// (rc == nil) returns (nil, false) so load falls through rather than treating
-// "absent" as a successful empty pool (which would mask the sibling).
+// tryLoadSeen reads (through the sidecar memo) and parses one seen key.
+// ok=false on missing/read/gzip/parse error so the caller falls through to the
+// next slot. A genuinely-absent object is a read error here, so load falls
+// through rather than treating "absent" as a successful empty pool (which would
+// mask the sibling).
 func (o *DB) tryLoadSeen(ctx context.Context, key string) (*seenPool, bool) {
-	data, ok := seenBodyMemo.get(globals.Store + "\x00" + key)
-	if !ok {
-		var err error
-		data, err = readGzOptional(ctx, o.Backend, key)
-		if err != nil || data == nil {
-			return nil, false
-		}
-		seenBodyMemo.put(globals.Store+"\x00"+key, data)
+	data, err := o.readSidecar(ctx, &seenBodyMemo, key)
+	if err != nil {
+		return nil, false
 	}
 	p, err := parseSeen(data)
 	if err != nil {

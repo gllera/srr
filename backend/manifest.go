@@ -160,7 +160,7 @@ func (o *DB) manifestSig() (Manifest, []byte, error) {
 // too — and may be overwritten. A collision against a root that HAS advanced is
 // a real peer writer, and that is fatal for the cycle.
 func (o *DB) publishManifest(ctx context.Context, man Manifest) error {
-	manifestMemo.forget()
+	manifestMemo.reset()
 	m := o.core.ManifestNum + 1
 	man.Num = m
 	man.FetchedAt = o.core.FetchedAt

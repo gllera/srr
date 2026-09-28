@@ -158,7 +158,7 @@ func jsonEncode(v any) ([]byte, error) {
 
 // getOptional reads key, returning (nil, nil) when the store genuinely does
 // not have it. For the objects whose ABSENCE IS A LEGAL STATE — no root yet on
-// a fresh store, no config sidecar, no lock marker, an unwritten seen slot.
+// a fresh store, no config sidecar, no lock marker, an empty inbox slot.
 //
 // This is NOT the retired Get(ignoreMissing) flag wearing a hat. That flag
 // lived inside the backends, so each of four implementations decided for itself
@@ -204,6 +204,8 @@ func readGzOptional(ctx context.Context, b store.Backend, key string) ([]byte, e
 
 // sidecarMemo caches the decompressed body of one backend-only sidecar — the
 // dedup pool and the asset refcount table — across DB opens in this process.
+// The generation manifest rides the same one-entry memo (manifestMemo, root.go,
+// whose doc states its own key).
 //
 // Both are read on EVERY open and neither is small: on a production store the
 // seen sidecar is ~110 KB gzipped against a 56-byte root and a 540-byte config,
@@ -213,13 +215,13 @@ func readGzOptional(ctx context.Context, b store.Backend, key string) ([]byte, e
 // pool there, and an empty pool does not fail — it silently re-ingests
 // duplicates.
 //
-// Sound for the same reason manifestMemo is: these are manifest-NAMED objects
-// drawn from a monotone per-series counter and never rewritten (M3), so a key
-// pins its bytes exactly. The store target is part of the memo key because a
-// process may open more than one store (the test suite opens one per test) and
-// stem 4 of one store is unrelated to stem 4 of another. One entry per role, so
-// the two never evict each other and memory stays bounded whatever a
-// long-running serve process does.
+// Sound because these are manifest-NAMED objects drawn from a monotone
+// per-series counter and never rewritten (M3), so a key pins its bytes exactly.
+// The store target is part of the memo key because a process may open more
+// than one store (the test suite opens one per test) and stem 4 of one store is
+// unrelated to stem 4 of another. One entry per role, so the roles never evict
+// each other and memory stays bounded whatever a long-running serve process
+// does.
 type sidecarMemo struct {
 	sync.Mutex
 	key  string

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 
 	"srr/store"
 )
@@ -226,54 +225,36 @@ type legacyObject struct{ from, to string }
 // entry suffices: a process opens one store, and the entry refreshes at most
 // once per cycle.
 //
-// The key is the store target PLUS the exact root bytes ({v,m,t}), not just
-// the manifest number: a store rebuilt in place could reuse a generation
-// number with different bytes under a byte-identical root. This process's own
-// republishes (the orphan-overwrite path, a legacy migration) are covered by
-// publishManifest calling forget; a rebuild performed by ANOTHER process while
+// The memo key is the store target PLUS the exact root bytes ({v,m,t}) PLUS
+// the manifest's name, not just the manifest number: a store rebuilt in place
+// could reuse a generation number with different bytes under a byte-identical
+// root. This process's own republishes (the orphan-overwrite path, a legacy
+// migration) are covered by publishManifest resetting the memo before every
+// manifest write, since a republish can place new bytes under a key an earlier
+// open of this process cached; a rebuild performed by ANOTHER process while
 // this one stays alive is detectable only through the root, which any real
-// generation advance rewrites. The cached bytes are shared read-only
-// (json.Unmarshal copies what it keeps).
-var manifestMemo manifestMemoState
-
-type manifestMemoState struct {
-	sync.Mutex
-	sig  string
-	key  string
-	body []byte
-}
-
-// forget clears the memo. publishManifest calls it before every manifest
-// write, since a republish can place new bytes under a key an earlier open of
-// this process cached.
-func (m *manifestMemoState) forget() {
-	m.Lock()
-	m.sig, m.key, m.body = "", "", nil
-	m.Unlock()
-}
+// generation advance rewrites. The NUL separators cannot collide: a manifest
+// is only ever fetched through a root that already parsed as JSON. The cached
+// bytes are shared read-only (json.Unmarshal copies what it keeps).
+var manifestMemo sidecarMemo
 
 // memoManifestFetch wraps a keyGetter with the manifest memo. Only keys in the
 // manifest series are memoized; everything else passes through.
 func memoManifestFetch(storeTarget string, root []byte, fetch keyGetter) keyGetter {
-	sig := storeTarget + "\x00" + string(root)
+	sig := storeTarget + "\x00" + string(root) + "\x00"
 	return func(key string) ([]byte, error) {
 		if !strings.HasPrefix(key, manifestSeries+"/") {
 			return fetch(key)
 		}
-		manifestMemo.Lock()
-		hit := manifestMemo.sig == sig && manifestMemo.key == key
-		body := manifestMemo.body
-		manifestMemo.Unlock()
-		if hit {
+		mk := sig + key
+		if body, ok := manifestMemo.get(mk); ok {
 			return body, nil
 		}
 		body, err := fetch(key)
 		if err != nil {
 			return nil, err
 		}
-		manifestMemo.Lock()
-		manifestMemo.sig, manifestMemo.key, manifestMemo.body = sig, key, body
-		manifestMemo.Unlock()
+		manifestMemo.put(mk, body)
 		return body, nil
 	}
 }
