@@ -725,14 +725,17 @@ function toggleUnseenOnly() {
    rerunPlaceholder()
 }
 
+// A modal over the reader (the picker, the image lightbox, the player view)
+// owns input while up.
+const overlayUp = () => picker.isOpen() || lightbox.isOpen() || player.isViewOpen()
+
 // Two-finger vertical swipe = step the filter. In the reader, cycle to the next
 // filter's article; on the list, re-filter the list to the next entry.
 function onCycle(dir: number) {
    // The two-finger cycle gesture must not re-filter the list that sits under
-   // the open picker overlay (same input-leak class as the keyboard and
-   // one-finger-swipe guards) — nor under the open image lightbox, which is a
-   // modal over the reader and owns every input while it is up.
-   if (picker.isOpen() || lightbox.isOpen() || player.isViewOpen()) return
+   // an open overlay (same input-leak class as the keyboard and
+   // one-finger-swipe guards).
+   if (overlayUp()) return
    if (nav.getFilterEntries().length <= 1) return
    // cycleToken steps relative to cycleOriginKey (a single tagged-feed filter
    // cycles by its tag) and skips ★ Saved / empty-of-unread lanes, so the list and
@@ -771,9 +774,6 @@ function onCycle(dir: number) {
 // live beside the list and its prev/next buttons stay enabled on both surfaces:
 // a key must reach the same article the button beside it does, or ← / → go dead
 // on the list surface while the arrows a centimetre away still work.
-// A modal over the reader (the picker, the image lightbox, the player view)
-// owns input while up.
-const overlayUp = () => picker.isOpen() || lightbox.isOpen() || player.isViewOpen()
 const stepLeft = () => {
    if (!layout().readerSteppable || overlayUp()) return
    return el.prev.disabled ? reader.bumpReaderEdge("prev") : guard(() => nav.left())
@@ -1168,11 +1168,11 @@ async function init() {
          return
       }
       if (el.popup.classList.contains("srr-open")) return
-      // The picker overlay stacks over the list; without this guard the list
-      // keymap below (`/`, A/D row stepping) — and the reader keymap after it —
-      // would drive the surfaces stacked behind it. Escape is handled above;
-      // the picker keeps its own UI (rows are plain links, Tab walks them).
-      if (picker.isOpen() || player.isViewOpen()) return
+      // An overlay stacks over the surfaces; without this guard the list keymap
+      // below (`/`, A/D row stepping) — and the reader keymap after it — would
+      // drive the surfaces stacked behind it. Escape is handled above; the
+      // overlay keeps its own UI (the picker's rows are plain links, Tab walks them).
+      if (overlayUp()) return
       // Typing beats every shortcut below: a bare-letter keymap over a focused
       // field would eat the text. isContentEditable joins the tag test because a
       // rich-text host is a text field that happens not to be an <input>.
