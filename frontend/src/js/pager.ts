@@ -276,6 +276,11 @@ async function fillPage(s: PagerSide): Promise<void> {
       // change, an evicted entry). So paint the masthead from the cheap meta card
       // FIRST and show a skeleton, rather than holding an empty page on the
       // uncommon path. Today's masthead-only pane is now the degraded state.
+      // The article load starts alongside the card, not after it: on the cold
+      // path that is one round-trip window instead of two (a rejection surfaces
+      // at its await below, so the early one is swallowed here).
+      const articleP = data.loadArticle(target)
+      articleP.catch(() => {})
       const card = await data.loadMeta(target)
       if (my !== fillTok) return
       stampSrc(refs.root, card.f)
@@ -283,7 +288,7 @@ async function fillPage(s: PagerSide): Promise<void> {
       refs.date.textContent = timeAgo(card.w)
       refs.title.textContent = card.t ?? ""
       refs.content.replaceChildren(skeleton())
-      const article = await data.loadArticle(target)
+      const article = await articleP
       if (my !== fillTok) return
       const feed = data.db.feeds[article.f]
       paintMasthead(refs, article, feed)

@@ -1023,8 +1023,10 @@ async function fillWatchInfo(rule: string, from: number, end: number): Promise<v
    const my = {}
    infoFillToken = my
    try {
-      const n = await nav.watchLaneCount(rule)
-      const range = end > from ? [await data.loadMeta(from), await data.loadMeta(end - 1)] : null
+      const [n, range] = await Promise.all([
+         nav.watchLaneCount(rule),
+         end > from ? Promise.all([data.loadMeta(from), data.loadMeta(end - 1)]) : null,
+      ])
       if (my !== infoFillToken) return
       const count = infoBodyEl.querySelector(".srr-info-unread")
       if (count) count.textContent = String(n)

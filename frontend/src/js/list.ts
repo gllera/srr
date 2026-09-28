@@ -1138,17 +1138,17 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
       if (my !== tok) return
    }
 
-   const older = await walk(my, seed, BATCH, "older") // [seed, ...older], descending
+   // The older batch is [seed, ...older], descending. The newer batch (anchoredMid
+   // only) sits above the seed, ascending, and starts at the seed's strict newer
+   // neighbor (walk includes its start member, and the seed already belongs to
+   // the older batch); a -1 start walks nothing. The two directions share only
+   // the seed, so they walk together: a cold idx pack on one side loads
+   // alongside the other's rather than after it.
+   const [older, newer] = await Promise.all([
+      walk(my, seed, BATCH, "older"),
+      (anchoredMid ? nav.neighborNewer(seed) : Promise.resolve(-1)).then((n) => walk(my, n, BATCH, "newer")),
+   ])
    if (my !== tok) return
-   // The newer batch starts at the seed's strict newer neighbor (walk includes
-   // its start member, and the seed already belongs to the older batch).
-   let newer: { chrons: number[]; exhausted: boolean } = { chrons: [], exhausted: true }
-   if (anchoredMid) {
-      const firstNewer = await nav.neighborNewer(seed)
-      if (my !== tok) return
-      if (firstNewer !== -1) newer = await walk(my, firstNewer, BATCH, "newer") // above the seed, ascending
-      if (my !== tok) return
-   }
    if (older.chrons.length === 0) {
       bailEmpty(onInteractive)
       return
