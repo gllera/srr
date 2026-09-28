@@ -753,9 +753,9 @@ describe("info dialog", () => {
    })
 })
 
-// The info dialog's hand-written modal shell (openInfoDialog) — parallel to the
-// dropdown modals': capture-phase Escape/Tab trap, backdrop-vs-card mousedown,
-// focus restore, and no-stacking on a second open.
+// The info dialog on dropdown.ts's shared modal shell (openInfoDialog):
+// capture-phase Escape/Tab trap, backdrop-vs-card mousedown, focus restore, and
+// no-stacking on a second open.
 describe("info dialog modal shell", () => {
    const openFeedInfo = async (over: Partial<IFeed> = {}) => {
       const f = feed({ id: 5, title: "Feed5", url: "http://example.com/rss", ...over })

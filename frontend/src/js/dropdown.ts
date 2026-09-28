@@ -143,21 +143,22 @@ function imgProxyBody(close: () => void): DocumentFragment {
 }
 
 // ── Modal shell ──────────────────────────────────────────────────────────────
-// One shared shell for the centered modals (image proxy / backup / sync). They
-// are real modals — dimmed backdrop, focus trapped inside, Escape and a backdrop
-// click both cancel — distinct from the toast-style .srr-popup. The keydown
-// handler is capture-phase + stopPropagation so Escape closes only the dialog
-// (not app.ts's document-level Escape) and Tab wraps within it; on close, focus
-// returns to whatever opened it. Body content is (re)built per open into the
-// dialog's stable host node, so re-opens never stack a second editor; the single
-// module-level closer also means opening any modal closes whichever was open.
+// One shared shell for the centered modals (image proxy / backup / sync, and
+// picker.ts's info dialog). They are real modals — dimmed backdrop, focus
+// trapped inside, Escape and a backdrop click both cancel — distinct from the
+// toast-style .srr-popup. The keydown handler is capture-phase +
+// stopPropagation so Escape closes only the dialog (not app.ts's document-level
+// Escape) and Tab wraps within it; on close, focus returns to whatever opened
+// it. Body content is (re)built per open into the dialog's stable host node, so
+// re-opens never stack a second editor; the single module-level closer also
+// means opening any modal closes whichever was open.
 let activeClose: (() => void) | null = null
 
 // wrapTabFocus is the boundary half of a modal Tab trap, shared by the modal
-// shell here, the error popup (app.ts), and the info dialog (picker.ts): on the
-// container's first/last focusable (per the caller's selector), Tab/Shift+Tab
-// wrap to the other end instead of escaping to the page behind; mid-list Tabs
-// fall through to the browser's own order.
+// shell here, the error popup (app.ts) and the lightbox: on the container's
+// first/last focusable (per the caller's selector), Tab/Shift+Tab wrap to the
+// other end instead of escaping to the page behind; mid-list Tabs fall through
+// to the browser's own order.
 export function wrapTabFocus(e: KeyboardEvent, container: ParentNode, selector: string): void {
    const f = container.querySelectorAll<HTMLElement>(selector)
    if (f.length === 0) return
@@ -172,7 +173,15 @@ export function wrapTabFocus(e: KeyboardEvent, container: ParentNode, selector: 
    }
 }
 
-function openModal(dialog: HTMLElement, body: HTMLElement, build: (close: () => void) => Node): void {
+// openModal opens `dialog` with `build`'s content in `body` and returns its
+// close function. `focusables` is the Tab-trap selector (default: the editor
+// controls); `onClose` runs on every close, whichever path triggered it.
+export function openModal(
+   dialog: HTMLElement,
+   body: HTMLElement,
+   build: (close: () => void) => Node,
+   opts: { focusables?: string; onClose?: () => void } = {},
+): () => void {
    if (activeClose) activeClose() // never stack two opens
    const restore = document.activeElement as HTMLElement | null
 
@@ -182,7 +191,7 @@ function openModal(dialog: HTMLElement, body: HTMLElement, build: (close: () => 
          e.stopPropagation()
          close()
       } else if (e.key === "Tab") {
-         wrapTabFocus(e, dialog, "input, button, textarea")
+         wrapTabFocus(e, dialog, opts.focusables ?? "input, button, textarea")
       }
    }
    // mousedown (like the popup's outside-close) only on the backdrop itself —
@@ -196,6 +205,7 @@ function openModal(dialog: HTMLElement, body: HTMLElement, build: (close: () => 
       document.removeEventListener("keydown", onKey, true)
       dialog.removeEventListener("mousedown", onDown)
       activeClose = null
+      opts.onClose?.()
       restore?.focus()
    }
    activeClose = close
@@ -204,6 +214,7 @@ function openModal(dialog: HTMLElement, body: HTMLElement, build: (close: () => 
    dialog.classList.add("srr-open")
    document.addEventListener("keydown", onKey, true)
    dialog.addEventListener("mousedown", onDown)
+   return close
 }
 
 // showImgProxyDialog opens the centered image-proxy modal (built fresh each time

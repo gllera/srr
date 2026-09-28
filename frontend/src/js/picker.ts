@@ -19,7 +19,7 @@
 // groups fed by a third header row-mode.
 import { VERSION } from "./base"
 import * as data from "./data"
-import { divEl, wrapTabFocus } from "./dropdown"
+import { divEl, openModal } from "./dropdown"
 import { ageSince, countBadge, formatBytes, formatDate, isStale, STALE_AFTER_SEC, stampSrc, timeAgoProse } from "./fmt"
 import { favoritesKey } from "./keys"
 import { mountLabel } from "./mounts"
@@ -100,7 +100,7 @@ let rowSig = ""
 let restoreFocus: HTMLElement | null = null
 // The feed / tag info modal (a top-level sibling of the picker overlay, like the
 // image-proxy / backup dialogs). Refs grabbed in setup(); closeInfo holds the
-// active teardown so a re-open never stacks two.
+// open dialog's teardown for its ✕ button.
 let infoDialog: HTMLElement | null = null
 let infoTitleEl: HTMLElement
 let infoBodyEl: HTMLElement
@@ -1051,43 +1051,19 @@ async function fillStoreUnread(feeds: IFeed[]): Promise<void> {
    }
 }
 
-// Centered modal shell, mirroring the image-proxy / backup dialogs: dimmed
-// backdrop, capture-phase Escape + Tab focus trap, backdrop-click close, focus
-// restored to the opener (the filter row tapped in stats mode). Body is
-// rebuilt per open.
+// Opens through dropdown.ts's modal shell (dimmed backdrop, capture-phase Escape
+// + Tab focus trap, backdrop-click close, focus restored to the opener — the
+// filter row tapped in stats mode), whose shared slot also keeps a re-open from
+// stacking. Every close orphans a pending fill and drops the stale closer.
 function openInfoDialog(title: string, body: Node): void {
-   const dialog = infoDialog
-   if (!dialog) return
-   if (closeInfo) closeInfo() // never stack two opens
-   const restore = document.activeElement as HTMLElement | null
+   if (!infoDialog) return
    infoTitleEl.textContent = title
-   infoBodyEl.replaceChildren(body)
-
-   const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-         e.preventDefault()
-         e.stopPropagation()
-         close()
-      } else if (e.key === "Tab") {
-         wrapTabFocus(e, dialog, "a[href], button, [tabindex]")
-      }
-   }
-   const onDown = (e: MouseEvent) => {
-      if (e.target === dialog) close()
-   }
-   const close = () => {
-      dialog.classList.remove("srr-open")
-      infoBodyEl.replaceChildren()
-      infoFillToken = null
-      document.removeEventListener("keydown", onKey, true)
-      dialog.removeEventListener("mousedown", onDown)
-      closeInfo = null
-      restore?.focus()
-   }
-   closeInfo = close
-
-   dialog.classList.add("srr-open")
-   document.addEventListener("keydown", onKey, true)
-   dialog.addEventListener("mousedown", onDown)
-   ;(dialog.querySelector(".srr-info-close") as HTMLElement | null)?.focus()
+   closeInfo = openModal(infoDialog, infoBodyEl, () => body, {
+      focusables: "a[href], button, [tabindex]",
+      onClose: () => {
+         infoFillToken = null
+         closeInfo = null
+      },
+   })
+   ;(infoDialog.querySelector(".srr-info-close") as HTMLElement | null)?.focus()
 }
