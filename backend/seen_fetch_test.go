@@ -25,7 +25,6 @@ func fetchWithPool(t *testing.T, ch *Feed, srv *httptest.Server, pool *seenPool,
 	const fetchedAt int64 = 4_102_444_800 // 2100-01-01, past every fixture pubDate
 	run := &fetchRun{
 		client:    srv.Client(),
-		engine:    ingest.New(),
 		fetchedAt: fetchedAt,
 		seen:      pool,
 		dedupDays: storeDedupDays,

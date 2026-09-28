@@ -7,16 +7,16 @@ import (
 	"srr/ingest"
 )
 
-// The fan-out's worker pools and ingest engine are built once per COMMAND, not
-// once per cycle: the --interval loop runs thousands of cycles through one
-// FetchCmd and must not rebuild them every five minutes (FET14).
+// The fan-out's worker pools are built once per COMMAND, not once per cycle:
+// the --interval loop runs thousands of cycles through one FetchCmd and must
+// not rebuild them every five minutes (FET14).
 func TestWorkerPoolsBuiltOncePerCommand(t *testing.T) {
 	o := &FetchCmd{}
 	first := o.workerPools()
-	if first == nil || first.engine == nil {
-		t.Fatal("workerPools returned no pools/engine")
+	if first == nil {
+		t.Fatal("workerPools returned no pools")
 	}
-	if second := o.workerPools(); second != first || second.engine != first.engine {
+	if second := o.workerPools(); second != first {
 		t.Error("workerPools rebuilt the pools on a second call")
 	}
 }
@@ -40,7 +40,7 @@ func TestWorkerPoolsSurviveCycles(t *testing.T) {
 	if err := o.runFetch(ctx, client, nil); err != nil {
 		t.Fatalf("cycle 2: %v", err)
 	}
-	if o.pools != pools || o.pools.engine != pools.engine {
+	if o.pools != pools {
 		t.Error("the second cycle rebuilt the pools")
 	}
 	if other := (&FetchCmd{}).workerPools(); other == pools {

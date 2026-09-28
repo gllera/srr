@@ -267,7 +267,6 @@ func (c *Feed) dedupDays(store int) int {
 // pooled read buffer and module processor) stay separate call parameters.
 type fetchRun struct {
 	client *http.Client
-	engine *ingest.Fetcher
 	// assets is the content-addressed uploader for files a fetcher self-hosts
 	// into cacheDir; fetchURL's end-of-pipeline step calls UploadCacheRef on it.
 	assets *assetFetcher
@@ -367,7 +366,7 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 	// may self-host files it leaves there: the post-pipeline upload step below
 	// scans each item for "#"-markers naming a real file in the dir and uploads
 	// them. Built-in or external, the fetcher owns the layout inside.
-	result, err := run.engine.Fetch(ctx, ingestName, run.client, buf, ingest.Request{
+	result, err := ingest.Fetch(ctx, ingestName, run.client, buf, ingest.Request{
 		URL:          c.URL,
 		ETag:         c.ETag,
 		LastModified: c.LastModified,

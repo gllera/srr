@@ -88,10 +88,9 @@ func previewFetch(ctx context.Context, recipes map[string]Recipe, recipeName, in
 	// default, per call (FET14).
 	buf, release := ingest.ProbeBuf(globals.MaxFeedSize * (1 << 10))
 	defer release()
-	engine := ingest.New()
 
 	name := effectiveRecipe(recipes, recipeName, Recipe{Ingest: ingestOverride}).Ingest
-	result, err := engine.Fetch(ctx, name, resolveClient(), buf, ingest.Request{URL: rawURL, MaxSize: len(buf) - 1})
+	result, err := ingest.Fetch(ctx, name, resolveClient(), buf, ingest.Request{URL: rawURL, MaxSize: len(buf) - 1})
 	if err != nil {
 		return ingest.Result{}, fmt.Errorf("ingest %q: %w", name, err)
 	}

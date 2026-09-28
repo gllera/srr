@@ -1,7 +1,7 @@
 // Package ingest abstracts the I/O+parse step that turns a source URL
 // into a slice of mod.RawItems. The built-in fetcher (#feed) registers
 // itself at init(); any other name is treated as a shell command per the
-// external-fetcher wire protocol (see Fetcher.Fetch).
+// external-fetcher wire protocol (see Fetch).
 //
 // A FetchFunc owns I/O and parsing only — dedup, watermarking, pipeline
 // modules, and storage all stay in the caller (Source.fetch) and operate
@@ -220,20 +220,6 @@ func Select(names ...string) string {
 	return Builtin
 }
 
-// Fetcher is the dispatcher. New() builds one over the registered built-ins;
-// Fetch routes per-call by name.
-type Fetcher struct {
-	fetchers map[string]FetchFunc
-}
-
-// New builds a Fetcher backed by the registered built-ins. The built-in
-// FetchFuncs are stateless, so the registry map is shared rather than copied.
-func New() *Fetcher {
-	return &Fetcher{
-		fetchers: registry,
-	}
-}
-
 // Fetch dispatches by name. A built-in registered as "#name" runs its
 // FetchFunc; any other args string is executed as a shell command per
 // the external-fetcher wire protocol — JSON-encoded Request on stdin,
@@ -246,8 +232,11 @@ func New() *Fetcher {
 // A non-zero exit code, empty stdout, or output over the subprocess output cap
 // is a hard error (fails just this feed's fetch). The author-facing spec and a
 // reference implementation live in README.md (Ingest Strategies).
-func (f *Fetcher) Fetch(ctx context.Context, args string, client *http.Client, buf []byte, req Request) (Result, error) {
-	if fn, ok := f.fetchers[args]; ok {
+//
+// Concurrent-safe: the registry is written only at init, the built-ins are
+// stateless, and the shell path spawns a subprocess per call.
+func Fetch(ctx context.Context, args string, client *http.Client, buf []byte, req Request) (Result, error) {
+	if fn, ok := registry[args]; ok {
 		return fn(ctx, client, buf, req)
 	}
 

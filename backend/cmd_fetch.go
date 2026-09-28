@@ -19,7 +19,6 @@ import (
 	"syscall"
 	"time"
 
-	"srr/ingest"
 	"srr/mod"
 	"srr/store"
 
@@ -96,10 +95,10 @@ type FetchCmd struct {
 
 // fetchPools is the fan-out's reusable worker state, scoped to the COMMAND
 // rather than the cycle: an --interval loop runs thousands of cycles through
-// one FetchCmd, and rebuilding these every five minutes rebuilt the ingest
-// engine's dispatch map and re-seeded pools whose payloads are expensive to
-// make — a feed buffer is --max-feed-size (5 MB by default) per worker, and
-// each mod.Module compiles two bluemonday policies plus a minifier (FET14).
+// one FetchCmd, and rebuilding these every five minutes re-seeded pools whose
+// payloads are expensive to make — a feed buffer is --max-feed-size (5 MB by
+// default) per worker, and each mod.Module compiles two bluemonday policies
+// plus a minifier (FET14).
 //
 // The pools stay sync.Pools, so an idle loop still returns that memory to the
 // runtime at the next GC; what the hoist removes is the guaranteed rebuild.
@@ -112,10 +111,6 @@ type fetchPools struct {
 	// state (minify reuses internal buffers and is not goroutine-safe), so a
 	// single shared *mod.Module across workers is unsafe.
 	proc sync.Pool
-	// engine is SHARED, not pooled: built-in FetchFuncs are concurrent-safe
-	// (HTTP built-ins are stateless; external shell fetchers spawn per-call
-	// subprocesses).
-	engine *ingest.Fetcher
 }
 
 // workerPools returns the command's fan-out pools, building them on first use.
@@ -128,8 +123,7 @@ func (o *FetchCmd) workerPools() *fetchPools {
 				buf := make([]byte, globals.MaxFeedSize*(1<<10)+1)
 				return &buf
 			}},
-			proc:   sync.Pool{New: func() any { return mod.New() }},
-			engine: ingest.New(),
+			proc: sync.Pool{New: func() any { return mod.New() }},
 		}
 	}
 	return o.pools
@@ -821,8 +815,8 @@ func (o *FetchCmd) fetchPhase(ctx context.Context, db *DB, client *http.Client, 
 	// (the errgroup parent below), so run shutdown still aborts a long transcode.
 	assets.baseCtx = ctx
 	assets.sem = make(chan struct{}, max(1, globals.AssetWorkers))
-	// Per-worker buffers/processors and the shared ingest engine, built once
-	// per command and reused by every cycle it runs (see fetchPools).
+	// Per-worker buffers/processors, built once per command and reused by
+	// every cycle it runs (see fetchPools).
 	pools := o.workerPools()
 
 	// One asset cache dir shared by every external-ingest feed this run,
@@ -848,7 +842,6 @@ func (o *FetchCmd) fetchPhase(ctx context.Context, db *DB, client *http.Client, 
 	// per-worker buf/processor are pulled from their pools inside each worker.
 	run := &fetchRun{
 		client:       client,
-		engine:       pools.engine,
 		assets:       assets,
 		cacheDir:     cacheDir,
 		fetchedAt:    db.core.FetchedAt,

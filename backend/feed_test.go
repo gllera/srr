@@ -57,7 +57,7 @@ func fetchOnce(t *testing.T, ch *Feed, srv *httptest.Server, pipe ...string) []*
 	// Far enough in the future that test-fixture pubDates of 2024 always pass
 	// the future-clamp without affecting the dedup expectations the tests check.
 	const fetchedAt int64 = 4_102_444_800 // 2100-01-01
-	run := &fetchRun{client: srv.Client(), engine: ingest.New(), fetchedAt: fetchedAt}
+	run := &fetchRun{client: srv.Client(), fetchedAt: fetchedAt}
 	items, err := ch.fetchURL(context.Background(), run, buf, mod.New(), pipe, ingest.Select("", ""))
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
@@ -72,7 +72,7 @@ func dispatchStub(t *testing.T, ch *Feed, ingestName string) []*Item {
 	t.Helper()
 	buf := make([]byte, 1<<20)
 	const fetchedAt int64 = 4_102_444_800
-	run := &fetchRun{engine: ingest.New(), fetchedAt: fetchedAt}
+	run := &fetchRun{fetchedAt: fetchedAt}
 	items, err := ch.fetchURL(context.Background(), run, buf, mod.New(), nil, ingestName)
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
@@ -93,7 +93,6 @@ func TestFeedFetchCancelledByShutdownDoesNotRecordError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // simulate run shutdown before the fetch records its outcome
 	run := &fetchRun{
-		engine:    ingest.New(),
 		fetchedAt: 4_102_444_800,
 		recipes:   map[string]Recipe{defaultRecipeName: {Ingest: "#test-fetcherr"}},
 	}
@@ -144,7 +143,6 @@ func TestFeedFetchSelectsRecipeIngest(t *testing.T) {
 	buf := make([]byte, 1<<20)
 	// recipe "stub" supplies the ingest; default supplies the (empty) pipe.
 	run := &fetchRun{
-		engine:    ingest.New(),
 		fetchedAt: fetchedAt,
 		recipes: map[string]Recipe{
 			defaultRecipeName: {},
@@ -167,7 +165,6 @@ func TestFeedFetchFallsBackToDefaultIngest(t *testing.T) {
 	const fetchedAt int64 = 4_102_444_800
 	buf := make([]byte, 1<<20)
 	run := &fetchRun{
-		engine:    ingest.New(),
 		fetchedAt: fetchedAt,
 		recipes: map[string]Recipe{
 			defaultRecipeName: {Ingest: "#test-stub"},
@@ -191,7 +188,6 @@ func TestFeedFetchFeedIngestOverridesRecipe(t *testing.T) {
 	const fetchedAt int64 = 4_102_444_800
 	buf := make([]byte, 1<<20)
 	run := &fetchRun{
-		engine:    ingest.New(),
 		fetchedAt: fetchedAt,
 		recipes: map[string]Recipe{
 			defaultRecipeName: {},
@@ -215,7 +211,6 @@ func TestFeedFetchFeedPipeReplacesRecipePipe(t *testing.T) {
 	const fetchedAt int64 = 4_102_444_800
 	buf := make([]byte, 1<<20)
 	run := &fetchRun{
-		engine:    ingest.New(),
 		fetchedAt: fetchedAt,
 		recipes: map[string]Recipe{
 			defaultRecipeName: {Ingest: "#test-stub"},
@@ -240,7 +235,6 @@ func TestFeedFetchFeedPipeDefaultExpandsToRecipePipe(t *testing.T) {
 	const fetchedAt int64 = 4_102_444_800
 	buf := make([]byte, 1<<20)
 	run := &fetchRun{
-		engine:    ingest.New(),
 		fetchedAt: fetchedAt,
 		recipes: map[string]Recipe{
 			defaultRecipeName: {Ingest: "#test-stub"},
@@ -265,7 +259,6 @@ func TestFeedFetchFeedPipeDefaultExpandsToRecipePipe(t *testing.T) {
 // branch in Feed.Fetch.
 func TestFeedFetchInvalidPipelineRecordsError(t *testing.T) {
 	run := &fetchRun{
-		engine:    ingest.New(),
 		fetchedAt: 4_102_444_800,
 		recipes: map[string]Recipe{
 			// The default's ingest would otherwise fetch fine; the bad pipe token
@@ -722,7 +715,7 @@ func TestFetchFutureDatedItemClampedToFetchedAt(t *testing.T) {
 
 	const fetchedAt int64 = 1_700_000_000
 	buf := make([]byte, 1<<20)
-	run := &fetchRun{client: srv.Client(), engine: ingest.New(), fetchedAt: fetchedAt}
+	run := &fetchRun{client: srv.Client(), fetchedAt: fetchedAt}
 	items, err := ch.fetchURL(context.Background(), run, buf, mod.New(), nil, ingest.Select("", ""))
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
@@ -947,7 +940,7 @@ func TestFetchVitals(t *testing.T) {
 
 		ch := &Feed{Title: "T", URL: srv.URL}
 		buf := make([]byte, 1<<20)
-		run := &fetchRun{client: srv.Client(), engine: ingest.New(), fetchedAt: fetchedAt}
+		run := &fetchRun{client: srv.Client(), fetchedAt: fetchedAt}
 		processor := mod.New()
 
 		ch.Fetch(context.Background(), run, buf, processor)
@@ -976,7 +969,7 @@ func TestFetchVitals(t *testing.T) {
 		ch := &Feed{Title: "T", URL: srv.URL}
 		buf := make([]byte, 1<<20)
 		const firstAt int64 = 1_000_000
-		run1 := &fetchRun{client: srv.Client(), engine: ingest.New(), fetchedAt: firstAt}
+		run1 := &fetchRun{client: srv.Client(), fetchedAt: firstAt}
 		ch.Fetch(context.Background(), run1, buf, mod.New())
 		if ch.FetchError != "" {
 			t.Fatalf("fetch1 error: %s", ch.FetchError)
@@ -984,7 +977,7 @@ func TestFetchVitals(t *testing.T) {
 
 		// Second fetch: same body, no new items.
 		const secondAt int64 = 2_000_000
-		run2 := &fetchRun{client: srv.Client(), engine: ingest.New(), fetchedAt: secondAt}
+		run2 := &fetchRun{client: srv.Client(), fetchedAt: secondAt}
 		ch.Fetch(context.Background(), run2, buf, mod.New())
 		if ch.FetchError != "" {
 			t.Fatalf("fetch2 error: %s", ch.FetchError)
@@ -1010,7 +1003,7 @@ func TestFetchVitals(t *testing.T) {
 
 		ch := &Feed{Title: "T", URL: srv.URL}
 		buf := make([]byte, 1<<20)
-		run := &fetchRun{client: srv.Client(), engine: ingest.New(), fetchedAt: fetchedAt}
+		run := &fetchRun{client: srv.Client(), fetchedAt: fetchedAt}
 		ch.Fetch(context.Background(), run, buf, mod.New())
 
 		if ch.LastOK != fetchedAt {
@@ -1034,7 +1027,7 @@ func TestFetchVitals(t *testing.T) {
 
 		ch := &Feed{Title: "T", URL: srv.URL, LastOK: 999, LastNew: 888, FailStreak: 2}
 		buf := make([]byte, 1<<20)
-		run := &fetchRun{client: srv.Client(), engine: ingest.New(), fetchedAt: fetchedAt}
+		run := &fetchRun{client: srv.Client(), fetchedAt: fetchedAt}
 		ch.Fetch(context.Background(), run, buf, mod.New())
 
 		if ch.FetchError == "" {
@@ -1075,7 +1068,7 @@ func TestFetchVitals(t *testing.T) {
 			FailStreak: 3,
 		}
 		buf := make([]byte, 1<<20)
-		run := &fetchRun{client: srv.Client(), engine: ingest.New(), fetchedAt: fetchedAt}
+		run := &fetchRun{client: srv.Client(), fetchedAt: fetchedAt}
 		ch.Fetch(context.Background(), run, buf, mod.New())
 
 		if ch.FetchError != "" {
@@ -1504,7 +1497,6 @@ func TestFetchDoesNotReconvertAlreadySeenArticleAsset(t *testing.T) {
 
 	fetchCycle := func() []*Item {
 		run := &fetchRun{
-			engine:    ingest.New(),
 			fetchedAt: fetchedAt,
 			assets:    testAssetFetcher(be, 1<<20, proc, 4), // fresh fetcher per run
 			cacheDir:  cacheDir,
@@ -1798,7 +1790,6 @@ func TestFeedFetchSecretScopeGrant(t *testing.T) {
 		out := t.TempDir() + "/v.txt"
 		recipe.Pipe = []string{fmt.Sprintf(`printf '%%s' "$SRR_TEST_SCOPED" > %s; cat`, out)}
 		r := &fetchRun{
-			engine:    ingest.New(),
 			fetchedAt: 4_102_444_800,
 			recipes: map[string]Recipe{
 				defaultRecipeName: {Ingest: "#test-stub"},

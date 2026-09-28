@@ -30,9 +30,8 @@ func TestSelectPrecedence(t *testing.T) {
 }
 
 func TestBuiltinsRegistered(t *testing.T) {
-	f := New()
 	for _, name := range []string{"#feed"} {
-		if _, ok := f.fetchers[name]; !ok {
+		if _, ok := registry[name]; !ok {
 			t.Errorf("built-in %q is not registered", name)
 		}
 	}
