@@ -167,7 +167,6 @@ const nav = vi.hoisted(() => {
       // one — which is exactly how this mock first went wrong.
       isSavedFilter: vi.fn(() => mock.filter.saved),
       isFilterActive: vi.fn(() => mock.filter.active),
-      filterTokens: vi.fn(() => mock.filter.tokens),
       filterFeeds: vi.fn(() => mock.filter.feeds),
       // nav lanes P2: the peek test every consumer asks, answered as the real lanes
       // answer it before the watch lane exists.

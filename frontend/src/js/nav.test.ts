@@ -4642,7 +4642,7 @@ describe("a landing in flight across a store switch", () => {
       model.activeMid.set("0")
       nav.applyFilter(["1"]) // home, on a lane of its own
       expect(nav.isStaleLanding(await settled)).toBe(true)
-      expect(nav.filterTokens()).toEqual(["1"])
+      expect(nav.filter.tokens).toEqual(["1"])
    })
 
    it("a cycle whose token came from the store switched away from lands nothing", async () => {

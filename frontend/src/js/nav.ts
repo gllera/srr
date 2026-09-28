@@ -323,14 +323,6 @@ export function isSavedFilter(): boolean {
 export function isFilterActive(): boolean {
    return lane.tokens.length > 0
 }
-// The active filter's tokens. Returned `readonly` so a consumer that wants to
-// hand them back to applyFilter (the "re-snapshot the current filter" move, in
-// app.ts's boot-merge re-anchor and menus.ts's post-frontier-gesture rebuild)
-// must copy them first — spreading a live nav array straight back into the
-// setter would otherwise read as safe while aliasing nav's own state.
-export function filterTokens(): readonly string[] {
-   return lane.tokens
-}
 // The active filter's members (feed id → lower bound). A ReadonlyMap: this is
 // nav's live map, not a copy — callers only ever read `.size` or walk it, and
 // copying on every call would cost real work on the pin path at [ALL] scale.
@@ -948,7 +940,7 @@ export function applyFilter(tokens: string[]): void {
 
 // Re-derive the ACTIVE lane from its own tokens: fresh unread-only bounds, a reset
 // entry anchor. What every "re-apply the current filter" caller used to spell as
-// applyFilter([...filterTokens()]). Through applyFilter, so a known-but-empty lane
+// applyFilter([...lane.tokens]). Through applyFilter, so a known-but-empty lane
 // stays scoped to itself (keepKnownEmpty) and publishLane runs; an unchanged token
 // list publishes nothing (arrayEqual), and a search lane's module-scoped snapshot
 // survives (Lanes N16).
