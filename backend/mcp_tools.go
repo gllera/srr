@@ -15,9 +15,9 @@ import (
 // `jsonschema:` tags are the documentation an LLM actually reads.
 //
 // Every handler WRAPS an existing function — listArticles, buildOverview,
-// previewURL, resolveProbe, resolveFeedViewURL+saveFeed, runFetch — rather
-// than reimplementing it, so the tool surface and the CLI/GUI surfaces can
-// never drift. See mcp.go for the stdout-discipline rule these handlers obey.
+// previewURL, resolveProbe, resolveFeedViewURL+saveFeed, runOnDemandCycle —
+// rather than reimplementing it, so the tool surface and the CLI/GUI surfaces
+// can never drift. See mcp.go for the stdout-discipline rule these handlers obey.
 //
 // Absent-means-optional: the schema inferencer marks every field WITHOUT
 // `omitempty` as required, so optional inputs must carry it.
@@ -403,31 +403,23 @@ type fetchOut struct {
 	Feeds       []feedProgress `json:"feeds" jsonschema:"Per-feed outcome, sorted by feed id: id, title, new (articles ingested) and error (empty when the feed succeeded)."`
 }
 
-// mcpFetch wraps the very cycle `srr fetch` and the GUI's fetch button
-// run: runFetch under runCycleSafe (so a bad cycle returns an error instead of
-// taking the process down), on a per-call SSRF-guarded client.
+// mcpFetch wraps runOnDemandCycle, the very cycle the GUI's fetch button
+// runs: runFetch under runCycleSafe (so a bad cycle returns an error instead
+// of taking the process down), on a per-call SSRF-guarded client.
 //
 // It holds the store lock for the cycle's whole duration and can run for
 // minutes with no intermediate output — the stateless+JSON transport forgoes
 // progress notifications, which stay an additive future change. Cancellation
 // is honest: ctx threads into runFetch and the lock is released by db.Close.
 func mcpFetch(ctx context.Context, _ *mcp.CallToolRequest, in fetchIn) (*mcp.CallToolResult, fetchOut, error) {
-	client := newFetchClient(globals.Workers)
-	// Per-call transport: drop its idle keep-alive sockets now rather than
-	// letting them linger ~90s, so repeated tool calls don't pile up sockets.
-	defer client.CloseIdleConnections()
-
 	// onFeed fires from the fan-out's worker goroutines, so the collector is
 	// mutex-guarded; the slice is sorted by id afterwards for a stable reply.
 	var mu sync.Mutex
 	progress := []feedProgress{}
-	fc := &FetchCmd{only: in.FeedIDs}
-	err := runCycleSafe(func() error {
-		return fc.runFetch(ctx, client, func(p feedProgress) {
-			mu.Lock()
-			progress = append(progress, p)
-			mu.Unlock()
-		})
+	err := runOnDemandCycle(ctx, in.FeedIDs, func(p feedProgress) {
+		mu.Lock()
+		progress = append(progress, p)
+		mu.Unlock()
 	})
 	if err != nil {
 		return nil, fetchOut{}, mcpToolErr(err)

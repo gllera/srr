@@ -371,6 +371,19 @@ func runCycleSafe(cycle func() error) (err error) {
 	return cycle()
 }
 
+// runOnDemandCycle runs the one-shot cycle the GUI's fetch button (SSE) and
+// srr_fetch trigger: runFetch restricted to only (empty = every feed; an
+// unknown id fails the cycle), under runCycleSafe, reporting each finished
+// feed to onFeed. It owns a per-call transport and drops its idle keep-alive
+// sockets on return rather than letting them linger ~90s (IdleConnTimeout),
+// so rapid re-triggers don't pile up orphaned connections.
+func runOnDemandCycle(ctx context.Context, only []int, onFeed func(feedProgress)) error {
+	client := newFetchClient(globals.Workers)
+	defer client.CloseIdleConnections()
+	fc := &FetchCmd{only: only}
+	return runCycleSafe(func() error { return fc.runFetch(ctx, client, onFeed) })
+}
+
 // runFeedFetch runs one feed's fetch and converts a panic in the (third-party,
 // attacker-influenced) content pipeline into a recorded feed error, so a single
 // feed can never crash the whole fetch process. The fan-out goroutines below —

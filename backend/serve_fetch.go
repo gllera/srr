@@ -43,18 +43,9 @@ func handleFetch(w http.ResponseWriter, r *http.Request) {
 	progress := make(chan feedProgress, 64)
 	done := make(chan error, 1)
 	go func() {
-		client := newFetchClient(globals.Workers)
-		fc := &FetchCmd{only: only}
-		err := runCycleSafe(func() error {
-			return fc.runFetch(r.Context(), client, func(p feedProgress) {
-				progress <- p
-			})
+		done <- runOnDemandCycle(r.Context(), only, func(p feedProgress) {
+			progress <- p
 		})
-		// Per-request transport: drop its idle keep-alive sockets now rather than
-		// letting them linger ~90s (IdleConnTimeout), so rapid GUI re-triggers
-		// don't pile up orphaned connections.
-		client.CloseIdleConnections()
-		done <- err
 		close(progress)
 	}()
 
