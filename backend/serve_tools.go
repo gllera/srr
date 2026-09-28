@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -88,20 +87,15 @@ func handleExport(w http.ResponseWriter, r *http.Request) {
 	asJSON := r.URL.Query().Get("format") == "json"
 	var data []byte
 	err := withDBCtx(r.Context(), false, func(_ context.Context, db *DB) error {
+		var e error
 		if asJSON {
-			out, e := json.MarshalIndent(buildConfigDoc(db), "", "  ")
-			if e != nil {
-				return fmt.Errorf("encoding config: %w", e)
-			}
-			out = append(out, '\n')
-			data = out
-			return nil
+			data, e = configDocBytes(db)
+			return e
 		}
 		feeds := make([]*Feed, 0, len(db.Feeds()))
 		for _, ch := range db.Feeds() {
 			feeds = append(feeds, ch)
 		}
-		var e error
 		data, e = opmlBytes(feeds)
 		return e
 	})

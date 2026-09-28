@@ -106,16 +106,24 @@ type ExportAllCmd struct{}
 
 func (o *ExportAllCmd) Run() error {
 	return withDB(false, func(_ context.Context, db *DB) error {
-		out, err := json.MarshalIndent(buildConfigDoc(db), "", "  ")
+		out, err := configDocBytes(db)
 		if err != nil {
-			return fmt.Errorf("encoding config: %w", err)
-		}
-		if _, err := stdout.Write(out); err != nil {
 			return err
 		}
-		_, err = stdout.Write([]byte("\n"))
+		_, err = stdout.Write(out)
 		return err
 	})
+}
+
+// configDocBytes serializes the store's export document (indented JSON +
+// trailing newline). Shared by `srr store export` and serve's
+// GET /api/export?format=json so the lossless backup can't drift between them.
+func configDocBytes(db *DB) ([]byte, error) {
+	out, err := json.MarshalIndent(buildConfigDoc(db), "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("encoding config: %w", err)
+	}
+	return append(out, '\n'), nil
 }
 
 // buildConfigDoc projects the live store into the export document. Feeds are
