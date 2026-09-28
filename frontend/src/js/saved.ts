@@ -155,13 +155,8 @@ export function savedCount(): number {
 // reads in save order.
 //
 // `ctx` is the nav state this needs and does not own: `savedMode`/`pos` are the
-// active mode and the article on screen (the unsave-of-current ghost case), and
-// `onQueueChange` is nav's neighbor-cache drop — called at exactly the point the
-// pre-split body cleared it, since the saved queue's neighbors may have shifted.
-export function toggleSaved(
-   chron: number,
-   ctx: { savedMode: boolean; pos: number; onQueueChange: () => void },
-): boolean {
+// active mode and the article on screen (the unsave-of-current ghost case).
+export function toggleSaved(chron: number, ctx: { savedMode: boolean; pos: number }): boolean {
    const set = new Set(readSavedSet())
    const nowSaved = !set.has(chron)
    // Un-saving the article currently on screen in ★ Saved mode: capture its queue
@@ -179,7 +174,6 @@ export function toggleSaved(
    writeIdSet(savedK(), set)
    stampSaved(chron)
    sync.pushSoon()
-   ctx.onQueueChange()
    // Last: the flush this write triggers runs every effect over the saved set,
    // and nothing above may depend on all of them succeeding. The toggle itself
    // is published beside the set, in the same flush, for the one subscriber

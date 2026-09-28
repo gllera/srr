@@ -81,31 +81,49 @@ function cursorFeed(): number {
    return untracked(() => model.cursor()).feedId
 }
 
-// The cached → / ← probes step() starts after a landing — valid for exactly
-// that landing: this lane object, this cursor, this store, this entry anchor.
-// Any other state is a miss, so a landing, a lane change or a store switch needs
-// no clearing — nor does a landing that moves the unread-only entry anchor
-// (lane.landed on a read article) without a new lane, since the anchor is part
-// of what the lookups answer; only a membership change under an UNMOVED cursor
-// (a store refresh, the ★ queue moving) drops them by hand.
-interface NextProbes {
+// The cached ← / → probes of the article on screen: showFeed starts them for
+// has_left/has_right and parks them here, so the next step() awaits the answer
+// it already has instead of walking the lane again. Valid for exactly the state
+// they were computed against (probeKey) — any other state is a miss, so nothing
+// drops them by hand. A landing or a lane change moves the cursor or the lane
+// object; a landing that moves the unread-only entry anchor (lane.landed on a
+// read article) moves the anchor; a store switch moves mid. Membership changes
+// under an UNMOVED cursor move a key too: every ★ queue change (a toggle, a sync
+// merge, another tab) publishes a new model.saved array, and an adopted refresh
+// replaces data.db (a failed apply restores the old one) and, once
+// onStoreRefreshed has reconciled the lane in place, bumps model.snapshot — so
+// a re-probe that ran mid-refresh, against the half-reconciled lane, is a miss.
+interface ProbeKey {
    lane: Lane
    chron: number
    anchor: number
    mid: string
+   db: IDB
+   snapshot: number
+   saved: readonly number[]
+}
+function probeKey(): ProbeKey {
+   return {
+      lane,
+      chron: cursorChron(),
+      anchor: lane.entryAnchor(),
+      mid: data.activeStore().mid,
+      db: data.db,
+      snapshot: untracked(() => model.snapshot()),
+      saved: untracked(() => model.saved()),
+   }
+}
+interface NextProbes {
+   key: ProbeKey
    left?: Promise<number>
    right?: Promise<number>
 }
 let next: NextProbes | null = null
 function nextFor(dir: "left" | "right"): Promise<number> | undefined {
    const n = next
-   return n &&
-      n.lane === lane &&
-      n.chron === cursorChron() &&
-      n.anchor === lane.entryAnchor() &&
-      n.mid === data.activeStore().mid
-      ? n[dir]
-      : undefined
+   if (!n) return undefined
+   const now = probeKey()
+   return (Object.keys(now) as (keyof ProbeKey)[]).every((k) => n.key[k] === now[k]) ? n[dir] : undefined
 }
 
 // Unseen-only navigation: when on, the active filter skips articles already
@@ -154,16 +172,10 @@ export function setUnreadOnly(on: boolean) {
 
 // Toggle one article's saved state; returns the new state (./saved owns the set
 // and the queue arithmetic). The two nav facts it needs are passed in: the
-// active MODE and the article on screen, for the unsave-of-current ghost — and
-// the neighbor-cache drop, since the saved queue's neighbors may have shifted.
+// active MODE and the article on screen, for the unsave-of-current ghost. The
+// cached neighbour probes need no drop — the new model.saved array misses them.
 export function toggleSaved(chron: number): boolean {
-   return toggleSavedSet(chron, {
-      savedMode: lane.kind === "saved",
-      pos: cursorChron(),
-      onQueueChange: () => {
-         next = null
-      },
-   })
+   return toggleSavedSet(chron, { savedMode: lane.kind === "saved", pos: cursorChron() })
 }
 
 // The chronIdx of the article currently in the reader (-1 = none), so app.ts can
@@ -373,10 +385,9 @@ export function watchLaneCount(rule: string): Promise<number> {
 // bounds (a peek lane's members stays empty for them) — skipped here; a SCOPED
 // query (RDR8) does, and reconciles through the same path as any feed/tag lane.
 export async function onStoreRefreshed(): Promise<void> {
-   // Cached neighbour probes are exactly what new content invalidates, and an
-   // in-flight prefetch may target stale content: drop both, then let the lane
+   // An in-flight prefetch may target stale content: drop it (the cached
+   // neighbour probes are keyed to the snapshot — probeKey), then let the lane
    // reconcile (bounds only rise; an active query reloads its snapshot).
-   next = null
    abortPrefetch()
    await lane.refreshed()
 }
@@ -442,7 +453,7 @@ async function showFeed(article: IArticle, seenMap?: Record<string, number>): Pr
    // explicit set in saved/search). So the prev/next buttons enable precisely
    // when a step would move. resolve() awaited loadArticle(pos), so the pos idx pack is
    // resident; a same-pack neighbor costs no fetch, and a cross-pack one is the
-   // very lookup the neighbor prefetch makes next anyway. A cold-pack fetch for a
+   // very lookup the next step needs anyway. A cold-pack fetch for a
    // boundary neighbor can blip (offline/evicted); .catch degrades to "no
    // neighbor" (button disabled, retried on the next render) rather than failing
    // the already-loaded article into the error popup. right_count rides the
@@ -459,9 +470,22 @@ async function showFeed(article: IArticle, seenMap?: Record<string, number>): Pr
    // pendingRight's rare long-behind frontiers, disjoint packs on a >50k store)
    // into one round-trip window instead of chaining them; same-pack fetches still
    // join via cachedPromise. pendingRight reuses recordSeen's seen map (seenMap).
+   // The raw neighbour probes are also parked as the next step's (nextFor); a
+   // rejected one clears its own slot, so the keypress retries on the critical
+   // path instead of being served the failure.
+   const key = probeKey()
+   const older = neighborOlder(key.chron)
+   const newer = neighborNewer(key.chron)
+   const slot: NextProbes = (next = { key, left: older, right: newer })
+   older.catch(() => {
+      slot.left = undefined
+   })
+   newer.catch(() => {
+      slot.right = undefined
+   })
    const [left, right, right_count] = await Promise.all([
-      neighborOlder(cursorChron()).catch(() => -1),
-      neighborNewer(cursorChron()).catch(() => -1),
+      older.catch(() => -1),
+      newer.catch(() => -1),
       pendingRight(seenMap).catch(() => -1),
    ])
    return {
@@ -718,29 +742,17 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
    return resolve(target, { replace: true, record: false, at })
 }
 
-// One directional navigation step. The post-navigation neighbor lookup is
-// speculative, so it is stored as an un-awaited promise keyed to the landing
-// (nextFor): findLeft/findRight may lazily fetch an idx pack, and that must
-// neither delay the article already on screen nor reject a navigation that
-// succeeded (a failed lookup just clears its slot; the next keypress retries on
-// the critical path). The slot-identity checks keep a lookup superseded by a
-// newer navigation from prefetching or clearing on its behalf.
+// One directional navigation step: to the neighbour the landing's showFeed
+// already probed (nextFor), else — a miss, or a probe that failed — a lookup on
+// the critical path. The landing's own probe in the same direction is what the
+// media prefetch warms: the article the next keypress would reach.
 async function step(dir: "left" | "right"): Promise<IShowFeed> {
    const at = data.activeStore().mid
-   const lookup = () => (dir === "left" ? neighborOlder(cursorChron()) : neighborNewer(cursorChron()))
-   const target = await (nextFor(dir) ?? lookup())
+   const target = await (nextFor(dir) ?? (dir === "left" ? neighborOlder(cursorChron()) : neighborNewer(cursorChron())))
    assertStore(at)
    if (target === -1) throw new Error(`no ${dir} match`)
    const result = await resolve(target, { at })
-   const slot: NextProbes = (next = { lane, chron: target, anchor: lane.entryAnchor(), mid: at })
-   const mine = (slot[dir] = lookup())
-   mine
-      .then((t) => {
-         if (slot[dir] === mine) schedulePrefetch(t)
-      })
-      .catch(() => {
-         if (slot[dir] === mine) slot[dir] = undefined
-      })
+   nextFor(dir)?.then(schedulePrefetch, () => {})
    return result
 }
 

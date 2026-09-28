@@ -4489,6 +4489,60 @@ describe("a lane change drops the cached neighbour probes", () => {
    })
 })
 
+// The ← / → probes showFeed computes for has_left/has_right are parked for the
+// next step, keyed to the state they answered for: a step walks its direction
+// once, and a membership change under an unmoved cursor misses them with no
+// hand-written drop.
+describe("the parked neighbour probes", () => {
+   it("a step lands on the landing's own probe: → walks the lane once", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      await nav.goTo(0) // showFeed probes → (1) and parks it
+      data.findRight.mockClear()
+      await nav.right()
+      expect(nav.currentChron()).toBe(1)
+      expect(data.findRight).toHaveBeenCalledTimes(1) // the new landing's has_right probe, nothing else
+   })
+
+   it("another tab's ★ change misses them: → follows the republished queue", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      localStorage.setItem("srr-saved", JSON.stringify([1, 3]))
+      window.dispatchEvent(new StorageEvent("storage", { key: "srr-saved" }))
+      await nav.switchFilter(nav.SAVED_TOKEN)
+      await nav.goToArticle(1) // the → probe parks 3
+      localStorage.setItem("srr-saved", JSON.stringify([1, 2, 3])) // the other tab saves 2 after 1
+      window.dispatchEvent(new StorageEvent("storage", { key: "srr-saved" }))
+      await nav.right()
+      expect(nav.currentChron()).toBe(2)
+   })
+
+   it("an adopted refresh misses a re-probe run before the lane reconciled", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }]) // [ALL] over feed 1
+      await nav.goTo(1) // newest: nothing to the right
+      // data.refresh(): a new snapshot object, with a new feed 2 at chron 2.
+      data.db = { ...data.db, feeds: { ...data.db.feeds, 2: makeFeed({ id: 2 }) }, total_art: 3 }
+      data.getFeedId.mockImplementation((idx: number) => [1, 1, 2][idx])
+      data.loadArticle.mockImplementation(async (idx: number) => makeArticle({ f: [1, 1, 2][idx] }))
+      // A chrome re-probe (another tab's read) lands before onStoreRefreshed: [ALL]
+      // has not taken feed 2 in yet, so its → probe parks -1 under the new db.
+      expect((await nav.probeCurrent())!.has_right).toBe(false)
+      await nav.onStoreRefreshed()
+      model.snapshot.update((n) => n + 1) // refresh.publishSnapshot
+      await nav.right()
+      expect(nav.currentChron()).toBe(2)
+   })
+
+   it("a refresh whose apply failed misses a re-probe run against the half-applied snapshot", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }])
+      await nav.goTo(1)
+      const old = data.db
+      data.db = { ...old, total_art: 3 } // applyDb installed the new snapshot: chron 2, feed 1
+      data.getFeedId.mockImplementation(() => 1)
+      expect((await nav.probeCurrent())!.has_right).toBe(true) // parks 2
+      data.db = old // …then a pack fetch rejected, and data.refresh restored the old one
+      await expect(nav.right()).rejects.toThrow("no right match")
+   })
+})
+
 // A landing awaits its article; the active store can change underneath it (a
 // sync merge unmounting the store it was reading falls back to home outside the
 // navigation mutex). Committing then would write the OLD store's chron as the

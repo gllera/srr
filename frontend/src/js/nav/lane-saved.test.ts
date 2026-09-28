@@ -52,7 +52,7 @@ describe("SavedLane", () => {
    })
 
    it("keeps answering for the article just un-saved on screen (the saved.ts ghost)", async () => {
-      toggleSaved(1, { savedMode: true, pos: 1, onQueueChange: () => {} })
+      toggleSaved(1, { savedMode: true, pos: 1 })
       const l = lane()
       expect(await l.older(1)).toBe(4)
       expect(await l.newer(1)).toBe(3)

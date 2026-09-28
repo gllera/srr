@@ -4755,8 +4755,7 @@ describe("saved-article asset pinning", () => {
          Object.defineProperty(navigator, "serviceWorker", { value: undefined, configurable: true })
       }
    }
-   const toggle = async (chron: number) =>
-      (await import("./saved")).toggleSaved(chron, { savedMode: false, pos: -1, onQueueChange: () => {} })
+   const toggle = async (chron: number) => (await import("./saved")).toggleSaved(chron, { savedMode: false, pos: -1 })
 
    const KEYS = ["assets/ab/0123456789abcdef.jpg", "assets/cd/fedcba9876543210.mp4"]
 

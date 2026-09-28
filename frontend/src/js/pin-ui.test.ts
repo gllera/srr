@@ -30,7 +30,7 @@ vi.mock("./fmt", () => ({ extractAssetKeys }))
 const post = vi.fn()
 const pins = () => post.mock.calls.filter(([m]) => m.type === "pin").map(([m]) => m)
 const tick = () => new Promise((r) => setTimeout(r))
-const ctx = { savedMode: false, pos: -1, onQueueChange: () => {} }
+const ctx = { savedMode: false, pos: -1 }
 const stops: Array<() => void> = []
 
 let model: typeof import("./model")
