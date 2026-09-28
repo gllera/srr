@@ -148,8 +148,8 @@ func processItem(ctx context.Context, processor *mod.Module, pipeline []string, 
 // it rewrites the session's DOM in place and reports the change, so nothing is
 // re-rendered until a boundary needs the string.
 func absolutizeContent(sess *mod.Session, link string) {
-	base, err := url.Parse(strings.TrimSpace(link))
-	if err != nil || base.Host == "" || (base.Scheme != "http" && base.Scheme != "https") {
+	base, ok := mod.ParseHTTPURL(strings.TrimSpace(link))
+	if !ok {
 		return
 	}
 	body := sess.DOM()

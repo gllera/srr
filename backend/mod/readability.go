@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -125,8 +124,8 @@ func fetchReadable(ctx context.Context, client *http.Client, link string, maxBod
 	if link == "" {
 		return "", nil
 	}
-	u, err := url.Parse(link)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	u, ok := ParseHTTPURL(link)
+	if !ok {
 		return "", nil
 	}
 

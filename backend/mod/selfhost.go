@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -103,8 +102,8 @@ func init() {
 // write error), so one bad asset never fails the item. A file already present
 // for the URL is reused (download dedup; upload dedup is UploadCacheRef's).
 func downloadToCache(ctx context.Context, client *http.Client, cacheDir, rawURL string, timeout time.Duration, maxBody int64) (string, bool) {
-	u, err := url.Parse(rawURL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	u, ok := ParseHTTPURL(rawURL)
+	if !ok {
 		return "", false // relative assets/ keys, #fragments, data: — not ours
 	}
 

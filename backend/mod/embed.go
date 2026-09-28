@@ -90,8 +90,8 @@ func classifyEmbed(src string) (embedTarget, bool) {
 	if strings.HasPrefix(s, "//") {
 		s = "https:" + s
 	}
-	u, err := url.Parse(s)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+	u, ok := ParseHTTPURL(s)
+	if !ok {
 		return embedTarget{}, false
 	}
 	host := strings.ToLower(u.Hostname())
@@ -219,8 +219,8 @@ func embedSoundCloud(parts []string, q url.Values) (embedTarget, bool) {
 	if len(parts) == 0 || parts[0] != "player" {
 		return embedTarget{}, false
 	}
-	t, err := url.Parse(q.Get("url"))
-	if err != nil || (t.Scheme != "http" && t.Scheme != "https") {
+	t, ok := ParseHTTPURL(q.Get("url"))
+	if !ok {
 		return embedTarget{}, false
 	}
 	if strings.TrimPrefix(strings.ToLower(t.Hostname()), "www.") != "soundcloud.com" {

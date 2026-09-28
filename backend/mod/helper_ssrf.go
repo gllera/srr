@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"syscall"
 	"time"
@@ -143,3 +144,17 @@ func SafeTransport() *http.Transport {
 var safeClient = sync.OnceValue(func() *http.Client {
 	return &http.Client{Transport: SafeTransport()}
 })
+
+// ParseHTTPURL parses s as an absolute http(s) URL with a host — the one
+// definition of a fetchable URL that #selfhost, #readability, #embed and the
+// pre-pipeline absolutizer share. ok=false for anything else: a parse error,
+// a relative reference, an assets/ key, a #fragment or marker, data: and
+// every other scheme. url.Parse lowercases the scheme, so the comparison is
+// exact.
+func ParseHTTPURL(s string) (*url.URL, bool) {
+	u, err := url.Parse(s)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, false
+	}
+	return u, true
+}
