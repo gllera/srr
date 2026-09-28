@@ -14,6 +14,12 @@ inputs:
       Install golangci-lint (needed by any job running make verify /
       verify-be / release). Off for jobs that build but never lint.
     default: "true"
+  puppeteer:
+    description: >
+      Cache the Chrome that puppeteer's postinstall downloads (needed by any job
+      running make test-browser). Single-sourced here so every browser job
+      shares one cache key.
+    default: "false"
   golangci-version:
     description: >
       The pinned golangci-lint release, single-sourced here: it is the install
@@ -65,3 +71,13 @@ runs:
         node-version-file: .nvmrc
         cache: 'npm'
         cache-dependency-path: frontend/package-lock.json
+    # Chrome is downloaded by puppeteer's postinstall during npm ci; restoring
+    # the cache first lets it skip the download on a hit.
+    - if: inputs.puppeteer == 'true'
+      name: Cache Puppeteer Chrome
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/puppeteer
+        key: puppeteer-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
+        restore-keys: |
+          puppeteer-${{ runner.os }}-

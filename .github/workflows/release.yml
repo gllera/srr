@@ -41,15 +41,7 @@ jobs:
     - uses: ./.github/actions/setup-toolchain
       with:
         lint: "false"
-    # Chrome is downloaded by puppeteer's postinstall during npm ci; restoring
-    # the cache first lets it skip the download on a hit.
-    - name: Cache Puppeteer Chrome
-      uses: actions/cache@v4
-      with:
-        path: ~/.cache/puppeteer
-        key: puppeteer-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
-        restore-keys: |
-          puppeteer-${{ runner.os }}-
+        puppeteer: "true"
     - run: make test-browser
 
   release:
