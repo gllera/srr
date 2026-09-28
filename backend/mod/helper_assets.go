@@ -69,21 +69,52 @@ func HasAssetMarkers(content string) bool {
 
 // RewriteAttrs walks the assetAttrs values in content and rewrites their
 // "#"-prefixed upload markers via fn (the "#" already stripped). Non-marker
-// values never reach fn. Unparseable content and a no-op pass both return the
-// original string verbatim. It is the asset-upload walk behind the
-// end-of-pipeline step in main.Feed.fetch: fn owns the upload policy.
+// values never reach fn. fn returns (newValue, true, nil) to replace the
+// marker, (_, false, nil) to leave it, or a non-nil error to abort the walk.
+// Unparseable content and a no-op pass both return the original string
+// verbatim (no re-render), so quoting/whitespace survive when nothing
+// changed; an fn or render error is returned with an empty string. It is the
+// asset-upload walk behind the end-of-pipeline step in main.Feed.fetch: fn
+// owns the upload policy.
 func RewriteAttrs(content string, fn func(marker string) (string, bool, error)) (string, error) {
 	// Marker-less content holds no upload markers — skip the HTML parse entirely
 	// (see HasAssetMarkers for the why; #feed feeds hit this common case).
 	if !HasAssetMarkers(content) {
 		return content, nil
 	}
-	return walkAssetAttrs(content, assetAttrs, func(val string) (string, bool, error) {
+	nodes, err := ParseBodyFragment(content)
+	if err != nil {
+		// Unparseable content: leave it untouched rather than fail the item.
+		return content, nil
+	}
+
+	marker := func(val string) (string, bool, error) {
 		if !strings.HasPrefix(val, "#") {
 			return "", false, nil
 		}
 		return fn(strings.TrimPrefix(val, "#"))
-	})
+	}
+	changed := false
+	for _, n := range nodes {
+		c, err := walkNode(n, assetAttrs, marker)
+		if err != nil {
+			return "", err
+		}
+		if c {
+			changed = true
+		}
+	}
+	if !changed {
+		return content, nil
+	}
+
+	var b strings.Builder
+	for _, n := range nodes {
+		if err := html.Render(&b, n); err != nil {
+			return "", err
+		}
+	}
+	return b.String(), nil
 }
 
 // ParseBodyFragment parses content as an HTML body fragment. Callers treat a
@@ -107,48 +138,10 @@ func VisitAssetAttrs(nodes []*html.Node, fn func(a *html.Attribute)) {
 	}
 }
 
-// walkAssetAttrs parses content as an HTML fragment and calls fn(value) for
-// every attribute listed in attrs (tag -> attr names). fn returns
-// (newValue, true, nil) to replace the value, (_, false, nil) to leave it, or a
-// non-nil error to abort the walk. Unparseable content and a no-op pass both
-// return content verbatim (no re-render), so quoting/whitespace survive when
-// nothing changed; an fn or render error is returned with an empty string. It
-// is the shared HTML walk behind both the upload step (RewriteAttrs, marker ->
-// key) and #selfhost (URL -> marker).
-func walkAssetAttrs(content string, attrs map[string][]string, fn func(val string) (string, bool, error)) (string, error) {
-	nodes, err := ParseBodyFragment(content)
-	if err != nil {
-		// Unparseable content: leave it untouched rather than fail the item.
-		return content, nil
-	}
-
-	changed := false
-	for _, n := range nodes {
-		c, err := walkNode(n, attrs, fn)
-		if err != nil {
-			return "", err
-		}
-		if c {
-			changed = true
-		}
-	}
-	if !changed {
-		return content, nil
-	}
-
-	var b strings.Builder
-	for _, n := range nodes {
-		if err := html.Render(&b, n); err != nil {
-			return "", err
-		}
-	}
-	return b.String(), nil
-}
-
 // walkNode applies fn to the attrs-listed attributes on n and its descendants,
 // replacing each value when fn returns ok. Returns true if any value changed, or
 // the first error fn returns (which stops the walk). The replace-style face of
-// visitNode below, kept for #selfhost and walkAssetAttrs.
+// visitNode below, kept for #selfhost and RewriteAttrs.
 func walkNode(n *html.Node, attrs map[string][]string, fn func(val string) (string, bool, error)) (bool, error) {
 	changed := false
 	err := visitNode(n, attrs, func(a *html.Attribute) error {

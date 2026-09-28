@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"golang.org/x/net/html"
 )
 
 // upMarker mirrors the real upload-marker policy (the upload step inlined in
@@ -64,6 +66,11 @@ func TestRewriteAttrsKeepsValueOnResolveFalse(t *testing.T) {
 	if !strings.Contains(out, "#missing.jpg") {
 		t.Errorf("unresolved marker should be left in place:\n%s", out)
 	}
+	// A pass that changed nothing returns the input itself, not a re-render
+	// (which would self-close the <img>).
+	if out != in {
+		t.Errorf("no-op pass = %q, want the original %q verbatim", out, in)
+	}
 }
 
 // RewriteAttrs strips the "#" and hands fn the marker remainder, so the caller's
@@ -115,17 +122,26 @@ func TestCacheDirContextRoundTrips(t *testing.T) {
 	}
 }
 
-// walkAssetAttrs visits EVERY listed attribute (not just "#"-markers); the
+// walkNode visits EVERY listed attribute (not just "#"-markers); the
 // callback decides. Here it uppercases each img/video/audio src to prove the
-// generic walk + selective rewrite + no-op-preserves-original behavior.
-func TestWalkAssetAttrsRewritesSelected(t *testing.T) {
-	in := `<img src="a"><video src="b"></video><audio src="c"></audio><a href="d">x</a>`
-	out, err := walkAssetAttrs(in, mediaAttrs, func(val string) (string, bool, error) {
-		return strings.ToUpper(val), true, nil
-	})
+// generic walk + selective rewrite behavior.
+func TestWalkNodeRewritesSelected(t *testing.T) {
+	nodes, err := ParseBodyFragment(`<img src="a"><video src="b"></video><audio src="c"></audio><a href="d">x</a>`)
 	if err != nil {
-		t.Fatalf("walkAssetAttrs: %v", err)
+		t.Fatalf("ParseBodyFragment: %v", err)
 	}
+	var b strings.Builder
+	for _, n := range nodes {
+		if _, err := walkNode(n, mediaAttrs, func(val string) (string, bool, error) {
+			return strings.ToUpper(val), true, nil
+		}); err != nil {
+			t.Fatalf("walkNode: %v", err)
+		}
+		if err := html.Render(&b, n); err != nil {
+			t.Fatalf("Render: %v", err)
+		}
+	}
+	out := b.String()
 	for _, want := range []string{`src="A"`, `src="B"`, `src="C"`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in %s", want, out)
@@ -137,14 +153,19 @@ func TestWalkAssetAttrsRewritesSelected(t *testing.T) {
 	}
 }
 
-func TestWalkAssetAttrsNoMatchReturnsOriginal(t *testing.T) {
-	in := `<p>no media here</p>`
-	out, err := walkAssetAttrs(in, mediaAttrs, func(_ string) (string, bool, error) {
-		t.Fatal("fn must not be called when no listed attribute is present")
-		return "", false, nil
-	})
-	if err != nil || out != in {
-		t.Errorf("got (%q, %v), want original unchanged", out, err)
+func TestWalkNodeNoMatchReportsUnchanged(t *testing.T) {
+	nodes, err := ParseBodyFragment(`<p>no media here</p>`)
+	if err != nil {
+		t.Fatalf("ParseBodyFragment: %v", err)
+	}
+	for _, n := range nodes {
+		changed, err := walkNode(n, mediaAttrs, func(_ string) (string, bool, error) {
+			t.Fatal("fn must not be called when no listed attribute is present")
+			return "", false, nil
+		})
+		if err != nil || changed {
+			t.Errorf("got (%v, %v), want (false, nil)", changed, err)
+		}
 	}
 }
 
