@@ -545,19 +545,25 @@ func (d *SFTP) clientFor(ctx context.Context, attempt int) (*sftp.Client, error)
 	return d.reconnect(ctx)
 }
 
+// attempt is try n of an op, shared by retry and retryBody: it resolves that
+// attempt's client and, on success, stamps the session fresh.
+func (d *SFTP) attempt(ctx context.Context, n int, op func(*sftp.Client) error) error {
+	c, err := d.clientFor(ctx, n)
+	if err != nil {
+		return err
+	}
+	err = op(c)
+	if err == nil {
+		d.markOK()
+	}
+	return err
+}
+
 // retry runs a body-less op under the store retry policy (see retry.go),
 // handing it a freshly resolved client per attempt.
 func (d *SFTP) retry(ctx context.Context, op func(*sftp.Client) error) error {
 	return withRetry(ctx, func(attempt int) error {
-		c, err := d.clientFor(ctx, attempt)
-		if err != nil {
-			return err
-		}
-		err = op(c)
-		if err == nil {
-			d.markOK()
-		}
-		return err
+		return d.attempt(ctx, attempt, op)
 	})
 }
 
@@ -576,15 +582,7 @@ func (d *SFTP) markOK() {
 // replayed at all, so a retried upload is either byte-complete or never made.
 func (d *SFTP) retryBody(ctx context.Context, r io.Reader, op func(*sftp.Client, io.Reader) error) error {
 	return withRetryBody(ctx, r, func(attempt int, body io.Reader) error {
-		c, err := d.clientFor(ctx, attempt)
-		if err != nil {
-			return err
-		}
-		err = op(c, body)
-		if err == nil {
-			d.markOK()
-		}
-		return err
+		return d.attempt(ctx, attempt, func(c *sftp.Client) error { return op(c, body) })
 	})
 }
 
