@@ -277,13 +277,7 @@ function loadShard(st: SearchState, n: number): Promise<Shard> {
 function deltaShard(st: SearchState): Shard {
    const arts = data.deltaArticles()
    if (st.deltaShardCache?.arts !== arts) {
-      st.deltaShardCache = {
-         arts,
-         shard: {
-            entries: arts.map(data.metaCardOf),
-            folded: arts.map((a) => fold(a.t ?? "")),
-         },
-      }
+      st.deltaShardCache = { arts, shard: makeShard(arts.map(data.metaCardOf)) }
    }
    return st.deltaShardCache.shard
 }
@@ -422,7 +416,6 @@ export function loadHits(query: string, cap: number, scope?: SearchScope): Promi
    // caching for the case that existed before scoping did.
    const key = scope ? JSON.stringify([query, scope.key]) : query
    return cachedPromise(stateOf(activeStore()).hitCache, key, async () => {
-      const seen = new Set<number>()
       const chrons: number[] = []
       const cards = new Map<number, import("./format.gen").IMetaWire>()
       let truncated = false
@@ -433,8 +426,7 @@ export function loadHits(query: string, cap: number, scope?: SearchScope): Promi
                   truncated = true
                   break outer
                }
-               if (!seen.has(h.chron)) {
-                  seen.add(h.chron)
+               if (!cards.has(h.chron)) {
                   chrons.push(h.chron)
                   // The scan already parsed this shard entry's {f,w,t}; keep it so
                   // renderSearch builds rows without re-reading the meta packs.
