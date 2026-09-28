@@ -147,7 +147,7 @@ func (o *DB) Compact(ctx context.Context, dryRun bool) error {
 	dataTail := names.series(dataSeries).Tail
 	fin := o.newPackFinalizer(ctx)
 	for _, pid := range slices.Sorted(maps.Keys(dataExpired)) {
-		dropped, err := o.compactDataPack(ctx, c, names, fin, pid, pid == dataTail, dataExpired[pid], assetKeys)
+		dropped, err := o.compactDataPack(ctx, names, fin, pid, pid == dataTail, dataExpired[pid], assetKeys)
 		if err != nil {
 			return err
 		}
@@ -163,15 +163,17 @@ func (o *DB) Compact(ctx context.Context, dryRun bool) error {
 		if s != metaTail {
 			rebuiltFinalized = true
 		}
-		if err := o.compactMetaShard(ctx, c, names, s, s == metaTail, metaExpired[s]); err != nil {
+		if err := o.compactMetaShard(ctx, names, s, s == metaTail, metaExpired[s]); err != nil {
 			return err
 		}
 	}
 	// A rewritten finalized shard changed its bloom, so the bloom summary
 	// (concatenation of the finalized blooms) must be republished under a fresh
-	// stem too. The idx header summary is untouched — idx/ is never rewritten.
+	// stem too, reading each shard's CURRENT bloom from the staged table so the
+	// rewritten ones contribute their new one. The idx header summary is
+	// untouched — idx/ is never rewritten.
 	if rebuiltFinalized {
-		if err := o.rebuildMetaSummary(ctx, c, names); err != nil {
+		if err := o.syncMetaSummary(ctx, names, c.metaPacks()); err != nil {
 			return err
 		}
 	}
@@ -225,8 +227,8 @@ func markExpired(m map[int]map[int]bool, k, pos int) {
 // survivor is copied verbatim (byte-identical, so the reader's cache-first path
 // is unaffected). Returns the uncompressed content bytes dropped. Finalized
 // packs recompress with zopfli like the writer; the tail keeps fast gzip.
-func (o *DB) compactDataPack(ctx context.Context, c *DBCore, names *ManifestNames, fin *packFinalizer, pid int, isTail bool, expired map[int]bool, assetKeys map[string]struct{}) (int64, error) {
-	key, err := c.Names.key(dataSeries, pid)
+func (o *DB) compactDataPack(ctx context.Context, names *ManifestNames, fin *packFinalizer, pid int, isTail bool, expired map[int]bool, assetKeys map[string]struct{}) (int64, error) {
+	key, err := o.core.Names.key(dataSeries, pid)
 	if err != nil {
 		return 0, fmt.Errorf("compact: data pack %d: %w", pid, err)
 	}
@@ -276,8 +278,8 @@ func (o *DB) compactDataPack(ctx context.Context, c *DBCore, names *ManifestName
 // compactMetaShard rewrites one meta shard under a fresh stem, dropping the
 // title of every expired card (keeping {f,w}); a finalized shard's bloom is
 // rebuilt over the survivors, the tail shard carries none.
-func (o *DB) compactMetaShard(ctx context.Context, c *DBCore, names *ManifestNames, s int, isTail bool, expired map[int]bool) error {
-	key, err := c.Names.key(metaSeries, s)
+func (o *DB) compactMetaShard(ctx context.Context, names *ManifestNames, s int, isTail bool, expired map[int]bool) error {
+	key, err := o.core.Names.key(metaSeries, s)
 	if err != nil {
 		return fmt.Errorf("compact: meta shard %d: %w", s, err)
 	}
@@ -330,17 +332,6 @@ func tombstoneMetaLines(body []byte, expired map[int]bool) ([][]byte, error) {
 		i++
 	}
 	return out, nil
-}
-
-// rebuildMetaSummary republishes the bloom summary (concatenation of the
-// finalized shards' blooms) under a fresh stem, reading each shard's CURRENT
-// bloom from the staged name table so rewritten shards contribute their new one.
-func (o *DB) rebuildMetaSummary(ctx context.Context, c *DBCore, names *ManifestNames) error {
-	nf := c.metaPacks()
-	if nf == 0 {
-		return nil
-	}
-	return o.syncMetaSummary(ctx, names, nf)
 }
 
 // rmAssets deletes the collected asset keys, bounded like ExpireArticles' own
