@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"unicode"
@@ -489,13 +490,7 @@ func (o *DB) readMetaLines(ctx context.Context, key string) ([][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	var lines [][]byte
-	for _, line := range bytes.SplitAfter(raw, []byte("\n")) {
-		if len(line) > 0 {
-			lines = append(lines, line)
-		}
-	}
-	return lines, nil
+	return slices.Collect(bytes.Lines(raw)), nil
 }
 
 // syncMetaSummary republishes the meta bloom summary — the concatenation of

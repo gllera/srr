@@ -109,18 +109,10 @@ func dataKeyFor(core *DBCore, packID int) (string, error) {
 }
 
 // parseDataPack decodes a JSONL data pack (one ArticleData per line)
-// from its decompressed bytes.
+// from its decompressed bytes — splitDataPack without the line bytes.
 func parseDataPack(data []byte) ([]ArticleData, error) {
-	var entries []ArticleData
-	dec := json.NewDecoder(bytes.NewReader(data))
-	for dec.More() {
-		var a ArticleData
-		if err := dec.Decode(&a); err != nil {
-			return nil, err
-		}
-		entries = append(entries, a)
-	}
-	return entries, nil
+	_, entries, err := splitDataPack(data)
+	return entries, err
 }
 
 // splitDataPack decodes a data-pack buffer into both its verbatim per-article
@@ -130,14 +122,7 @@ func parseDataPack(data []byte) ([]ArticleData, error) {
 // exact. Used by loadDeltaChain so consolidation can re-emit the delta bytes
 // verbatim (identical to a re-encode, minus the CPU).
 func splitDataPack(data []byte) (lines [][]byte, entries []ArticleData, err error) {
-	for len(data) > 0 {
-		i := bytes.IndexByte(data, '\n')
-		var line []byte
-		if i < 0 {
-			line, data = data, nil // tolerate a missing final newline
-		} else {
-			line, data = data[:i+1], data[i+1:]
-		}
+	for line := range bytes.Lines(data) {
 		var a ArticleData
 		if err := json.Unmarshal(bytes.TrimRight(line, "\n"), &a); err != nil {
 			return nil, nil, err
@@ -269,18 +254,13 @@ func (o *DB) loadPack(ctx context.Context, key string) ([]byte, error) {
 // this — deflate's OUTPUT is a function of the byte stream alone; only the
 // in-flight Len() the roll reads was chunking-sensitive.
 //
-// The empty guard is load-bearing: gzip.NewWriter flushes its header on the
-// first Write — including Write(nil) — so an empty pack must skip the Write to
-// keep Len()==0, the fresh-store sentinel the idx/data writers branch on.
+// The empty case is load-bearing: gzip.NewWriter flushes its header on the
+// first Write — including Write(nil) — so an empty pack must see no Write
+// (bytes.Lines yields nothing for it) to keep Len()==0, the fresh-store
+// sentinel the idx/data writers branch on.
 func packFromBytes(raw []byte) (*pack, error) {
 	p := newPack()
-	for len(raw) > 0 {
-		line := raw
-		if i := bytes.IndexByte(raw, '\n'); i >= 0 {
-			line, raw = raw[:i+1], raw[i+1:]
-		} else {
-			raw = nil // tolerate a missing final newline, as splitDataPack does
-		}
+	for line := range bytes.Lines(raw) {
 		if _, err := p.Write(line); err != nil {
 			return nil, err
 		}

@@ -313,10 +313,7 @@ func (o *DB) compactMetaShard(ctx context.Context, c *DBCore, names *ManifestNam
 func tombstoneMetaLines(body []byte, expired map[int]bool) ([][]byte, error) {
 	var out [][]byte
 	i := 0
-	for _, line := range bytes.SplitAfter(body, []byte("\n")) {
-		if len(line) == 0 {
-			continue
-		}
+	for line := range bytes.Lines(body) {
 		if expired[i] {
 			var e MetaEntry
 			if err := json.Unmarshal(bytes.TrimRight(line, "\n"), &e); err != nil {
