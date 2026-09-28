@@ -329,15 +329,17 @@ func (o *DB) loadRefs(ctx context.Context) *assetRefs {
 }
 
 // SyncRefs persists the pool under a FRESH stem and records the name, so the
-// manifest the caller's Commit publishes points at exactly the reference counts
-// that describe this generation's articles. Write-if-dirty: an idle cycle writes
+// manifest that Commit publishes points at exactly the reference counts that
+// describe this generation's articles. Write-if-dirty: an idle cycle writes
 // nothing, leaves the name alone, and therefore mints no generation.
 //
-// Its failure is FATAL to the cycle (returned, not warned), for the same reason
-// SyncSeen's is: a committed batch whose references were not counted leaves
-// every one of its keys undercounted, and an undercount is what deletes a shared
-// object out from under a live article. The batch is unreferenced garbage until
-// the root flips, so aborting costs a cycle and nothing else.
+// It is one of Commit's first steps (db.go, right after SyncSeen), and its
+// failure is FATAL to that Commit (returned, not warned), before the manifest
+// and the root flip, for the same reason SyncSeen's is: a committed batch whose
+// references were not counted leaves every one of its keys undercounted, and an
+// undercount is what deletes a shared object out from under a live article.
+// The batch is unreferenced garbage until the root flips, so aborting costs a
+// cycle and nothing else.
 func (o *DB) SyncRefs(ctx context.Context) error {
 	if o.refs == nil || !o.refs.dirty {
 		return nil

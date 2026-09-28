@@ -244,15 +244,15 @@ func TestSeenPoolPurgedOnFeedRemove(t *testing.T) {
 	}
 	id := db.core.Feeds[0].id
 	db.seen.stamp(id, 0xdead, 100) // a guid this feed had seen
-	if err := db.commitState(ctx); err != nil {
-		t.Fatalf("commitState: %v", err)
+	if err := db.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
 	}
 
 	if err := db.RemoveFeed(ctx, id); err != nil {
 		t.Fatalf("RemoveFeed: %v", err)
 	}
-	if err := db.commitState(ctx); err != nil { // the RmCmd / deleteFeed path
-		t.Fatalf("commitState after remove: %v", err)
+	if err := db.Commit(ctx); err != nil { // the RmCmd / deleteFeed path
+		t.Fatalf("Commit after remove: %v", err)
 	}
 
 	db2, err := NewDB(ctx, false)
@@ -310,16 +310,16 @@ func TestParseSeenCorruptionGuard(t *testing.T) {
 // ping/pong: SyncSeen alone only flips core.SeenFlag in memory (see
 // TestSeenInactiveSlotIgnoredWithoutCommit) — a Commit is required for the flip
 // to be durable and for a reopen to name the slot SyncSeen just wrote via the
-// direct (non-fallback) path, so this test now goes through commitState like the
-// other persistence tests.
+// direct (non-fallback) path, so this test now goes through Commit (which runs
+// SyncSeen) like the other persistence tests.
 func TestSyncSeenPersistsAcrossReopen(t *testing.T) {
 	db, _, _ := setupTestDB(t)
 	if db.seen == nil {
 		t.Fatal("NewDB left db.seen nil, want an (empty) pool")
 	}
 	db.seen.stamp(1, 0xabc123, 100)
-	if err := db.commitState(ctx); err != nil { // SyncSeen (flip) + Commit (publish)
-		t.Fatalf("commitState: %v", err)
+	if err := db.Commit(ctx); err != nil { // SyncSeen + publish
+		t.Fatalf("Commit: %v", err)
 	}
 
 	// A second DB on the same store (local reads need no lock) reloads seen.gz.
@@ -357,8 +357,8 @@ func TestETagLastModifiedPersistViaSeen(t *testing.T) {
 	if err := db.AddFeed(&Feed{Title: "T", URL: "http://x", ETag: `W/"e-123"`, LastModified: "Mon, 01 Jan 2024 00:00:00 GMT"}); err != nil {
 		t.Fatalf("AddFeed: %v", err)
 	}
-	if err := db.commitState(ctx); err != nil { // Commit + SyncSeen
-		t.Fatalf("commitState: %v", err)
+	if err := db.Commit(ctx); err != nil { // SyncSeen + publish
+		t.Fatalf("Commit: %v", err)
 	}
 
 	db2, err := NewDB(ctx, false)
@@ -452,7 +452,7 @@ func TestSeenMarshalRoundTripV2WithBG(t *testing.T) {
 	}
 }
 
-// bg is relocated out of db.gz into seen.gz: after a commitState, db.gz must not
+// bg is relocated out of db.gz into seen.gz: after a Commit, db.gz must not
 // carry a "bg" key, and a reopen must hydrate bg back onto the feed from seen.gz.
 func TestBGRoundTripsSeenNotDBGZ(t *testing.T) {
 	db, _, dir := setupTestDB(t)
@@ -461,7 +461,7 @@ func TestBGRoundTripsSeenNotDBGZ(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := f.id
-	if err := db.commitState(ctx); err != nil { // SyncSeen + Commit
+	if err := db.Commit(ctx); err != nil { // SyncSeen + publish
 		t.Fatal(err)
 	}
 	if raw := decompressGz(t, filepath.Join(dir, "db.gz")); bytes.Contains(raw, []byte(`"bg"`)) {
@@ -569,12 +569,12 @@ func TestRemoveFeedPurgesBG(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := f.id
-	// commitState → snapshotHTTP pulls bg into the pool's feedState, SyncSeen persists.
-	if err := db.commitState(ctx); err != nil {
+	// Commit → SyncSeen → snapshotHTTP pulls bg into the pool's feedState and persists it.
+	if err := db.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := db.seen.feed[id]; !ok {
-		t.Fatal("precondition: a bg-carrying feedState should exist after commitState")
+		t.Fatal("precondition: a bg-carrying feedState should exist after Commit")
 	}
 	if err := db.RemoveFeed(ctx, id); err != nil {
 		t.Fatalf("RemoveFeed: %v", err)

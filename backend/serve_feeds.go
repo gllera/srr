@@ -95,9 +95,7 @@ func saveFeed(ctx context.Context, db *DB, v *feedView) (*Feed, error) {
 			return nil, err
 		}
 	}
-	// commitState so a setFeedURL reset persists the cleared seen.gz-backed
-	// ETag/LastModified alongside the db.gz mutations.
-	return ch, db.commitState(ctx)
+	return ch, db.Commit(ctx)
 }
 
 func updateFeed(w http.ResponseWriter, r *http.Request) {
@@ -169,8 +167,7 @@ func deleteFeed(w http.ResponseWriter, r *http.Request) {
 		if e := db.RemoveFeed(ctx, id); e != nil {
 			return e
 		}
-		// commitState so RemoveFeed's seen.gz purge persists before id reuse.
-		return db.commitState(ctx)
+		return db.Commit(ctx)
 	})
 }
 

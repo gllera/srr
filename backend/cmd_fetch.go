@@ -953,9 +953,9 @@ func (o *FetchCmd) commitPhase(ctx context.Context, db *DB, res *fetchResults) e
 	// every cycle including the GUI single-feed fetch (o.only) — evict is
 	// global maintenance, like ExpireArticles: it uses the full live feeds map
 	// so an unfetched feed's entries are retained (they age out over the
-	// horizon), while stamps come only from feeds fetched this cycle. SyncSeen
-	// (before Commit, below) persists it; the pool's dirty flag skips the
-	// write on an idle cycle that changed nothing.
+	// horizon), while stamps come only from feeds fetched this cycle. Commit
+	// (below) persists it; the pool's dirty flag skips the write on an idle
+	// cycle that changed nothing.
 	db.seen.evict(today, func(fid int) int {
 		return db.core.Feeds[fid].dedupDays(db.core.DedupDays)
 	}, seenFeedCap, db.core.Feeds)
@@ -1021,24 +1021,6 @@ func (o *FetchCmd) commitPhase(ctx context.Context, db *DB, res *fetchResults) e
 			o.lastOutSig = sig
 		}
 	}
-	// Persist the dedup pool (pool + bg) to the inactive seen slot and flip
-	// SeenFlag BEFORE the commit, so db.gz publishes the article batch and the
-	// pointer to its matching dedup state atomically. Fatal to the cycle on
-	// failure: bg is load-bearing, so a committed batch must never outrun the
-	// slot that dedups its GUIDs. Idle cycles write nothing (write-if-dirty).
-	if err := db.SyncSeen(ctx); err != nil {
-		return fmt.Errorf("sync seen pool: %w", err)
-	}
-	// Same contract for the asset refcount sidecar, and the same reason it is
-	// fatal rather than warn-only: the batch and the reference counts that
-	// describe it must become durable by ONE root flip, or a committed article
-	// leaves its assets undercounted and a later expiry deletes an object a live
-	// article still shows. Written after ExpireArticles so this cycle's releases
-	// ride the same object as its additions; write-if-dirty, so an idle cycle
-	// writes nothing and mints no generation.
-	if err := db.SyncRefs(ctx); err != nil {
-		return fmt.Errorf("sync asset refcounts: %w", err)
-	}
 	// ONE GC rule (docs/MANIFEST-SPEC.md §7): delete what the last K
 	// manifests do not name. It replaces the four per-feature sweeps and
 	// their window formulas the cutover retired. Runs BEFORE the Commit, so
@@ -1050,6 +1032,9 @@ func (o *FetchCmd) commitPhase(ctx context.Context, db *DB, res *fetchResults) e
 	if err := db.GC(ctx, globals.KeepManifests); err != nil {
 		slog.Warn("gc", "error", err)
 	}
+	// Commit persists the dedup pool and the asset refcounts with the batch
+	// (fatal, write-if-dirty). It runs after ExpireArticles, so this cycle's
+	// reference releases ride the same refcount object as its additions.
 	if err := db.Commit(ctx); err != nil {
 		return err
 	}

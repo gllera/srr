@@ -24,9 +24,10 @@ package main
 // again, prominently, next to the repro line when one fails.
 //
 // It drives the REAL production write path — PutArticles → SyncIdxSummary →
-// SyncMeta → ExpireArticles → SyncSeen → GC → Commit, cmd_fetch.go's order and
-// cmd_fetch.go's functions, with RemoveFeed/AddFeed and `srr store compact` woven in
-// — exactly as genbig_test.go does. Nothing here hand-writes a pack byte.
+// SyncMeta → ExpireArticles → GC → Commit (whose SyncSeen/SyncRefs write the
+// sidecars), cmd_fetch.go's order and cmd_fetch.go's functions, with
+// RemoveFeed/AddFeed and `srr store compact` woven in — exactly as
+// genbig_test.go does. Nothing here hand-writes a pack byte.
 //
 // Gated, like genbig_test.go and gen_expire_test.go: SRR_CHAOS must be set, so
 // `go test ./...` and `make verify` never run it. `make chaos-be` is the entry
@@ -510,9 +511,6 @@ func (c *chaosRun) runStep(step int, st chaosStep) {
 	}
 	if err := c.db.ExpireArticles(ctx, c.next); err != nil {
 		t.Fatalf("%s step %d: ExpireArticles: %v", c.label, step, err)
-	}
-	if err := c.db.SyncSeen(ctx); err != nil {
-		t.Fatalf("%s step %d: SyncSeen: %v", c.label, step, err)
 	}
 	if err := c.db.GC(ctx, st.Keep); err != nil {
 		t.Fatalf("%s step %d: GC(keep=%d): %v", c.label, step, st.Keep, err)

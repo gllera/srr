@@ -507,18 +507,23 @@ func TestSyncRefsIsPublishedWithTheGeneration(t *testing.T) {
 }
 
 // The other direction of "durable together": a cycle that stored articles but
-// never published its counts leaves the root naming the previous generation, so
-// the reopened store sees no counts at all — never a half-counted table that
-// would under-count a live article's references.
+// could not publish its counts fails its Commit before the root flip, leaving
+// the root naming the previous generation, so the reopened store sees no counts
+// at all — never a half-counted table that would under-count a live article's
+// references.
 func TestRefsNotPublishedAreNotAdopted(t *testing.T) {
 	db, _, _ := setupTestDB(t)
 	a := &Feed{Title: "A", URL: "https://a.example/f"}
 	if err := db.AddFeed(a); err != nil {
 		t.Fatal(err)
 	}
-	putExpireBatch(t, db, fresh1d, []*Item{{Feed: a, Title: "a1", Content: img(refKeyA)}})
-	if err := db.Commit(ctx); err != nil { // no SyncRefs: the counts stay in memory
+	if err := db.Commit(ctx); err != nil { // the previous generation: the feed, no counts
 		t.Fatalf("Commit: %v", err)
+	}
+	putExpireBatch(t, db, fresh1d, []*Item{{Feed: a, Title: "a1", Content: img(refKeyA)}})
+	db.Backend = &faultBackend{Backend: db.Backend, put: failPrefix(seenSeries + "/")}
+	if err := db.Commit(ctx); err == nil || !strings.Contains(err.Error(), "sync asset refcounts") {
+		t.Fatalf("Commit = %v, want the refcount sidecar's write failure", err)
 	}
 	reopened, err := NewDB(ctx, false)
 	if err != nil {

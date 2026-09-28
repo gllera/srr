@@ -194,9 +194,6 @@ func crashCycle(ctx context.Context, i int, halt *stopAfterN) error {
 	_ = db.SyncIdxSummary(ctx)
 	_ = db.SyncMeta(ctx)
 	_ = db.ExpireArticles(ctx, db.core.FetchedAt)
-	if err := db.SyncSeen(ctx); err != nil {
-		return err
-	}
 	_ = db.GC(ctx, globals.KeepManifests)
 	return db.Commit(ctx)
 }

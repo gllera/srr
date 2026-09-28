@@ -294,9 +294,5 @@ func applyConfigDoc(ctx context.Context, db *DB, doc *configDoc) error {
 		fmt.Fprintf(stdout, " (%d unknown feed id(s) dropped from syndication selectors)", dropped)
 	}
 	fmt.Fprintln(stdout)
-	// commitState, not Commit: writeFeedView routes through setFeedURL, and a
-	// changed URL resets the feed's fetch state — including the seen.gz-backed
-	// validators and bg — so the sidecar must be persisted with the config
-	// (same reason `feed apply` uses it).
-	return db.commitState(ctx)
+	return db.Commit(ctx)
 }

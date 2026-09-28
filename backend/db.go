@@ -797,17 +797,20 @@ func (o *DB) Close(ctx context.Context) error {
 	return o.Backend.Close()
 }
 
-// Commit publishes the store state (docs/MANIFEST-SPEC.md §6.1): three steps in
+// Commit publishes the store state (docs/MANIFEST-SPEC.md §6.1): four steps in
 // a fixed order.
 //
-//  1. the config sidecar, when this session changed configuration and the
+//  1. the backend-only sidecars that describe this generation — the dedup pool
+//     (SyncSeen) and the asset refcounts (SyncRefs) — each under a fresh stem,
+//     when dirty;
+//  2. the config sidecar, when this session changed configuration and the
 //     change is not a removal (§6.4 — see below);
-//  2. the immutable manifest naming every object this generation holds,
+//  3. the immutable manifest naming every object this generation holds,
 //     exclusive-create so a racing writer aborts before it can flip the root
 //     (§6.2);
-//  3. the root flip — an AtomicPut of the ~60-byte {v, m, t} pointer.
+//  4. the root flip — an AtomicPut of the ~60-byte {v, m, t} pointer.
 //
-// A crash anywhere before step 3 leaves unreferenced objects and changes
+// A crash anywhere before step 4 leaves unreferenced objects and changes
 // nothing a reader can observe. That is THE crash argument, for the whole
 // store, stated once in manifest.go; nothing else in this backend carries a
 // publish-order proof of its own any more.
@@ -835,6 +838,21 @@ func (o *DB) Commit(ctx context.Context) error {
 	// Commit); a cheap guard turning a latent footgun into an impossible state.
 	if o.core.legacyRoot != nil || o.core.Names.overrides != nil {
 		return fmt.Errorf("commit refused: a store opened on a pre-cutover root was not migrated (migration runs only in a locked session)")
+	}
+
+	// The sidecars ride THIS manifest, so the batch (or feed mutation) and the
+	// state describing it become durable by the one root flip — done here, not
+	// at each call site, so no mutation that dirties either can publish without
+	// it. Both write-if-dirty (an idle commit writes nothing and mints no
+	// generation) and fatal: a committed batch must never outrun the pool that
+	// dedups its GUIDs (bg is load-bearing), nor the counts that keep its assets
+	// alive (an undercount lets a later expiry delete an object a live article
+	// still shows).
+	if err := o.SyncSeen(ctx); err != nil {
+		return fmt.Errorf("sync seen pool: %w", err)
+	}
+	if err := o.SyncRefs(ctx); err != nil {
+		return fmt.Errorf("sync asset refcounts: %w", err)
 	}
 
 	cfgChanged, cfgRemovals := o.configChanged(ctx)
@@ -987,8 +1005,8 @@ func (o *DB) RemoveFeed(ctx context.Context, id int) error {
 	}
 	delete(o.core.Feeds, id)
 	// Purge the feed's seen.gz state now (dedup entries + HTTP validators), so a
-	// reused id can't inherit it. Callers persist via commitState (which also
-	// publishes any drain's generation bump). See dropFeed.
+	// reused id can't inherit it. The caller's Commit persists it (and publishes
+	// any drain's generation bump). See dropFeed.
 	o.seen.dropFeed(id)
 	return nil
 }

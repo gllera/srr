@@ -502,16 +502,16 @@ func (o *DB) tryLoadSeen(ctx context.Context, key string) (*seenPool, bool) {
 }
 
 // SyncSeen persists the pool under a FRESH stem in the seen series and records
-// the name, so the manifest the caller's Commit publishes points at exactly the
-// dedup state that produced this cycle's batch. It first pulls every live
-// feed's validators + bg into the pool (snapshotHTTP). Write-if-dirty: an idle
-// cycle writes nothing and leaves the name alone.
+// the name, so the manifest that Commit publishes points at exactly the dedup
+// state that produced this cycle's batch. It first pulls every live feed's
+// validators + bg into the pool (snapshotHTTP). Write-if-dirty: an idle cycle
+// writes nothing and leaves the name alone.
 //
-// It runs before Commit and its failure is fatal to the cycle (returned, not
-// warned) — bg is load-bearing, so a committed batch must never outrun the
-// object that dedups its GUIDs. There is no ordering proof here beyond the
-// universal one (§6.1): a new immutable object, then the manifest naming it,
-// then the root flip.
+// It is Commit's first step (db.go), and its failure is fatal to that Commit
+// (returned, not warned), before the manifest and the root flip — bg is
+// load-bearing, so a committed batch must never outrun the object that dedups
+// its GUIDs. There is no ordering proof here beyond the universal one (§6.1):
+// a new immutable object, then the manifest naming it, then the root flip.
 func (o *DB) SyncSeen(ctx context.Context) error {
 	if o.seen == nil {
 		return nil
@@ -549,14 +549,4 @@ func (o *DB) putSingleton(ctx context.Context, body []byte) (*StemRef, error) {
 		return nil, err
 	}
 	return &ref, nil
-}
-
-// commitState persists the seen sidecar and THEN publishes the store state,
-// used by the feed-mutation commands. A setFeedURL reset (cleared validators +
-// bg) thus reaches the sidecar atomically with the config change.
-func (o *DB) commitState(ctx context.Context) error {
-	if err := o.SyncSeen(ctx); err != nil {
-		return fmt.Errorf("sync seen pool: %w", err)
-	}
-	return o.Commit(ctx)
 }

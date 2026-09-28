@@ -130,7 +130,7 @@ func TestFetchCycleSeenPoolSuppressesRepromotionEndToEnd(t *testing.T) {
 // for the SAME source that reuses the freed id (AddFeed picks the smallest free
 // id, with no fetch cycle between). The reused id must start with no dedup
 // history, so the same item re-ingests — RemoveFeed's synchronous pool purge
-// (dropFeed), persisted via commitState, is what makes this hold.
+// (dropFeed), persisted by the removal's Commit, is what makes this hold.
 func TestFetchCycleReusedFeedIdStartsClean(t *testing.T) {
 	db, _, _ := setupTestDB(t)
 	allowLoopback(t)

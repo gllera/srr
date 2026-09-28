@@ -396,9 +396,7 @@ func (o *RmCmd) Run() error {
 				return err
 			}
 		}
-		// commitState so RemoveFeed's seen.gz purge (dropFeed) is persisted before
-		// the id can be reused by a later feed add.
-		return db.commitState(ctx)
+		return db.Commit(ctx)
 	})
 }
 
@@ -591,9 +589,7 @@ func applyViews(ctx context.Context, db *DB, views []*feedView) error {
 			}
 		}
 	}
-	// commitState so a setFeedURL reset (URL change) persists the cleared
-	// seen.gz-backed ETag/LastModified alongside the db.gz mutations.
-	return db.commitState(ctx)
+	return db.Commit(ctx)
 }
 
 // writeFeedView applies a feedView onto ch. The URL goes through
