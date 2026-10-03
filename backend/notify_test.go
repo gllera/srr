@@ -94,6 +94,14 @@ func TestNotifyDisabledByDefault(t *testing.T) {
 	saved := globals
 	globals = &Globals{Store: t.TempDir()}
 	t.Cleanup(func() { globals = saved })
+	// The hook is watched where it would run: runNotify logs every alert it
+	// delivers, so a tap that stays silent is what shows nothing was sent. An
+	// empty alert list alone says only that none was owed, and would keep
+	// passing if delivery stopped depending on it.
+	logs := make(chan string, 4)
+	prevLog := slog.Default()
+	slog.SetDefault(slog.New(notifyTap(logs)))
+	t.Cleanup(func() { slog.SetDefault(prevLog) })
 
 	ch := &Feed{Title: "X"}
 	rec := fetchedFeed{feed: ch, priorState: fetchState(ch)}
@@ -103,6 +111,11 @@ func TestNotifyDisabledByDefault(t *testing.T) {
 		t.Errorf("alerting is off, yet the cycle owes %v", alerts)
 	}
 	fireNotify(ctx, alerts)
+	select {
+	case l := <-logs:
+		t.Errorf("alerting is off, yet the hook ran: %q", l)
+	default: // fireNotify is synchronous, so anything it logged is here by now
+	}
 }
 
 // Feed titles and error text are attacker-influenced: they must ride the
