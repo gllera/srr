@@ -761,7 +761,7 @@ let rowChrome = -1
 
 // Pin each row's REAL height as its content-visibility intrinsic size. Rows are
 // virtualized with `content-visibility: auto; contain-intrinsic-size: auto 3.75rem`
-// (styles.css). Every row is one height (the title always reserves two lines)
+// (styles.css). Every non-search row is one height (the title reserves two lines)
 // and the placeholder is that height — but only at the default type size, zoom
 // and fonts; anything else makes it wrong for every row. With the list's browser
 // scroll anchoring off (overflow-anchor:none, for Safari parity), nothing

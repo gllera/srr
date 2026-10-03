@@ -6,7 +6,7 @@ import type { Browser, Page } from "puppeteer"
 
 import { feedServer, srr, type FeedServer } from "../harness"
 import { nItems, pubDate, rssFeed, type FeedItem } from "../fixtures"
-import { clearDir, clickRow, launchBrowser, open as openCtx, waitList, waitReader } from "./helpers"
+import { clearDir, clickRow, launchBrowser, open as openCtx, waitList, waitReader, withPage } from "./helpers"
 
 // Titleless feeds (Telegram-style: the title duplicates the content lead). A
 // feed flagged `nt` in db.gz makes the reader HIDE the <h1>; the whole masthead
@@ -21,6 +21,19 @@ const packsDir = inject("packsDir")
 // micro = the titleless feed (newest, startIdx 30 → top of the list). news =
 // an ordinary feed for contrast.
 const micro = nItems(1, "micro", 0, 30)
+// long = a microblog post whose title is its whole opening paragraph, the case
+// the list's two-line title clamp exists for — and the case where a search term
+// can sit past those two lines (the last word here).
+const LONG_TITLE =
+   "A microblog post whose title is simply its own opening paragraph, running well past " +
+   "the two lines a list row has room for before it finally gets around to the zeppelin"
+const long: FeedItem = {
+   title: LONG_TITLE,
+   link: "http://example.com/micro/long",
+   guid: "micro-long",
+   pubDate: pubDate(31),
+   content: `<p>${LONG_TITLE}</p>`,
+}
 const news = nItems(1, "news", 0, 0)
 // wall = a titleless article TALLER than the viewport: many paragraphs, no
 // media, so its full height is laid out the instant it renders. Focusing a
@@ -55,7 +68,7 @@ describe("browser: titleless feeds (reader hides the duplicate heading)", () => 
 
    beforeAll(async () => {
       feeds = await feedServer({
-         "/micro.xml": rssFeed("Micro", micro),
+         "/micro.xml": rssFeed("Micro", [...micro, long]),
          "/news.xml": rssFeed("News", news),
          "/wall.xml": rssFeed("Wall", wall),
       })
@@ -129,6 +142,61 @@ describe("browser: titleless feeds (reader hides the duplicate heading)", () => 
       } finally {
          await close()
       }
+   })
+
+   // The list clamps every title to two lines, but a search hit's <mark> is the
+   // only thing on screen that says WHY the row matched — so a hit whose term sits
+   // past line two must not have it clipped away. Phone width, where two lines
+   // hold the least. The search is entered by hash, the path where the bar's
+   // body.srr-searching only arrives after the build has measured its rows.
+   it("search shows a long title's matched term past the two-line clamp", async () => {
+      await withPage(browser, async (page) => {
+         await page.setViewport({ width: 375, height: 800 })
+         await page.goto(baseUrl, { waitUntil: "load" })
+         await waitList(page)
+         // The ordinary list keeps the clamp: the long title overflows its box.
+         const overflows = await page.$$eval(
+            ".srr-list a.srr-row .srr-row-title",
+            (els, t) => {
+               const e = els.find((x) => x.textContent === t)!
+               return e.scrollHeight > e.clientHeight
+            },
+            LONG_TITLE,
+         )
+         expect(overflows).toBe(true)
+
+         await page.goto(`${baseUrl}#!q%3Azeppelin`, { waitUntil: "load" })
+         await page.waitForSelector(".srr-list a.srr-row .srr-row-title mark", { timeout: 20000 })
+         await waitList(page)
+         const box = await page.$eval(".srr-list a.srr-row .srr-row-title mark", (m) => {
+            const row = m.closest("a.srr-row") as HTMLElement
+            const title = m.closest(".srr-row-title")!.getBoundingClientRect()
+            const mark = m.getBoundingClientRect()
+            const cs = getComputedStyle(row)
+            const chrome = ["paddingTop", "paddingBottom", "borderTopWidth", "borderBottomWidth"] as const
+            return {
+               text: m.textContent,
+               markTop: mark.top,
+               markBottom: mark.bottom,
+               titleTop: title.top,
+               titleBottom: title.bottom,
+               rowBottom: row.getBoundingClientRect().bottom,
+               // What pinHeights reserved for the row when it was skipped, against
+               // the content box it really renders at.
+               pinned: parseFloat(row.style.getPropertyValue("contain-intrinsic-size").split(" ").pop() ?? ""),
+               content: row.offsetHeight - chrome.reduce((n, k) => n + parseFloat(cs[k]), 0),
+            }
+         })
+         expect(box.text).toBe("zeppelin")
+         // Inside the title's own (overflow-clipping) box, and so inside the row.
+         expect(box.markTop).toBeGreaterThanOrEqual(box.titleTop)
+         expect(box.markBottom).toBeLessThanOrEqual(box.titleBottom)
+         expect(box.markBottom).toBeLessThanOrEqual(box.rowBottom)
+         // A search row is as tall as its title, so its reserved height must be
+         // the one it renders at: a mismatch is the offscreen-row correction that
+         // shoves the viewport when the row scrolls back in (see pinHeights).
+         expect(box.pinned).toBeCloseTo(box.content, 0)
+      })
    })
 
    it("keeps the heading AND offers the masthead permalink for an ordinary feed", async () => {
