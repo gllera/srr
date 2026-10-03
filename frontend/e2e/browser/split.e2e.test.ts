@@ -3,7 +3,7 @@ import type { Browser, Page } from "puppeteer"
 
 import { feedServer, srr, type FeedServer } from "../harness"
 import { nItems, pubDate, rssFeed } from "../fixtures"
-import { clearDir, clickRow, launchBrowser, waitList, waitReader, withPage } from "./helpers"
+import { clearDir, clickRow, launchBrowser, waitFilled, waitList, waitReader, withPage } from "./helpers"
 
 // The two-pane split view (body.srr-split, ≥1000px), driven through the real
 // SPA in real Chrome: the breakpoint stamp, the blank-right-pane v1 contract on
@@ -204,8 +204,20 @@ describe("browser: split view (two-pane desktop)", () => {
       await withPage(browser, async (p) => {
          await p.setViewport({ width: 1280, height: 900 })
          await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
-         await waitList(p)
-         await clickRow(p, "sport title 5") // immediately — before the deferred landing
+         // Filled, not landed: waitList would hand the page over only after the
+         // landing, and an open made after it moves no cursor under an armed
+         // landing — the guard would never run, and the case would still pass.
+         await waitFilled(p)
+         // Check and open in ONE task: two round trips leave frames between them
+         // for the landing to commit in.
+         const armed = await p.evaluate((t) => {
+            const anchoring = document.querySelector(".srr-list")!.classList.contains("srr-list-anchoring")
+            ;[...document.querySelectorAll<HTMLElement>(".srr-list a.srr-row")]
+               .find((e) => e.querySelector(".srr-row-title")?.textContent === t)
+               ?.click()
+            return anchoring
+         }, "sport title 5")
+         expect(armed, "the open came after the deferred landing, so the guard went unexercised").toBe(true)
          await waitReader(p)
          await new Promise((r) => setTimeout(r, 1200)) // past the bounded ~20-frame settle
          const ok = await p.evaluate(() => {

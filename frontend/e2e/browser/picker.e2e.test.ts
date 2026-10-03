@@ -135,6 +135,15 @@ describe("browser: filter picker & frontier menu", () => {
       try {
          await page.click(".srr-feed")
          await page.waitForSelector(".srr-ctxmenu")
+         // The menu must OUTLIVE the boot, not just appear: any scroll under an open
+         // menu dismisses it, and this 4-row store is taller than the 800x600
+         // viewport, so the list's deferred land-once scroll does move the page.
+         // waitList hands over a LANDED list, so that scroll is already behind us;
+         // a wait that returned on "filled" alone let it close the menu a few
+         // frames after it opened. Hold long enough to see that, not just the
+         // instant after the click.
+         await new Promise((r) => setTimeout(r, 500))
+         expect(await page.$(".srr-ctxmenu"), "the boot's landing scroll dismissed the menu").not.toBeNull()
          const labels = await page.$$eval(".srr-ctxmenu-item", (els) => els.map((e) => e.textContent))
          expect(labels).toContain("Search articles…")
          // The status footer always carries the build's version label.

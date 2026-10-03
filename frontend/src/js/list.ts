@@ -838,6 +838,15 @@ function unveil(): void {
    container.classList.remove(VEIL_CLASS)
 }
 
+// An anchored build whose settle has not committed yet (see render): the fill is
+// done, but land-once's single scroll is still to come, or the immediate anchor
+// is still following its row. Unstyled — state, not presentation, and a wider
+// window than the veil, which is the split pane's painted half of it and lifts
+// on a timeout. It is how the browser e2e tells "filled" from "landed": a page
+// driven in between has its open menu dismissed by the landing's scroll. Only
+// commit and the next build clear it, so a settle that never commits leaves it.
+const ANCHORING_CLASS = "srr-list-anchoring"
+
 // Re-assert the anchor after a progressive fill changed row heights, unless the
 // user has scrolled (then their position wins). Only meaningful for an
 // anchoredMid seed (rows above it can grow/shrink); a newest-top anchor is at
@@ -1086,6 +1095,7 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    rowChrome = -1 // re-sample once per build (a zoom or font change between builds)
    grownRunway = false
    unveil() // a superseded build's settle veil must not outlive it
+   container.classList.remove(ANCHORING_CLASS) // nor its settle-pending mark
    container.replaceChildren()
 
    if (data.db.total_art === 0) {
@@ -1171,6 +1181,9 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    // reader return keeps painting as it goes: there the list IS the page, and a
    // blank page reads worse than a settling one.
    if (immediate && isSplit()) veil(my)
+   // Both anchored modes end in the settle below; marked from the mount, so no
+   // frame shows these rows without it before the commit clears it.
+   if (anchoredMid) container.classList.add(ANCHORING_CLASS)
    mountRows(rows)
 
    // Position the surface, then hand it over (interactive) before the fills land.
@@ -1267,6 +1280,7 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    const allRows = (): HTMLElement[] => (rowsEl ? [...rowsEl.querySelectorAll<HTMLElement>("a.srr-row")] : [])
    const commit = (): void => {
       unveil()
+      container.classList.remove(ANCHORING_CLASS)
       if (!landOnceMode) return // the immediate anchor followed as it went; its observer is live
       // The list and the reader share the window scroll. This scroll is DEFERRED
       // (fonts.ready + a settle loop), so a row opened meanwhile — layout.ts's effect

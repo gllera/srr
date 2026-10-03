@@ -56,20 +56,43 @@ export const waitReader = (p: Page) =>
    )
 // The list surface is shown with at least one rendered row AND every row filled
 // (no skeletons left) — rows paint as skeletons first, so gating on row
-// presence alone would let a bulk title read race the progressive fill.
-export const waitList = (p: Page) =>
+// presence alone would let a bulk title read race the progressive fill. With
+// `landed`, also past an anchored build's settle (waitList).
+const listShown = (p: Page, landed: boolean) =>
    p.waitForFunction(
-      () => {
+      (landed) => {
          const l = document.querySelector(".srr-list") as HTMLElement | null
          return (
             !!l &&
             !l.hidden &&
             l.querySelector("a.srr-row") != null &&
-            l.querySelector("a.srr-row.srr-row-skeleton") == null
+            l.querySelector("a.srr-row.srr-row-skeleton") == null &&
+            !(landed && l.classList.contains("srr-list-anchoring"))
          )
       },
       { timeout: 20000 },
+      landed,
    )
+// Filled, but NOT necessarily landed: an anchored build's scroll may still be
+// to come. Only for a test that must act INSIDE that window — and such a test
+// should assert `srr-list-anchoring` is still up in the same task it acts in,
+// or a landing that beats it leaves the case passing without exercising
+// anything.
+export const waitFilled = (p: Page) => listShown(p, false)
+// The list filled AND landed. An anchored build (a boot or filter change
+// resuming mid-list, a return from the reader) scrolls onto its row only AFTER
+// the fill, once fonts and layout settle. A page that scrolls at all — a short
+// store whose two-line rows are already taller than the viewport — meets that
+// scroll a few frames after "filled", and it dismisses whatever menu the test
+// has just opened. `srr-list-anchoring` (list.ts) is up from the mount until
+// that settle commits. Then one more frame: a scrollTo moves the page at once,
+// but its scroll EVENT is dispatched at the next frame's scroll steps, ahead of
+// that frame's rAF callbacks — so a commit in the very frame the poll saw the
+// class go still has its event in flight.
+export const waitList = async (p: Page) => {
+   await listShown(p, true)
+   await p.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => r())))
+}
 
 // Fresh incognito context per scenario → isolated localStorage/cache. Loads
 // the url, waits for the caller's readiness condition, and returns the page

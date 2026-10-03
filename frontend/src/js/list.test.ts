@@ -681,6 +681,52 @@ describe("list", () => {
       }
    })
 
+   it("an anchored build is marked anchoring until its settle commits, and only an anchored one", async () => {
+      // A filled list is not yet a LANDED one: land-once scrolls a single time
+      // after fonts.ready and the settle frames, and the immediate anchor follows
+      // its row over those same frames. Anything driving the page in between —
+      // the browser e2e's waitList, then a menu that the landing's scroll
+      // dismisses — needs a tell that the scroll is still to come, and the veil
+      // is not it (split-immediate only, and lifted by a timeout).
+      setIndex(10)
+      const rafCbs: FrameRequestCallback[] = []
+      vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => rafCbs.push(cb))
+      vi.stubGlobal("cancelAnimationFrame", () => {})
+      const drain = async (): Promise<void> => {
+         for (let i = 0; i < 6; i++) await Promise.resolve()
+         while (rafCbs.length) rafCbs.shift()!(0)
+      }
+      const anchoring = (): boolean => container.classList.contains("srr-list-anchoring")
+      try {
+         // The newest-default anchor has nothing to land: never marked.
+         await list.render()
+         expect(anchoring()).toBe(false)
+         await drain()
+
+         nav._setAnchor(5)
+         await list.render() // land-once: filled, scroll still to come
+         expect(container.querySelector(".srr-row-skeleton")).toBeNull()
+         expect(anchoring()).toBe(true)
+         await drain()
+         expect(anchoring()).toBe(false) // committed: landed, observer live
+
+         await list.render(true) // the immediate anchor's follow loop
+         expect(anchoring()).toBe(true)
+         await drain()
+         expect(anchoring()).toBe(false)
+
+         // A build superseded mid-settle never commits; the next build owns the mark.
+         await list.render()
+         expect(anchoring()).toBe(true)
+         rafCbs.length = 0
+         nav._setAnchor(-1)
+         await list.render()
+         expect(anchoring()).toBe(false)
+      } finally {
+         vi.unstubAllGlobals()
+      }
+   })
+
    it("propagates a fill failure so the app can surface it (no silent permanent skeleton)", async () => {
       setIndex(3)
       data.loadMeta.mockImplementation(async (chron: number) => {
