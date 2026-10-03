@@ -202,6 +202,24 @@ func TestCreateFeedRequiresTitle(t *testing.T) {
 	}
 }
 
+// The GUI's PUT is a full replace, so a body without a title asks to blank it:
+// saveFeed's guard refuses that too (400), and the stored title stays.
+func TestUpdateFeedRequiresTitle(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	stubPassthroughResolve()
+	seedFeed(t, db, &Feed{Title: "Keep", URL: "https://x.example/feed"})
+	rec := doReq(t, newMux(), "PUT", "/api/feeds/0", `{"url":"https://x.example/feed"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (%s)", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "title required") {
+		t.Errorf("body = %s, want a 'title required' message", rec.Body)
+	}
+	if got := reopenDB(t).Feeds()[0].Title; got != "Keep" {
+		t.Errorf("Title = %q, want %q (should not have committed)", got, "Keep")
+	}
+}
+
 // applyFeedsHandler 400s when the body is neither a JSON object nor array
 // (parseApplyInput rejects a bare scalar before any DB scope is opened).
 func TestApplyFeedsRejectsNonObjectOrArray(t *testing.T) {

@@ -233,7 +233,7 @@ func (o *AddCmd) Run() error {
 	}
 	// The upsert every writing surface shares: offline field checks, then the
 	// subscribe-time probe with NO lock, then the write under .locked.
-	_, err := saveFeedTwoPhase(context.Background(), func(*DB) (*feedView, error) { return v, nil })
+	_, err := saveFeedTwoPhase(context.Background(), true, func(*DB) (*feedView, error) { return v, nil })
 	return err
 }
 
@@ -335,16 +335,17 @@ func (o *UpdCmd) Run() error {
 	if in == (updateFeedIn{ID: o.ID}) {
 		return fmt.Errorf("nothing to update")
 	}
-	// Offline pre-checks, before any store read or network probe.
-	if o.Title != nil && *o.Title == "" {
-		return fmt.Errorf("title cannot be empty")
+	// Offline pre-checks, before any store read or network probe. titleErr is
+	// upd's whole title rule, shared with srr_update_feed.
+	if err := in.titleErr(); err != nil {
+		return err
 	}
 	if o.URL != nil && !validFeedURL(*o.URL) {
 		return fmt.Errorf("invalid url %q", *o.URL)
 	}
 	// resolveFeedProbe (inside the two-phase save) probes for discovery only
 	// when the URL actually changes and the effective ingest is #feed.
-	_, err := saveFeedTwoPhase(context.Background(), updateFeedBuild(in))
+	_, err := saveFeedTwoPhase(context.Background(), false, updateFeedBuild(in))
 	return err
 }
 

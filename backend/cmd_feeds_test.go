@@ -400,6 +400,41 @@ func TestFeedUpdEmptyTitleRejected(t *testing.T) {
 	}
 }
 
+// A store can legitimately hold a feed with an EMPTY title: `store import`
+// titles a feed from its outline's title= else text=, and an outline carrying
+// neither imports as "". `feed upd` rejects only an EXPLICIT -t "", so every
+// other edit of such a feed — before and after a -u probe — must still land,
+// with the title left as stored.
+func TestFeedUpdTitlelessImportedFeed(t *testing.T) {
+	setupEmptyDB(t)
+	opml := `<?xml version="1.0"?><opml version="2.0"><body>
+<outline type="rss" xmlUrl="https://a.example.com/feed"/>
+</body></opml>`
+	captureCmdStdout(t)
+	if err := (&ImportCmd{Path: writeTempFile(t, opml), All: true}).Run(); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if got := reopenDB(t).Feeds()[0].Title; got != "" {
+		t.Fatalf("setup: imported Title = %q, want \"\"", got)
+	}
+
+	if err := (&UpdCmd{ID: 0, Tag: strPtr("news")}).Run(); err != nil {
+		t.Fatalf("upd -g: %v", err)
+	}
+	if err := (&UpdCmd{ID: 0, URL: strPtr("https://b.example.com/feed")}).Run(); err != nil {
+		t.Fatalf("upd -u: %v", err)
+	}
+	ch := reopenDB(t).Feeds()[0]
+	if ch.Tag != "news" || ch.URL != "https://b.example.com/feed" || ch.Title != "" {
+		t.Errorf("feed = {title %q, url %q, tag %q}, want the edits applied and the title left empty", ch.Title, ch.URL, ch.Tag)
+	}
+
+	wantErr(t, (&UpdCmd{ID: 0, Title: strPtr(""), Tag: strPtr("other")}).Run(), "title cannot be empty")
+	if got := reopenDB(t).Feeds()[0].Tag; got != "news" {
+		t.Errorf("Tag = %q, want %q (an explicit -t \"\" should not have committed)", got, "news")
+	}
+}
+
 func TestFeedUpdClearsTag(t *testing.T) {
 	setupFeedsTestDB(t)
 	if err := (&UpdCmd{ID: 0, Tag: strPtr("tech")}).Run(); err != nil {
@@ -964,7 +999,7 @@ func TestTagCannotSpellAWatchToken(t *testing.T) {
 		}
 	}
 	// srr serve's feed save and the MCP add/update tools (saveFeedTwoPhase → saveFeed).
-	if _, err := saveFeed(ctx, db, &feedView{Title: "A", URL: "https://example.com/g.xml", Tag: "w:hot"}); err == nil {
+	if _, err := saveFeed(ctx, db, &feedView{Title: "A", URL: "https://example.com/g.xml", Tag: "w:hot"}, true); err == nil {
 		t.Error("saveFeed accepted a watch-token tag")
 	}
 	// OPML import, CLI and HTTP.

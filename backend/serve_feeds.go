@@ -65,9 +65,10 @@ func resolveFeedViewURL(ctx context.Context, db *DB, v *feedView) error {
 
 // saveFeed upserts one feedView (URL already resolved by resolveFeedViewURL) —
 // saveFeedTwoPhase's locked half, so every surface writes a feed the same way.
-// Returns the stored *Feed for echo-back.
-func saveFeed(ctx context.Context, db *DB, v *feedView) (*Feed, error) {
-	if v.Title == "" {
+// requireTitle rejects a view whose title is empty; see saveFeedTwoPhase for
+// which surfaces ask for it. Returns the stored *Feed for echo-back.
+func saveFeed(ctx context.Context, db *DB, v *feedView, requireTitle bool) (*Feed, error) {
+	if requireTitle && v.Title == "" {
 		return nil, fmt.Errorf("title required")
 	}
 	if !validFeedURL(v.URL) {
@@ -115,7 +116,15 @@ func updateFeed(w http.ResponseWriter, r *http.Request) {
 // the write with the already-resolved URL. build produces the view inside
 // phase 1's scope, so an update's merge base and its discovery probe come from
 // ONE consistent db.gz read.
-func saveFeedTwoPhase(ctx context.Context, build func(db *DB) (*feedView, error)) (*Feed, error) {
+//
+// requireTitle is the one rule the surfaces do NOT share. The creates (`feed
+// add`, srr_add_feed) and the admin API's full-replace save reject a view whose
+// title is empty; the partial updates (`feed upd`, srr_update_feed) pass false,
+// because their view merges the STORED title and a store can hold an empty one
+// (`store import` titles a feed from its outline's title= else text=, "" when
+// it has neither). Rejecting that would refuse every other edit of such a feed,
+// so they refuse only an explicit empty title (updateFeedIn.titleErr).
+func saveFeedTwoPhase(ctx context.Context, requireTitle bool, build func(db *DB) (*feedView, error)) (*Feed, error) {
 	var v *feedView
 	if err := withDBCtx(ctx, false, func(ctx context.Context, db *DB) error {
 		built, err := build(db)
@@ -129,7 +138,7 @@ func saveFeedTwoPhase(ctx context.Context, build func(db *DB) (*feedView, error)
 	}
 	var saved *Feed
 	err := withDBCtx(ctx, true, func(ctx context.Context, db *DB) error {
-		s, err := saveFeed(ctx, db, v)
+		s, err := saveFeed(ctx, db, v, requireTitle)
 		saved = s
 		return err
 	})
@@ -146,7 +155,7 @@ func handleFeedSave(w http.ResponseWriter, r *http.Request, id *int) {
 		return
 	}
 	v.ID = id
-	saved, err := saveFeedTwoPhase(r.Context(), func(*DB) (*feedView, error) { return &v, nil })
+	saved, err := saveFeedTwoPhase(r.Context(), true, func(*DB) (*feedView, error) { return &v, nil })
 	if err != nil {
 		writeErr(w, err)
 		return

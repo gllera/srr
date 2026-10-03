@@ -3,6 +3,7 @@ package main
 import (
 	"cmp"
 	"context"
+	"errors"
 	"slices"
 	"sync"
 	"time"
@@ -281,7 +282,7 @@ type addFeedIn struct {
 // mcpAddFeed creates one feed through the shared two-phase upsert below, which
 // mirrors handleFeedSave (serve_feeds.go) exactly.
 func mcpAddFeed(ctx context.Context, _ *mcp.CallToolRequest, in addFeedIn) (*mcp.CallToolResult, feedOut, error) {
-	return mcpSaveFeedView(ctx, func(*DB) (*feedView, error) {
+	return mcpSaveFeedView(ctx, true, func(*DB) (*feedView, error) {
 		// Nil ID ⇒ create.
 		return &feedView{
 			Title:      in.Title,
@@ -317,9 +318,25 @@ type updateFeedIn struct {
 }
 
 // mcpUpdateFeed runs the very same two-phase save as mcpAddFeed over the
-// merge-on-absent view updateFeedBuild produces.
+// merge-on-absent view updateFeedBuild produces, under `srr feed upd`'s title
+// rule (titleErr).
 func mcpUpdateFeed(ctx context.Context, _ *mcp.CallToolRequest, in updateFeedIn) (*mcp.CallToolResult, feedOut, error) {
-	return mcpSaveFeedView(ctx, updateFeedBuild(in))
+	if err := in.titleErr(); err != nil {
+		return nil, feedOut{}, err
+	}
+	return mcpSaveFeedView(ctx, false, updateFeedBuild(in))
+}
+
+// titleErr is the one title rule of the partial updates, srr_update_feed and
+// `srr feed upd`: an EXPLICIT empty title is refused, an absent one keeps the
+// stored title — even an empty one, which `store import` leaves for an outline
+// with neither title= nor text=. Refusing that too would refuse every other
+// edit of such a feed, so both save with requireTitle false.
+func (in updateFeedIn) titleErr() error {
+	if in.Title != nil && *in.Title == "" {
+		return errors.New("title cannot be empty")
+	}
+	return nil
 }
 
 // updateFeedBuild is saveFeedTwoPhase's build step for a partial update, shared
@@ -374,8 +391,8 @@ func setIfPresent[T any](dst, src *T) {
 // mcpSaveFeedView adapts saveFeedTwoPhase (serve_feeds.go — resolve networked
 // and unlocked, then save locked) to the tool result shape both feed-writing
 // tools share. A nil view ID ⇒ create, non-nil ⇒ update.
-func mcpSaveFeedView(ctx context.Context, build func(db *DB) (*feedView, error)) (*mcp.CallToolResult, feedOut, error) {
-	saved, err := saveFeedTwoPhase(ctx, build)
+func mcpSaveFeedView(ctx context.Context, requireTitle bool, build func(db *DB) (*feedView, error)) (*mcp.CallToolResult, feedOut, error) {
+	saved, err := saveFeedTwoPhase(ctx, requireTitle, build)
 	if err != nil {
 		return nil, feedOut{}, mcpToolErr(err)
 	}

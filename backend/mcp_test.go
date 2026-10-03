@@ -348,6 +348,38 @@ func TestMCPUpdateFeedSecretsMergeAndClear(t *testing.T) {
 	}
 }
 
+// The feed-writing tools apply the CLI's title rules. srr_add_feed refuses a
+// missing title, like `srr feed add`. srr_update_feed, like `srr feed upd`,
+// refuses only an EXPLICIT empty title: a call that leaves title out keeps the
+// stored one even when it is empty (the shape a titleless OPML outline imports
+// as), so every other edit of such a feed still goes through.
+func TestMCPFeedToolsTitleRule(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	stubPassthroughResolve()
+	seedFeed(t, db, &Feed{URL: "https://t.example.com/feed"})
+
+	_, _, err := mcpAddFeed(ctx, nil, addFeedIn{URL: "https://n.example/feed"})
+	wantErr(t, err, "title required")
+	if n := len(reopenDB(t).Feeds()); n != 1 {
+		t.Errorf("feeds = %d, want 1 (the add should not have committed)", n)
+	}
+
+	_, out, err := mcpUpdateFeed(ctx, nil, updateFeedIn{ID: 0, Tag: strPtr("news")})
+	if err != nil {
+		t.Fatalf("update with title omitted: %v", err)
+	}
+	if out.Feed.Tag != "news" || out.Feed.Title != "" {
+		t.Errorf("echoed feed = {title %q, tag %q}, want the tag applied and the title left empty", out.Feed.Title, out.Feed.Tag)
+	}
+
+	_, _, err = mcpUpdateFeed(ctx, nil, updateFeedIn{ID: 0, Title: strPtr(""), Tag: strPtr("other")})
+	wantErr(t, err, "title cannot be empty")
+	ch, _ := reopenDB(t).FeedByID(0)
+	if ch.Tag != "news" || ch.Title != "" {
+		t.Errorf("stored feed = {title %q, tag %q}, want {\"\", \"news\"} (the explicit empty title should not have committed)", ch.Title, ch.Tag)
+	}
+}
+
 // An unknown feed id is reported with the id in the message, on both the read
 // (update) and the write-cycle (fetch) path — the caller composed that number,
 // so it has to see which one was wrong.
