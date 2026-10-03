@@ -707,8 +707,9 @@ func checkStoreBusy(ctx context.Context, db *DB) error {
 // running cycle — and the .locked lease is stamped far inside its TTL. What
 // follows a successful commit touches no store (the ingest-cache sweep, the
 // asset-health warnings, the notify hook), so it runs after the lock is
-// released. A producer (--spool) runs only the first phase: it publishes its
-// results as an inbox envelope instead of folding them, and never locks at all.
+// released — the hook still in commit order (notifyTurns). A producer
+// (--spool) runs only the first phase: it publishes its results as an inbox
+// envelope instead of folding them, and never locks at all.
 func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed func(feedProgress)) error {
 	res := &fetchResults{}
 	// The progress line spans both phases. finish() is idempotent, so this one
@@ -724,8 +725,20 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 	}); err != nil || o.Spool {
 		return err
 	}
+	// The alerts are decided by the fan-out alone; the turn that orders their
+	// delivery is taken under the lock below, once the batch is committed, and
+	// passed on whatever happens after it (notifyTurns).
+	alerts := notifyAlerts(res.fetched)
+	var turn *notifyTurn
+	defer func() { turn.done() }()
 	if err := withDBCtx(ctx, true, func(ctx context.Context, db *DB) error {
-		return o.commitPhase(ctx, db, res)
+		if err := o.commitPhase(ctx, db, res); err != nil {
+			return err
+		}
+		if len(alerts) > 0 {
+			turn = takeNotifyTurn()
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
@@ -757,9 +770,12 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 	// Alert on the outages/recoveries this cycle produced. Last, after the
 	// batch is durable and the lock is released: an operator's notify command
 	// (no timeout by default) must never be able to affect what got stored, nor
-	// hold off the store's other writers. WithoutCancel so a shutdown
-	// mid-summary still delivers the alert the cycle already decided to send.
-	fireNotify(context.WithoutCancel(ctx), res.fetched)
+	// hold off the store's other writers. Behind any earlier cycle's alerts
+	// still being sent, so delivery keeps commit order. WithoutCancel so a
+	// shutdown mid-summary still delivers the alert the cycle already decided
+	// to send.
+	turn.wait()
+	fireNotify(context.WithoutCancel(ctx), alerts)
 	return nil
 }
 
