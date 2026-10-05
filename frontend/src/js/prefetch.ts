@@ -65,12 +65,19 @@ export function schedulePrefetch(target: number) {
    if (target === -1) return
    const my: Prefetch = { target, imgs: [], vids: [] }
    currentPrefetch = my
+   // `target` is a chron of the store active NOW (the landing's neighbour); the
+   // idle callback and the article load are both async, and the lane can move
+   // across either. Pin the store here, so the article loaded and the base its
+   // media are routed against (fmt.routeContentUrl) are the same store's —
+   // re-reading activeStore() after the awaits judged one store's content
+   // against another's base.
+   const store = data.activeStore()
    const run = async () => {
       if (my !== currentPrefetch) return
       try {
-         const art = await data.loadArticle(target)
+         const art = await data.loadArticle(target, store)
          if (my !== currentPrefetch) return
-         const media = extractPrefetchMedia(art.c, data.activeStore().base)
+         const media = extractPrefetchMedia(art.c, store.base)
          for (const url of media.images.slice(0, PREFETCH_IMAGES)) {
             const img = new Image()
             img.fetchPriority = "low"

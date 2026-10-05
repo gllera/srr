@@ -788,7 +788,9 @@ entry's src is validated against `data.mountStore(entry.mid)`, and an entry
 whose mount is gone is refused (skipped, still listed). Judged against the
 active lane instead, a home episode in the self-hosted layout (home = the page
 origin, where only base + an asset key is kept) is dropped whenever a peer is
-active.
+active. The neighbour prefetch pins the store it was scheduled in and both loads
+the article from it and routes its media against its base, since the idle
+callback and the article load are each an await the lane can move across.
 
 ### 11.4 ENG5, fixed
 
