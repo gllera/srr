@@ -118,9 +118,10 @@ export function clearSaved(mid: string): void {
 // The persisted `src` comes back from localStorage, which makes it UNTRUSTED
 // input on a path that ends in an assignment the browser will fetch. It gets the
 // same treatment article content gets in fmt.ts: never a javascript:/data:/
-// vbscript:/file: scheme, and a relative key must resolve INSIDE the store base
-// (a "//host" or "../" escape is an info-leak vector, exactly as it is in
-// sanitizeFragment's bounds check).
+// vbscript:/file: scheme, and a relative src must be an asset key, the one
+// relative form that resolves against the store base (resolvePackRelative — a
+// "//host", a "../" escape or a same-origin path is dropped there exactly as it
+// is in sanitizeFragment).
 export function safeSrc(raw: string, base: URL): string | null {
    if (!raw || URL_DENY.test(raw)) return null
    let u: URL
@@ -132,13 +133,13 @@ export function safeSrc(raw: string, base: URL): string | null {
    if (u.protocol !== "http:" && u.protocol !== "https:") return null
    // An absolute http(s) media URL is whatever the feed carried — same trust
    // level as any <audio src> the sanitizer already lets through. A RELATIVE one
-   // names a store object, so it must stay within the store.
+   // names a store object, so it must be an asset key.
    //
    // Both halves come from fmt.ts rather than being restated here, because the
    // restatement had already drifted on the case that matters: it excluded a
-   // protocol-relative "//host" from `isRelative` and so skipped the bounds
-   // check entirely, returning a foreign origin verbatim — where fmt counts
-   // "//host" as relative precisely SO the bounds check drops it. That is the
+   // protocol-relative "//host" from `isRelative` and so skipped the check
+   // entirely, returning a foreign origin verbatim — where fmt counts "//host"
+   // as relative precisely SO resolvePackRelative drops it. That is the
    // one shape this function exists to catch, since its input is the untrusted
    // srr-player localStorage blob.
    if (isRelative(raw) && resolvePackRelative(raw, base) === null) return null

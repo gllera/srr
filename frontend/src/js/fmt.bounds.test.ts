@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from "vitest"
 
-// fmt.ts's relative-URL bounds check (resolvePackRelative) only bites when the
-// pack base is a SUBPATH: against the root base used in fmt.test.ts a "../" ref
-// normalizes back to the origin root and stays in-bounds. Here we mock ./base
-// with a deep subpath so the off-base drop (a credentialed-GET info-leak vector)
-// is actually exercised. Dynamic import after vi.mock so fmt binds the mocked base.
+// fmt.ts's relative-ref rule (resolvePackRelative: an asset key or nothing)
+// under a SUBPATH pack base: against the root base used in fmt.test.ts a "../"
+// ref normalizes back to the origin root, so only here can a traversal OFF the
+// subtree — and one that lands back inside it — be told apart. Dynamic import
+// after vi.mock so fmt binds the mocked base.
 const SUB = "http://localhost:3000/srr/feed/"
 vi.mock("./base", () => ({ PACK_BASE: new URL(SUB) }))
 
@@ -25,13 +25,20 @@ beforeEach(async () => {
 })
 
 describe("sanitizeHtml relative URL bounds (subpath pack base)", () => {
-   it("keeps a same-subtree relative ref", () => {
-      expect(attr('<img src="assets/ab/cd.jpg">', "img", "src")).toBe(SUB + "assets/ab/cd.jpg")
+   it("keeps an asset key, resolved under the subpath", () => {
+      expect(attr('<img src="assets/ab/0123456789abcdef.jpg">', "img", "src")).toBe(
+         SUB + "assets/ab/0123456789abcdef.jpg",
+      )
    })
 
-   it("keeps a ref that resolves to exactly the base root", () => {
-      // "." resolves to the base directory itself — on the boundary, still in-bounds.
-      expect(attr('<a href=".">x</a>', "a", "href")).toBe(SUB)
+   it("drops a ref that resolves to exactly the base root (in bounds, but not an asset key)", () => {
+      expect(attr('<a href=".">x</a>', "a", "href")).toBeNull()
+   })
+
+   it("drops a traversal that lands back inside the subtree", () => {
+      // "assets/../x" normalizes to SUB + "x" — on the base, and still not a key.
+      expect(attr('<img src="assets/../db.gz">', "img", "src")).toBeNull()
+      expect(attr('<img src="../feed/assets/ab/0123456789abcdef.jpg">', "img", "src")).toBeNull()
    })
 
    it("drops a ../ traversal that escapes the pack subtree (img src)", () => {
@@ -69,11 +76,12 @@ describe("sanitizeHtml relative URL bounds (subpath pack base)", () => {
 describe("extractPrefetchMedia relative URL bounds (subpath pack base)", () => {
    it("resolves in-subtree refs and drops escaping ones, per media list", () => {
       const html =
-         '<img src="assets/ab/cd.webp"><img src="../../secret.jpg">' +
-         '<video poster="../../p.jpg" src="assets/ab/cd.webm"></video><video src="//evil.example/v.mp4"></video>'
+         '<img src="assets/ab/0123456789abcdef.webp"><img src="../../secret.jpg">' +
+         '<video poster="../../p.jpg" src="assets/ab/0123456789abcdef.webm"></video>' +
+         '<video src="//evil.example/v.mp4"></video>'
       expect(extractPrefetchMedia(html)).toEqual({
-         images: [SUB + "assets/ab/cd.webp"],
-         videos: [SUB + "assets/ab/cd.webm"],
+         images: [SUB + "assets/ab/0123456789abcdef.webp"],
+         videos: [SUB + "assets/ab/0123456789abcdef.webm"],
       })
    })
 })

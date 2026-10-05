@@ -9,23 +9,18 @@ const data = vi.hoisted(() => ({
    activeStore: () => ({ mid: "0", base: new URL("https://cdn.example/store/") }),
 }))
 vi.mock("./data", () => data)
-vi.mock("./fmt", () => ({
-   srcColorIndex: () => 3,
-   stampSrc: (n: HTMLElement) => (n.dataset.src = "3"),
-   // The REAL bodies: safeSrc's store-base bound is what this suite's persisted
-   // -blob cases assert, so a stub would test nothing. Kept byte-equivalent to
-   // fmt.ts — a protocol-relative "//host" counts as relative precisely so the
-   // bounds check below rejects it.
-   isRelative: (v: string) => !/^[a-z][a-z0-9+.-]*:/i.test(v),
-   resolvePackRelative: (v: string, base: URL) => {
-      try {
-         const resolved = new URL(v, base).href
-         return resolved.startsWith(base.href) ? resolved : null
-      } catch {
-         return null
-      }
-   },
-}))
+vi.mock("./fmt", async (importOriginal) => {
+   const fmt = await importOriginal<typeof import("./fmt")>()
+   return {
+      srcColorIndex: () => 3,
+      stampSrc: (n: HTMLElement) => (n.dataset.src = "3"),
+      // The REAL bodies, not copies: safeSrc's store-base rule is what this
+      // suite's persisted-blob cases assert, and a hand-kept copy keeps
+      // asserting the rule it was copied from whenever fmt.ts changes it.
+      isRelative: fmt.isRelative,
+      resolvePackRelative: fmt.resolvePackRelative,
+   }
+})
 // The chip's long-press menu goes through the shared anchored card; mocking it
 // keeps this suite off dropdown's DOM and lets tests invoke item actions. The
 // bindPressMenu shim keeps only the contract this suite drives — a contextmenu
@@ -116,11 +111,13 @@ const playing = (m: HTMLMediaElement, isPlaying = true) =>
 const withDuration = (m: HTMLMediaElement, d: number) =>
    Object.defineProperty(m, "duration", { value: d, writable: true, configurable: true })
 
+// A content-hash asset key (assets/<2hex>/<16hex><ext>): the only relative src
+// a store base resolves (fmt.ts resolvePackRelative), so every fixture src is one.
+const assetKey = (n: number, ext = "mp3") => `assets/aa/${String(n).padStart(16, "0")}.${ext}`
+
 // Render n <audio> elements into the content host, as sanitizeFragment would.
 const putAudio = (n = 1) => {
-   content().innerHTML = Array.from({ length: n }, (_, i) => `<audio src="assets/aa/${i}.mp3" controls></audio>`).join(
-      "",
-   )
+   content().innerHTML = Array.from({ length: n }, (_, i) => `<audio src="${assetKey(i)}" controls></audio>`).join("")
    return [...content().querySelectorAll("audio")] as HTMLMediaElement[]
 }
 
@@ -156,7 +153,7 @@ const seedQueue = (...entries: { chron: number; title: string }[]) => {
          queue: entries.map((e) => ({
             chron: e.chron,
             index: 0,
-            src: `assets/aa/${e.chron}.mp3`,
+            src: assetKey(e.chron),
             kind: "audio",
             title: e.title,
             feedId: 7,
@@ -595,8 +592,8 @@ describe("persistence", () => {
          "srr-player",
          JSON.stringify({
             queue: [
-               { chron: 43, index: 0, src: "assets/aa/43.mp3", kind: "audio", title: "Played one", feedId: 7 },
-               { chron: 44, index: 0, src: "assets/aa/44.mp3", kind: "audio", title: "Next one", feedId: 7 },
+               { chron: 43, index: 0, src: assetKey(43), kind: "audio", title: "Played one", feedId: 7 },
+               { chron: 44, index: 0, src: assetKey(44), kind: "audio", title: "Next one", feedId: 7 },
             ],
             c: 1,
          }),
@@ -620,11 +617,11 @@ describe("persistence", () => {
             index: 0,
             time: 75,
             rate: 1,
-            src: "assets/aa/43.mp3",
+            src: assetKey(43),
             kind: "audio",
             title: "Interrupted",
             feedId: 7,
-            queue: [{ chron: 44, index: 0, src: "assets/aa/44.mp3", kind: "audio", title: "Queued", feedId: 7 }],
+            queue: [{ chron: 44, index: 0, src: assetKey(44), kind: "audio", title: "Queued", feedId: 7 }],
          }),
       )
       player.restorePersisted()
@@ -647,7 +644,7 @@ describe("persistence", () => {
          kind: "audio",
          title: "Episode 12",
          feedId: 7,
-         src: "assets/aa/0.mp3",
+         src: assetKey(0),
       })
    })
 
@@ -659,7 +656,7 @@ describe("persistence", () => {
             index: 0,
             time: 75,
             rate: 1,
-            src: "assets/aa/0.mp3",
+            src: assetKey(0),
             kind: "audio",
             title: "Episode 12",
             feedId: 7,
@@ -673,7 +670,7 @@ describe("persistence", () => {
       // currentTime is only settable once duration is known (the FEB2 pattern).
       m.dispatchEvent(new Event("loadedmetadata"))
       expect(m.currentTime).toBe(75)
-      expect(m.src).toBe("https://cdn.example/store/assets/aa/0.mp3")
+      expect(m.src).toBe("https://cdn.example/store/" + assetKey(0))
    })
 
    it("claims the article's OWN element when the persisted episode is the mounted article", () => {
@@ -690,7 +687,7 @@ describe("persistence", () => {
             index: 0,
             time: 75,
             rate: 1,
-            src: "assets/aa/0.mp3",
+            src: assetKey(0),
             kind: "audio",
             title: "Episode 12",
             feedId: 7,
@@ -718,7 +715,7 @@ describe("persistence", () => {
       // active.media in for the freshly parsed one, so a stripped stand-in would
       // permanently replace the real element — losing the playsinline/poster
       // fmt.ts force-sets (on iOS, losing playsinline means fullscreen takeover).
-      content().innerHTML = `<video src="assets/aa/0.webm" controls playsinline poster="assets/aa/p.jpg"></video>`
+      content().innerHTML = `<video src="${assetKey(0, "webm")}" controls playsinline poster="assets/aa/p.jpg"></video>`
       localStorage.setItem(
          "srr-player",
          JSON.stringify({
@@ -726,7 +723,7 @@ describe("persistence", () => {
             index: 0,
             time: 5,
             rate: 1,
-            src: "assets/aa/0.webm",
+            src: assetKey(0, "webm"),
             kind: "video",
             title: "Episode 12",
             feedId: 7,
@@ -735,7 +732,7 @@ describe("persistence", () => {
       player.restorePersisted()
       player.adoptFromContent()
       // A fresh render of the same article, then the rehome.
-      content().innerHTML = `<video src="assets/aa/0.webm" controls playsinline poster="assets/aa/p.jpg"></video>`
+      content().innerHTML = `<video src="${assetKey(0, "webm")}" controls playsinline poster="assets/aa/p.jpg"></video>`
       player.rehomeInto("0", 42)
       const back = content().querySelector("video") as HTMLVideoElement
       expect(content().querySelectorAll("video").length).toBe(1)
@@ -758,7 +755,7 @@ describe("persistence", () => {
             index: 0,
             time: 5,
             rate: 1,
-            src: "assets/aa/0.webm",
+            src: assetKey(0, "webm"),
             kind: "video",
             title: "Episode 99",
             feedId: 7,
@@ -771,7 +768,7 @@ describe("persistence", () => {
 
       // Now walk to the owning article, freshly rendered by the sanitizer.
       player.noteMounted({ ...MOUNTED, chron: OTHER, title: "Episode 99" })
-      content().innerHTML = `<video src="assets/aa/0.webm" controls playsinline poster="assets/aa/p.jpg"></video>`
+      content().innerHTML = `<video src="${assetKey(0, "webm")}" controls playsinline poster="assets/aa/p.jpg"></video>`
       player.rehomeInto("0", OTHER)
 
       const back = content().querySelector("video") as HTMLVideoElement
@@ -784,7 +781,16 @@ describe("persistence", () => {
    it("restores a video as a <video>", () => {
       localStorage.setItem(
          "srr-player",
-         JSON.stringify({ chron: 1, index: 0, time: 5, rate: 1, src: "a.webm", kind: "video", title: "V", feedId: 1 }),
+         JSON.stringify({
+            chron: 1,
+            index: 0,
+            time: 5,
+            rate: 1,
+            src: assetKey(1, "webm"),
+            kind: "video",
+            title: "V",
+            feedId: 1,
+         }),
       )
       player.restorePersisted()
       expect(media().querySelector("video")).toBeTruthy()
@@ -793,7 +799,16 @@ describe("persistence", () => {
    it("the video thumbnail's button takes the video full screen, with native controls only while there", async () => {
       localStorage.setItem(
          "srr-player",
-         JSON.stringify({ chron: 1, index: 0, time: 5, rate: 1, src: "a.webm", kind: "video", title: "V", feedId: 1 }),
+         JSON.stringify({
+            chron: 1,
+            index: 0,
+            time: 5,
+            rate: 1,
+            src: assetKey(1, "webm"),
+            kind: "video",
+            title: "V",
+            feedId: 1,
+         }),
       )
       player.restorePersisted()
       const v = media().querySelector("video") as HTMLVideoElement
@@ -847,6 +862,18 @@ describe("persistence", () => {
       expect(player.isActive()).toBe(false)
    })
 
+   it("REJECTS a relative src that is not an asset key, even one that stays on the store base", () => {
+      for (const src of ["assets/../api/preview?url=x&ingest=y", "api/preview", `${assetKey(0)}?x=1`]) {
+         localStorage.setItem(
+            "srr-player",
+            JSON.stringify({ chron: 1, index: 0, time: 5, rate: 1, src, kind: "audio", title: "x", feedId: 1 }),
+         )
+         player.restorePersisted()
+         expect(player.isActive(), src).toBe(false)
+         expect(media().querySelector("audio"), src).toBeNull()
+      }
+   })
+
    it("keeps an absolute http(s) src (whatever the feed carried)", () => {
       localStorage.setItem(
          "srr-player",
@@ -871,7 +898,16 @@ describe("persistence", () => {
       expect(player.isActive()).toBe(false)
       localStorage.setItem(
          "srr-player",
-         JSON.stringify({ chron: 1, index: 0, time: 0, rate: 1, src: "a.mp3", kind: "audio", title: "x", feedId: 1 }),
+         JSON.stringify({
+            chron: 1,
+            index: 0,
+            time: 0,
+            rate: 1,
+            src: assetKey(1),
+            kind: "audio",
+            title: "x",
+            feedId: 1,
+         }),
       )
       player.restorePersisted()
       expect(player.isActive()).toBe(false)
@@ -891,10 +927,10 @@ describe("playlist", () => {
 
    it("injects a toggle chip per eligible element, skipping the GIF idiom and srcless media", () => {
       content().innerHTML =
-         `<audio src="assets/aa/0.mp3" controls></audio>` +
+         `<audio src="${assetKey(0)}" controls></audio>` +
          `<video src="a.webm" autoplay muted loop></video>` + // GIF idiom — a decoration must not enter a playlist
          `<video controls><source src="s.webm"></video>` + // <source>-only — not rebuildable detached
-         `<audio src="assets/aa/1.mp3" controls></audio>`
+         `<audio src="${assetKey(1)}" controls></audio>`
       player.injectQueueChips()
       expect(chips()).toHaveLength(2)
       expect(chips()[0].getAttribute("aria-pressed")).toBe("false")
@@ -1107,7 +1143,7 @@ describe("playlist", () => {
       expect(player.isActive()).toBe(true)
       const built = media().querySelector("audio") as HTMLAudioElement
       expect(built).toBeTruthy()
-      expect(built.src).toBe("https://cdn.example/store/assets/aa/43.mp3")
+      expect(built.src).toBe("https://cdn.example/store/" + assetKey(43))
       expect(HTMLMediaElement.prototype.play).toHaveBeenCalled()
       expect(q(".srr-player-name").textContent).toBe("Episode 13")
       expect(bar().hidden).toBe(false)
@@ -1238,11 +1274,11 @@ describe("playlist", () => {
          "srr-player",
          JSON.stringify({
             queue: [
-               { chron: 43, index: 0, src: "assets/aa/9.mp3", kind: "audio", title: "Episode 13", feedId: 7 },
+               { chron: 43, index: 0, src: assetKey(9), kind: "audio", title: "Episode 13", feedId: 7 },
                { chron: 44, index: 0, src: "javascript:alert(1)", kind: "audio", title: "evil", feedId: 7 },
                { chron: 45, index: 0, src: "../../elsewhere/x.mp3", kind: "audio", title: "escape", feedId: 7 },
-               { chron: -1, index: 0, src: "a.mp3", kind: "audio", title: "bad chron", feedId: 7 },
-               { chron: 46, index: 0, src: "a.mp3", kind: "gif", title: "bad kind", feedId: 7 },
+               { chron: -1, index: 0, src: assetKey(1), kind: "audio", title: "bad chron", feedId: 7 },
+               { chron: 46, index: 0, src: assetKey(1), kind: "gif", title: "bad kind", feedId: 7 },
             ],
          }),
       )
@@ -1268,11 +1304,11 @@ describe("playlist", () => {
             index: 0,
             time: 75,
             rate: 1,
-            src: "assets/aa/0.mp3",
+            src: assetKey(0),
             kind: "audio",
             title: "Episode 12",
             feedId: 7,
-            queue: [{ chron: 43, index: 0, src: "x.mp3", kind: "audio", title: "Up next", feedId: 7 }],
+            queue: [{ chron: 43, index: 0, src: assetKey(43), kind: "audio", title: "Up next", feedId: 7 }],
          }),
       )
       player.restorePersisted()
@@ -1288,7 +1324,7 @@ describe("playlist", () => {
             queue: Array.from({ length: 60 }, (_, i) => ({
                chron: 100 + i,
                index: 0,
-               src: "a.mp3",
+               src: assetKey(100 + i),
                kind: "audio",
                title: `E${i}`,
                feedId: 7,
@@ -1464,7 +1500,7 @@ describe("Playlist — reorder and swipe", () => {
             queue: ["B", "C"].map((title, i) => ({
                chron: 43 + i,
                index: 0,
-               src: `assets/aa/${43 + i}.mp3`,
+               src: assetKey(43 + i),
                kind: "audio",
                title,
                feedId: 7,
@@ -1529,7 +1565,7 @@ describe("Playlist — reorder and swipe", () => {
                queue: ["A", "B", "C", "D", "E", "F"].map((title, i) => ({
                   chron: 43 + i,
                   index: 0,
-                  src: `assets/aa/${43 + i}.mp3`,
+                  src: assetKey(43 + i),
                   kind: "audio",
                   title,
                   feedId: 7,
@@ -1988,12 +2024,12 @@ describe("state → projections", () => {
       index: 0,
       time: 75,
       rate: 1,
-      src: "assets/aa/0.mp3",
+      src: assetKey(0),
       kind: "audio",
       title: "E13",
       feedId: 7,
    }
-   const QUEUE = [{ chron: 44, index: 0, src: "assets/aa/1.mp3", kind: "audio", title: "E14", feedId: 7 }]
+   const QUEUE = [{ chron: 44, index: 0, src: assetKey(1), kind: "audio", title: "E14", feedId: 7 }]
 
    it("booting persists nothing — the empty first state must not wipe the blob restore is about to read", async () => {
       const blob = JSON.stringify({ ...HEAD, queue: QUEUE })

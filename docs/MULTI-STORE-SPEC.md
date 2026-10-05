@@ -590,8 +590,8 @@ A federated peer changes that. Mounting a store means trusting its operator with
   says so plainly, and TST4's sanitizer fuzzing (findings doc) is promoted from
   nice-to-have to a prerequisite worth pulling forward.
 - **Resolution scope.** A peer's relative asset refs must resolve against *its*
-  base and are dropped when they escape it (the existing bounds check, now per
-  store — MS7). A peer can never address an object in another mount's origin.
+  base, and only an exact asset key resolves at all — any other relative ref is
+  dropped (the reader's relative-ref rule, applied per store — MS7). A peer can never address an object in another mount's origin.
 - **Observation.** The peer's origin sees your IP and reading pattern. The
   existing `referrerpolicy=no-referrer` / `rel=noreferrer` posture and the
   optional image proxy apply unchanged.
@@ -730,7 +730,7 @@ two roots — a **diagnostic only**, no filtering, no suppression, no state.
 | **MS4** | Mount failures are isolated: no mount's boot or refresh failure prevents another mount's lanes from rendering. Only all-mounts-failed reaches the global error popup. |
 | **MS5** | The reader never writes to any store. Every mount is read-only; admin affordances are home-only. |
 | **MS6** | Service-worker cache keys are absolute URLs; bounds, purges and GC mirroring are computed per matched root, never globally. |
-| **MS7** | A relative content URL resolves against its own article's store base and is dropped when it escapes that base. |
+| **MS7** | A relative content URL resolves against its own article's store base, and only when it is exactly an asset key; any other relative content URL is dropped. |
 | **MS8** | Wire compatibility is additive: the profile blob stays `v:2`; multi-store state rides `mnt`/`ms`; an absent store substate means "no opinion", never a deletion; an old build may strand peer state but can never corrupt the home store's. |
 | **MS9** | No mount record ever contains a secret. Credentials are browser cookies only, negotiated at the store's own origin. |
 

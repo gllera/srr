@@ -182,10 +182,10 @@ describe("sanitizeHtml security edge cases", () => {
       expect(out).not.toContain("evil.example")
    })
 
-   it("neutralizes a tab-obfuscated javascript: href (URL parse strips the tab → off-base → dropped)", () => {
-      // URL_DENY doesn't match a keyword with an interior tab; the safety comes
-      // from the relative-resolution fallback: new URL() strips the tab, reveals
-      // the javascript: scheme, which fails the pack-base bounds check → dropped.
+   it("neutralizes a tab-obfuscated javascript: href (scheme-less to the reader → not an asset key → dropped)", () => {
+      // URL_DENY doesn't match a keyword with an interior tab, and neither does the
+      // scheme test, so the reader takes it for a relative ref — one that is not an
+      // asset key, so it is dropped (a browser would strip the tab and run it).
       expect(attr('<a href="jaVa\tscript:alert(1)">x</a>', "a", "href")).toBeNull()
    })
 
@@ -203,7 +203,9 @@ describe("sanitizeHtml security edge cases", () => {
       // base and bypasses the proxy (proxying it would both break it and is
       // pointless); only EXTERNAL http(s) refs take the proxy path.
       setImgProxy("https://p.example/?u=")
-      expect(attr('<img src="assets/ab/cd.jpg">', "img", "src")).toBe("http://localhost:3000/assets/ab/cd.jpg")
+      expect(attr('<img src="assets/ab/0123456789abcdef.jpg">', "img", "src")).toBe(
+         "http://localhost:3000/assets/ab/0123456789abcdef.jpg",
+      )
    })
 
    // #2 — <source srcset> is never stripped today; this must fail before the fix.
@@ -233,13 +235,15 @@ describe("sanitizeHtml security edge cases", () => {
    })
 
    it("keeps <audio> and forces controls (a control-less feed <audio> is invisible)", () => {
-      const out = sanitizeHtml('<audio src="assets/ab/cd.webm"></audio>')
+      const out = sanitizeHtml('<audio src="assets/ab/0123456789abcdef.webm"></audio>')
       expect(out).toContain("<audio")
       expect(out).toContain("controls")
    })
 
    it("resolves a relative <audio src> against the pack base", () => {
-      expect(attr('<audio src="assets/ab/cd.webm">', "audio", "src")).toBe("http://localhost:3000/assets/ab/cd.webm")
+      expect(attr('<audio src="assets/ab/0123456789abcdef.webm">', "audio", "src")).toBe(
+         "http://localhost:3000/assets/ab/0123456789abcdef.webm",
+      )
    })
 
    it("passes an external <audio src> through unproxied (audio is not an image)", () => {
@@ -372,16 +376,18 @@ describe("sanitizeHtml relative URL resolution", () => {
    }
 
    it("resolves an assets/ img src against the pack base (no proxy)", () => {
-      expect(attr('<img src="assets/ab/cd1234.jpg">', "img", "src")).toBe("http://localhost:3000/assets/ab/cd1234.jpg")
+      expect(attr('<img src="assets/ab/0123456789abcdef.jpg">', "img", "src")).toBe(
+         "http://localhost:3000/assets/ab/0123456789abcdef.jpg",
+      )
    })
 
-   it("resolves a non-assets relative img src against the pack base (not just assets/)", () => {
-      expect(attr('<img src="img/photo.jpg">', "img", "src")).toBe("http://localhost:3000/img/photo.jpg")
-      expect(attr('<img src="/rooted.jpg">', "img", "src")).toBe("http://localhost:3000/rooted.jpg")
+   it("drops a relative img src that is not an asset key, even one that stays on the base", () => {
+      expect(attr('<img src="img/photo.jpg">', "img", "src")).toBeNull()
+      expect(attr('<img src="/rooted.jpg">', "img", "src")).toBeNull()
    })
 
-   it("resolves a non-assets relative anchor href against the pack base", () => {
-      expect(attr('<a href="docs/report.pdf">x</a>', "a", "href")).toBe("http://localhost:3000/docs/report.pdf")
+   it("drops a relative anchor href that is not an asset key", () => {
+      expect(attr('<a href="docs/report.pdf">x</a>', "a", "href")).toBeNull()
    })
 
    it("drops a protocol-relative ref pointing at a foreign origin", () => {
@@ -392,9 +398,10 @@ describe("sanitizeHtml relative URL resolution", () => {
    })
 
    it("resolves assets/ video src and poster against the pack base", () => {
-      const html = '<video src="assets/bb/2222.mp4" poster="assets/cc/3333.jpg" controls></video>'
-      expect(attr(html, "video", "src")).toBe("http://localhost:3000/assets/bb/2222.mp4")
-      expect(attr(html, "video", "poster")).toBe("http://localhost:3000/assets/cc/3333.jpg")
+      const html =
+         '<video src="assets/bb/2222222222222222.mp4" poster="assets/cc/3333333333333333.jpg" controls></video>'
+      expect(attr(html, "video", "src")).toBe("http://localhost:3000/assets/bb/2222222222222222.mp4")
+      expect(attr(html, "video", "poster")).toBe("http://localhost:3000/assets/cc/3333333333333333.jpg")
    })
 
    it("leaves external http(s) img URLs on the proxy path (no asset resolution)", () => {
@@ -410,7 +417,9 @@ describe("sanitizeHtml relative URL resolution", () => {
    })
 
    it("resolves an assets/ anchor href against the pack base (self-hosted file)", () => {
-      expect(attr('<a href="assets/de/9f01.pdf">doc</a>', "a", "href")).toBe("http://localhost:3000/assets/de/9f01.pdf")
+      expect(attr('<a href="assets/de/9f019f019f019f01.pdf">doc</a>', "a", "href")).toBe(
+         "http://localhost:3000/assets/de/9f019f019f019f01.pdf",
+      )
    })
 
    it("leaves an external anchor href untouched (navigation, not an asset)", () => {
@@ -425,6 +434,68 @@ describe("sanitizeHtml relative URL resolution", () => {
       )
       // src stays direct — image proxies don't handle video.
       expect(attr(html, "video", "src")).toBe("https://cdn.example.com/v.mp4")
+   })
+})
+
+// The store base is the deployment root in the self-hosted layout, so the reader,
+// the packs and the admin API share one origin: an in-bounds relative ref is NOT
+// thereby harmless. A relative content ref resolves only when it is exactly the
+// key the writer emits — every other spelling is dropped, on every URL-bearing
+// media/link attribute the sanitizer routes, including the ones that normalize
+// to a path still on the base (the root base used here).
+describe("relative refs: only an asset key resolves against the store base", () => {
+   const attr = (html: string, sel: string, name: string, base?: URL): string | null => {
+      const t = document.createElement("template")
+      t.innerHTML = sanitizeHtml(html, base)
+      return t.content.querySelector(sel)!.getAttribute(name)
+   }
+   const KEY = "assets/ab/0123456789abcdef.jpg"
+   const HOME = "http://localhost:3000/"
+   const PEER = new URL("https://peer.example/store/")
+   const DROPPED = [
+      "assets/../api/preview?url=x&ingest=y",
+      "assets/ab/../../api/x",
+      `./${KEY}`,
+      `${KEY}?x=1`,
+      `${KEY}#f`,
+      "assets/%2e%2e/api/x",
+      "/api/overview",
+      "api/preview",
+   ]
+   const SITES: [string, (v: string) => string, string, string][] = [
+      ["img src", (v) => `<img src="${v}">`, "img", "src"],
+      ["video src", (v) => `<video src="${v}"></video>`, "video", "src"],
+      ["video poster", (v) => `<video poster="${v}"></video>`, "video", "poster"],
+      ["audio src", (v) => `<audio src="${v}"></audio>`, "audio", "src"],
+      ["source src", (v) => `<video><source src="${v}"></video>`, "source", "src"],
+      ["a href", (v) => `<a href="${v}">x</a>`, "a", "href"],
+   ]
+
+   describe.each(SITES)("%s", (_site, wrap, sel, name) => {
+      it.each(DROPPED)("drops %s", (ref) => {
+         expect(attr(wrap(ref), sel, name)).toBeNull()
+      })
+
+      it("drops each of them against a peer base too", () => {
+         for (const ref of DROPPED) expect(attr(wrap(ref), sel, name, PEER), ref).toBeNull()
+      })
+
+      it("resolves an asset key to base + key, home and peer alike", () => {
+         expect(attr(wrap(KEY), sel, name)).toBe(HOME + KEY)
+         // A peer article's key resolves against ITS OWN base, never home's (MS7).
+         expect(attr(wrap(KEY), sel, name, PEER)).toBe(PEER.href + KEY)
+      })
+   })
+
+   it("keeps a mixed-case key: the grammar is case-insensitive like ASSET_KEY and RE_ASSET", () => {
+      // The writer's own key grammar allows an upper-case extension, and no
+      // spelling the case-insensitive grammar admits can leave base/assets/.
+      for (const key of ["assets/ab/0123456789abcdef.JPG", "assets/AB/0123456789ABCDEF.Jpg"])
+         expect(attr(`<img src="${key}">`, "img", "src")).toBe(HOME + key)
+   })
+
+   it("keeps an extensionless key (the writer drops an unsafe extension)", () => {
+      expect(attr('<img src="assets/ab/0123456789abcdef">', "img", "src")).toBe(HOME + "assets/ab/0123456789abcdef")
    })
 })
 
@@ -453,10 +524,16 @@ describe("in-page fragment anchors", () => {
       expect(frag('<a href="#">top</a>').querySelector("a")!.getAttribute("href")).toBe("#")
    })
 
-   it("still pack-resolves a non-fragment relative href", () => {
+   it("drops a non-fragment relative href that carries a fragment (only a bare # is in-page)", () => {
       const a = frag('<a href="notes.html#fn1">1</a>').querySelector("a")!
-      expect(a.getAttribute("href")).toBe("http://localhost:3000/notes.html#fn1")
+      expect(a.hasAttribute("href")).toBe(false)
       expect(a.getAttribute("target")).toBeNull()
+   })
+
+   it("keeps a fragment verbatim whatever it spells — it never leaves the document", () => {
+      const a = frag('<a href="#../api/preview?url=x">1</a>').querySelector("a")!
+      expect(a.getAttribute("href")).toBe("#../api/preview?url=x")
+      expect(a.getAttribute("target")).toBe("_self")
    })
 
    it("keeps a conservative id so the fragment has something to land on", () => {
@@ -674,7 +751,23 @@ describe("extractPrefetchMedia", () => {
    })
 
    it("resolves a relative assets/ src against the pack base (self-hosted media prefetches too)", () => {
-      expect(extractPrefetchMedia('<img src="assets/ab/cd.webp">').images).toEqual([BASE + "assets/ab/cd.webp"])
+      expect(extractPrefetchMedia('<img src="assets/ab/0123456789abcdef.webp">').images).toEqual([
+         BASE + "assets/ab/0123456789abcdef.webp",
+      ])
+   })
+
+   it("warms no store-origin URL for a crafted relative ref — only the asset key's", () => {
+      // The neighbour's images load before the user opens it, so this list is
+      // the zero-click half: nothing here may name a same-origin non-asset path.
+      const key = "assets/ab/0123456789abcdef.jpg"
+      const html =
+         '<img src="assets/../api/preview?url=x&ingest=y"><img src="/api/overview">' +
+         '<video poster="api/preview" src="assets/ab/../../api/x"></video>' +
+         '<video><source src="assets/%2e%2e/api/x"></video>' +
+         `<img src="${key}">`
+      expect(extractPrefetchMedia(html)).toEqual({ images: [BASE + key], videos: [] })
+      const peer = new URL("https://peer.example/store/")
+      expect(extractPrefetchMedia(html, peer)).toEqual({ images: [peer.href + key], videos: [] })
    })
 
    it("proxies img src and video poster, exactly as sanitizeHtml renders them", () => {
@@ -701,8 +794,8 @@ describe("extractPrefetchMedia", () => {
    })
 
    it("resolves a relative video src against the pack base", () => {
-      expect(extractPrefetchMedia('<video src="assets/ab/cd.webm"></video>').videos).toEqual([
-         BASE + "assets/ab/cd.webm",
+      expect(extractPrefetchMedia('<video src="assets/ab/0123456789abcdef.webm"></video>').videos).toEqual([
+         BASE + "assets/ab/0123456789abcdef.webm",
       ])
    })
 
