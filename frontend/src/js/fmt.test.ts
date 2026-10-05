@@ -501,6 +501,7 @@ describe("relative refs: only an asset key resolves against the store base", () 
       ["audio src", (v) => `<audio src="${v}"></audio>`, "audio", "src"],
       ["source src", (v) => `<video><source src="${v}"></video>`, "source", "src"],
       ["a href", (v) => `<a href="${v}">x</a>`, "a", "href"],
+      ["area href", (v) => `<map name="m"><area href="${v}"></map>`, "area", "href"],
    ]
 
    describe.each(SITES)("%s", (_site, wrap, sel, name) => {
