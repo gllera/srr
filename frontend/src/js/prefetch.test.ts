@@ -60,4 +60,22 @@ describe("schedulePrefetch", () => {
       await vi.waitFor(() => expect(assigned.length).toBeGreaterThan(0))
       expect(assigned).toEqual([peer + KEY])
    })
+
+   it("never warms the page's own server from a peer article, however the ref is spelled", async () => {
+      // The page (jsdom's location) is where the admin API lives, and a peer's
+      // base is another origin: being cross-origin to the ARTICLE'S base does not
+      // make a ref to the page safe.
+      expect(location.origin).toBe("http://localhost:3000")
+      const peer = "https://peer.example/store/"
+      data.activeStore.mockReturnValue({ mid: "1", base: new URL(peer) })
+      data.loadArticle.mockResolvedValue({
+         c:
+            '<img src="http://localhost:3000/api/preview?url=x&amp;ingest=y"><img src="https:/api/x">' +
+            '<img src="HTTP:/api/x"><video src="https://localhost:3000/api/v"></video>' +
+            `<img src="${KEY}">`,
+      })
+      schedulePrefetch(5)
+      await vi.waitFor(() => expect(assigned.length).toBeGreaterThan(0))
+      expect(assigned).toEqual([peer + KEY])
+   })
 })

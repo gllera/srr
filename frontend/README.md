@@ -65,7 +65,7 @@ Entry point: `src/index.html` -> `src/js/app.ts`. Bundled with Parcel 2.
 | `refresh.ts` / `sync.ts` | Live content sync (an open tab silently adopts a newer store snapshot via conditional `db.gz` GETs) / cross-device sync engine over the portable profile. |
 | `gestures.ts` | Touch swipes (prev/next, cycle filter) + scroll-based toolbar hide. |
 | `cache.ts` | Generic LRU cache factory (`makeLRU`) + promise-caching helpers. |
-| `fmt.ts` | Pure utilities: HTML sanitization (image-proxy rewrite, relative asset keys resolved against the pack base, any other relative URL dropped), relative time, date formatting. |
+| `fmt.ts` | Pure utilities: HTML sanitization (image-proxy rewrite, asset keys resolved against the pack base, any other URL on the page's or the store's server dropped), relative time, date formatting. |
 | `pin.ts` / `profile.ts` | Offline-pin registry / portable backup-restore of reader state. |
 | `base.ts` / `keys.ts` / `urlish.ts` | `PACK_BASE` (the URL packs resolve against) / localStorage key constants / shared http(s)-URL validation rules. |
 | `sw-grammar.ts` + `../sw.ts` | Service worker: cache-first pack/asset/shell caching + offline pinning; the pack-name grammar is extracted for unit testing. |

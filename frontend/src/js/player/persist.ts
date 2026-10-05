@@ -4,11 +4,10 @@
 // engine's business (engine.ts restorePersisted); this module only speaks the
 // shape.
 import * as data from "../data"
-import { isRelative, resolvePackRelative } from "../fmt"
+import { routeContentUrl } from "../fmt"
 import { playerStateKey } from "../keys"
 import { lsJson, lsSet } from "../storage"
 import { arrayEqual, diffed } from "../signals"
-import { URL_DENY } from "../urlish"
 import { active, cursor, entryKey, mediaKind, QUEUE_MAX, queue, RATES, ratePref, type QueueEntry } from "./state"
 
 // What survives a reload. `src`/`kind`/`title`/`feedId` ride along so the player
@@ -117,33 +116,20 @@ export function clearSaved(mid: string): void {
 
 // The persisted `src` comes back from localStorage, which makes it UNTRUSTED
 // input on a path that ends in an assignment the browser will fetch. It gets the
-// same treatment article content gets in fmt.ts: never a javascript:/data:/
-// vbscript:/file: scheme, and a relative src must be an asset key, the one
-// relative form that resolves against the store base (resolvePackRelative — a
-// "//host", a "../" escape or a same-origin path is dropped there exactly as it
-// is in sanitizeFragment).
+// same treatment article content gets in fmt.ts, by the same function
+// (routeContentUrl): an http(s) src on the page's or the store's server must be
+// exactly base + an asset key — which is also what save() persists from a
+// rendered element — a third-party one is whatever the feed carried, the same
+// trust level as any <audio src> the sanitizer already lets through, and
+// nothing else plays (no javascript:/data:/vbscript:/file:, no other scheme).
+//
+// The rule is fmt's rather than restated here, because a restatement had already
+// drifted on the case that matters: it skipped a protocol-relative "//host" and
+// returned a foreign origin verbatim. That is the kind of shape this function
+// exists to catch, since its input is the untrusted srr-player localStorage blob.
 export function safeSrc(raw: string, base: URL): string | null {
-   if (!raw || URL_DENY.test(raw)) return null
-   let u: URL
-   try {
-      u = new URL(raw, base)
-   } catch {
-      return null
-   }
-   if (u.protocol !== "http:" && u.protocol !== "https:") return null
-   // An absolute http(s) media URL is whatever the feed carried — same trust
-   // level as any <audio src> the sanitizer already lets through. A RELATIVE one
-   // names a store object, so it must be an asset key.
-   //
-   // Both halves come from fmt.ts rather than being restated here, because the
-   // restatement had already drifted on the case that matters: it excluded a
-   // protocol-relative "//host" from `isRelative` and so skipped the check
-   // entirely, returning a foreign origin verbatim — where fmt counts "//host"
-   // as relative precisely SO resolvePackRelative drops it. That is the
-   // one shape this function exists to catch, since its input is the untrusted
-   // srr-player localStorage blob.
-   if (isRelative(raw) && resolvePackRelative(raw, base) === null) return null
-   return u.href
+   const r = routeContentUrl(raw, base)
+   return r.kind === "asset" || r.kind === "external" ? r.href : null
 }
 
 // The restorable halves of a store's blob, every field validated. `head` is the

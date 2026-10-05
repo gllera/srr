@@ -302,7 +302,7 @@ vi.mock("./picker", () => picker)
 // captured for assertions.
 const pickerHooks = () => (picker.setup as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[1]
 
-vi.mock("./fmt", () => ({
+vi.mock("./fmt", async (importOriginal) => ({
    sanitizeFragment: (s: string) => {
       const t = document.createElement("template")
       t.innerHTML = s
@@ -320,17 +320,9 @@ vi.mock("./fmt", () => ({
    collapseBrokenMedia: () => {},
    handleFragmentClick: () => {},
    extractAssetKeys: vi.fn((): string[] => []),
-   // Real bodies: player.safeSrc's store-base bound runs through these, and a
-   // stub would either reject every relative store path or accept a foreign one.
-   isRelative: (v: string) => !/^[a-z][a-z0-9+.-]*:/i.test(v),
-   resolvePackRelative: (v: string, base: URL) => {
-      try {
-         const resolved = new URL(v, base).href
-         return resolved.startsWith(base.href) ? resolved : null
-      } catch {
-         return null
-      }
-   },
+   // The real body: player.safeSrc's store-base rule runs through it, and a stub
+   // would either reject every store path or accept a foreign one.
+   routeContentUrl: (await importOriginal<typeof import("./fmt")>()).routeContentUrl,
 }))
 
 const gestures = vi.hoisted(() => {

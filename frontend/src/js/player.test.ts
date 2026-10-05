@@ -14,11 +14,10 @@ vi.mock("./fmt", async (importOriginal) => {
    return {
       srcColorIndex: () => 3,
       stampSrc: (n: HTMLElement) => (n.dataset.src = "3"),
-      // The REAL bodies, not copies: safeSrc's store-base rule is what this
+      // The REAL body, not a copy: safeSrc's store-base rule is what this
       // suite's persisted-blob cases assert, and a hand-kept copy keeps
       // asserting the rule it was copied from whenever fmt.ts changes it.
-      isRelative: fmt.isRelative,
-      resolvePackRelative: fmt.resolvePackRelative,
+      routeContentUrl: fmt.routeContentUrl,
    }
 })
 // The chip's long-press menu goes through the shared anchored card; mocking it
@@ -111,8 +110,8 @@ const playing = (m: HTMLMediaElement, isPlaying = true) =>
 const withDuration = (m: HTMLMediaElement, d: number) =>
    Object.defineProperty(m, "duration", { value: d, writable: true, configurable: true })
 
-// A content-hash asset key (assets/<2hex>/<16hex><ext>): the only relative src
-// a store base resolves (fmt.ts resolvePackRelative), so every fixture src is one.
+// A content-hash asset key (assets/<2hex>/<16hex><ext>): the only store-relative
+// src a store base keeps (fmt.ts routeContentUrl), so every fixture src is one.
 const assetKey = (n: number, ext = "mp3") => `assets/aa/${String(n).padStart(16, "0")}.${ext}`
 
 // Render n <audio> elements into the content host, as sanitizeFragment would.
@@ -872,6 +871,42 @@ describe("persistence", () => {
          expect(player.isActive(), src).toBe(false)
          expect(media().querySelector("audio"), src).toBeNull()
       }
+   })
+
+   it("REJECTS a src that resolves onto the page's server or the store's, however it is spelled", () => {
+      // The store base here is https://cdn.example/store/; the page (jsdom's
+      // location, where the admin API lives) is another origin, and is guarded
+      // just the same.
+      expect(location.origin).toBe("http://localhost:3000")
+      for (const src of [
+         "https:/api/x",
+         "https:api/x",
+         "https:\\api\\x",
+         "HTTP:/api/x",
+         "http://localhost:3000/api/preview?url=x&ingest=y",
+         "https://localhost:3000/api/x",
+         "https://cdn.example/api/x",
+         "http://cdn.example/api/x",
+      ]) {
+         localStorage.setItem(
+            "srr-player",
+            JSON.stringify({ chron: 1, index: 0, time: 5, rate: 1, src, kind: "audio", title: "x", feedId: 1 }),
+         )
+         player.restorePersisted()
+         expect(player.isActive(), src).toBe(false)
+         expect(media().querySelector("audio"), src).toBeNull()
+      }
+   })
+
+   it("keeps an asset key spelled absolutely as base + key — what save() persists from a rendered element", () => {
+      const src = "https://cdn.example/store/" + assetKey(0)
+      localStorage.setItem(
+         "srr-player",
+         JSON.stringify({ chron: 1, index: 0, time: 5, rate: 1, src, kind: "audio", title: "x", feedId: 1 }),
+      )
+      player.restorePersisted()
+      expect(player.isActive()).toBe(true)
+      expect((media().querySelector("audio") as HTMLMediaElement).src).toBe(src)
    })
 
    it("keeps an absolute http(s) src (whatever the feed carried)", () => {

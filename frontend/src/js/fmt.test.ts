@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest"
 import {
    collapseBrokenMedia,
    extractAssetKeys,
@@ -219,9 +219,9 @@ describe("sanitizeHtml security edge cases", () => {
 
    // #8 — <source src> is never bounds-checked today; this must fail before the fix.
    it("drops a protocol-relative <source src> that escapes the pack base (bounds-check parity with <video src>)", () => {
-      // "//evil/v.mp4" has no URL scheme → isRelative() is true → resolvePackRelative
-      // resolves it to http://evil/v.mp4, which doesn't startWith(PACK_BASE) →
-      // the attribute is removed, same as <img src="//evil/..."> and <video src="//evil/...">.
+      // "//evil/v.mp4" resolves to http://evil/v.mp4 against the base here and to
+      // the page's scheme there — not an authority-spelled third-party URL, so
+      // routeContentUrl drops it, same as <img src="//evil/..."> and <video src="//evil/...">.
       expect(attr('<video><source src="//evil.example/v.mp4"></video>', "source", "src")).toBeNull()
    })
 
@@ -470,11 +470,12 @@ describe("sanitizeHtml relative URL resolution", () => {
 })
 
 // The store base is the deployment root in the self-hosted layout, so the reader,
-// the packs and the admin API share one origin: an in-bounds relative ref is NOT
-// thereby harmless. A relative content ref resolves only when it is exactly the
-// key the writer emits — every other spelling is dropped, on every URL-bearing
-// media/link attribute the sanitizer routes, including the ones that normalize
-// to a path still on the base (the root base used here).
+// the packs and the admin API share one origin: an in-bounds ref is NOT thereby
+// harmless. A content URL that resolves onto the page's server or the store's is
+// kept only when it is exactly base + the key the writer emits — every other one
+// is dropped, on every URL-bearing media/link attribute the sanitizer routes,
+// including the ones that normalize to a path still on the base (the root base
+// used here) and the ones spelled with a scheme that still resolve there.
 describe("relative refs: only an asset key resolves against the store base", () => {
    const attr = (html: string, sel: string, name: string, base?: URL): string | null => {
       const t = document.createElement("template")
@@ -482,17 +483,34 @@ describe("relative refs: only an asset key resolves against the store base", () 
       return t.content.querySelector(sel)!.getAttribute(name)
    }
    const KEY = "assets/ab/0123456789abcdef.jpg"
-   const HOME = "http://localhost:3000/"
+   // jsdom's page origin, where the admin API lives. HOME (the default base)
+   // shares it; PEER is another server, so a row dropped against PEER is dropped
+   // for the page's sake as much as for the peer's own.
+   const PAGE = "http://localhost:3000"
+   const HOME = PAGE + "/"
    const PEER = new URL("https://peer.example/store/")
+   const EXT = "https://cdn.example/x.jpg"
    const DROPPED = [
       "assets/../api/preview?url=x&ingest=y",
       "assets/ab/../../api/x",
-      `./${KEY}`,
       `${KEY}?x=1`,
       `${KEY}#f`,
       "assets/%2e%2e/api/x",
       "/api/overview",
       "api/preview",
+      // An http(s) scheme with no "//" is a RELATIVE ref to a parser whose base
+      // shares that scheme — so the browser, resolving against the page, lands
+      // "http:/api/x" on the page's own /api/x. The old string-shape test took
+      // each for absolute, and nothing then routed them.
+      "https:/api/x",
+      "https:api/x",
+      "https:\\api\\x",
+      "HTTP:/api/x",
+      // The page's own server spelled absolutely, and with the scheme swapped:
+      // a browser upgrades an http subresource on an https page, and the front
+      // proxy redirects port 80, so both reach the same handler.
+      PAGE + "/api/x",
+      "https://localhost:3000/api/x",
    ]
    const SITES: [string, (v: string) => string, string, string][] = [
       ["img src", (v) => `<img src="${v}">`, "img", "src"],
@@ -503,6 +521,10 @@ describe("relative refs: only an asset key resolves against the store base", () 
       ["a href", (v) => `<a href="${v}">x</a>`, "a", "href"],
       ["area href", (v) => `<map name="m"><area href="${v}"></map>`, "area", "href"],
    ]
+
+   beforeAll(() => {
+      expect(location.origin).toBe(PAGE)
+   })
 
    describe.each(SITES)("%s", (_site, wrap, sel, name) => {
       it.each(DROPPED)("drops %s", (ref) => {
@@ -518,6 +540,33 @@ describe("relative refs: only an asset key resolves against the store base", () 
          // A peer article's key resolves against ITS OWN base, never home's (MS7).
          expect(attr(wrap(KEY), sel, name, PEER)).toBe(PEER.href + KEY)
       })
+
+      it("keeps any spelling that resolves to exactly base + key, as that URL", () => {
+         // The rule is on the resolved URL: these name the asset and nothing else.
+         // The absolute one is what the player persists from a rendered element.
+         for (const ref of [`./${KEY}`, HOME + KEY]) expect(attr(wrap(ref), sel, name), ref).toBe(HOME + KEY)
+         expect(attr(wrap(PEER.href + KEY), sel, name, PEER)).toBe(PEER.href + KEY)
+      })
+
+      it("drops home's key spelled absolutely in a peer article: the page's server is not the peer's base", () => {
+         expect(attr(wrap(HOME + KEY), sel, name, PEER)).toBeNull()
+      })
+
+      it("keeps a cross-origin absolute URL verbatim, home and peer alike", () => {
+         expect(attr(wrap(EXT), sel, name)).toBe(EXT)
+         expect(attr(wrap(EXT), sel, name, PEER)).toBe(EXT)
+      })
+   })
+
+   it("drops a peer article's absolute ref to the PAGE, though it is cross-origin to the peer's base", () => {
+      expect(attr(`<img src="${PAGE}/api/preview?url=x&amp;ingest=y">`, "img", "src", PEER)).toBeNull()
+      expect(attr(`<a href="${PAGE}/api/preview?url=x&amp;ingest=y">x</a>`, "a", "href", PEER)).toBeNull()
+   })
+
+   it("drops a ref to the store's own host on the other default port", () => {
+      // Not https://peer.example's origin, but upgraded (or redirected) onto it.
+      expect(attr('<img src="http://peer.example/api/x">', "img", "src", PEER)).toBeNull()
+      expect(attr('<a href="http://peer.example/api/x">x</a>', "a", "href", PEER)).toBeNull()
    })
 
    it("keeps a mixed-case key: the grammar is case-insensitive like ASSET_KEY and RE_ASSET", () => {
@@ -817,9 +866,9 @@ describe("extractPrefetchMedia", () => {
    })
 
    it("skips non-http schemes and drops an off-base protocol-relative ref", () => {
-      // data: has a scheme (not relative, not http) — skipped. "//cdn/x.jpg" is
-      // scheme-less, so it takes the relative path and the bounds check drops it
-      // (resolves to a foreign origin) — same routing as sanitizeHtml's render.
+      // data: is not http(s) — skipped. "//cdn/x.jpg" is not spelled with an
+      // http(s) scheme, so it means one URL against the store base and another
+      // against the page, and is dropped — same routing as sanitizeHtml's render.
       const html = '<img src="data:image/png;base64,xx"><img src="//cdn/x.jpg"><img src="https://ok.com/x.jpg">'
       expect(extractPrefetchMedia(html).images).toEqual(["https://ok.com/x.jpg"])
    })
@@ -842,6 +891,28 @@ describe("extractPrefetchMedia", () => {
       expect(extractPrefetchMedia(html)).toEqual({ images: [BASE + key], videos: [] })
       const peer = new URL("https://peer.example/store/")
       expect(extractPrefetchMedia(html, peer)).toEqual({ images: [peer.href + key], videos: [] })
+   })
+
+   it("warms nothing on the page's server or the store's but the asset key, however a ref is spelled", () => {
+      // Schemed spellings the browser resolves onto the page, and the page's own
+      // origin spelled absolutely — none of which may reach the image proxy
+      // either. A third-party URL still warms, proxied like its render.
+      setImgProxy("https://p.example/?u=")
+      const key = "assets/ab/0123456789abcdef.jpg"
+      const ext = "https://cdn.example/x.jpg"
+      const html =
+         '<img src="https:/api/x"><img src="https:api/x"><img src="https:\\api\\x"><img src="HTTP:/api/x">' +
+         '<img src="http://localhost:3000/api/preview?url=x&amp;ingest=y">' +
+         '<video poster="http://localhost:3000/api/x" src="https://localhost:3000/api/v"></video>' +
+         '<video><source src="http:/api/v"></video>' +
+         `<img src="${key}"><img src="${ext}">`
+      const proxied = "https://p.example/?u=" + encodeURIComponent(ext)
+      expect(location.origin).toBe("http://localhost:3000")
+      expect(extractPrefetchMedia(html)).toEqual({ images: [BASE + key, proxied], videos: [] })
+      // A peer article: the page's server is still off limits, though it is
+      // cross-origin to the peer's own base.
+      const peer = new URL("https://peer.example/store/")
+      expect(extractPrefetchMedia(html, peer)).toEqual({ images: [peer.href + key, proxied], videos: [] })
    })
 
    it("proxies img src and video poster, exactly as sanitizeHtml renders them", () => {

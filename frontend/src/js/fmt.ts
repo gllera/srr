@@ -24,7 +24,7 @@ const URL_ATTRS = new Set([
 // against the document base — ping POSTs to every URL it lists when the link is
 // followed, background loads an image on render — and in the self-hosted layout
 // that base is the origin root the admin API shares. The reader routes neither
-// (nothing here resolves them the way resolvePackRelative resolves media), and
+// (nothing here resolves them the way routeContentUrl routes media), and
 // the writer's allowlist keeps neither, so content carrying one skipped #sanitize.
 const DROP_ATTRS = new Set(["ping", "background"])
 // Absolute <a>/<area> href schemes the backend bluemonday allowlist keeps
@@ -32,9 +32,12 @@ const DROP_ATTRS = new Set(["ping", "background"])
 // torrent); any other absolute scheme (blob:, ftp:, intent:, …) is dropped to
 // mirror the writer. Kept in lockstep with sanitize.go's AllowURLSchemes — a
 // scheme added/removed here must move there too. javascript:/data:/… are already
-// caught by URL_DENY in the attribute loop; a relative href survives only as an
-// asset key (resolvePackRelative) or an in-page fragment (FRAGMENT_HREF).
-const ANCHOR_ABS_OK = /^(?:https?|mailto|tel|geo|magnet):/i
+// caught by URL_DENY in the attribute loop. An href that resolves to http(s) —
+// relative or not — is routeContentUrl's to decide, never this list's: it is
+// consulted only for the other schemes, and its http(s) arm demands the "//"
+// authority so "https:api/x", a RELATIVE ref on an https page, can never pass
+// for an absolute link.
+const ANCHOR_ABS_OK = /^(?:https?:\/\/|(?:mailto|tel|geo|magnet):)/i
 // A bare-"#" href is an IN-PAGE fragment — a footnote marker, a "back to text"
 // return link, a table-of-contents entry. It is the one relative href kept that
 // is not an asset key, and it must NOT resolve against the pack base: doing so
@@ -63,21 +66,17 @@ const ID_TOKEN = /^(?!srr-)[A-Za-z][\w:.-]{0,63}$/
 // so we don't need a separate case-folding pass.
 const DANGEROUS_SELECTOR = "script,style,iframe,embed,object,form,link,meta,base,svg,math,template,track,input"
 
-// A reference carrying a URL scheme (http:, mailto:, the URL_DENY set, …) is
-// absolute; everything else is a relative reference. ABS_SCHEME detects the
-// scheme so isRelative can route relative refs to the pack base below.
-const ABS_SCHEME = /^[a-z][a-z0-9+.-]*:/i
 // Content URLs are relative to the pack base (where the article was stored), not
 // the reader page, so a relative ref resolves against PACK_BASE (base.ts; the
 // same base data.ts addresses packs with) instead of the SPA origin or the image
-// proxy — and only when it is this: the store-relative content-hash asset key,
-// exactly as the writer emits it into article content (backend assets.go
-// contentHashKey). Anchored at both ends, it is the whole of what may resolve
-// against a store base (resolvePackRelative) and of what can be pinned
-// (extractAssetKeys) — an external URL that merely CONTAINS such a path is not a
-// key of this store. Case-insensitive like the service worker's RE_ASSET: the
-// writer's grammar allows an upper-case extension, and no spelling this admits
-// can leave base/assets/.
+// proxy — and is kept only when it lands on this: the store-relative
+// content-hash asset key, exactly as the writer emits it into article content
+// (backend assets.go contentHashKey). Anchored at both ends, it is the whole of
+// what may follow a store base in a kept URL (routeContentUrl) and of what can
+// be pinned (extractAssetKeys) — an external URL that merely CONTAINS such a
+// path is not a key of this store. Case-insensitive like the service worker's
+// RE_ASSET: the writer's grammar allows an upper-case extension, and no
+// spelling this admits can leave base/assets/.
 const ASSET_KEY = new RegExp(`^${ASSET_KEY_SRC}$`, "i")
 
 // Prefix is the URL-encoded-source-appender shape (wsrv.nl, imgproxy, imagor).
@@ -113,60 +112,103 @@ export function imgProxy(url: string, prefix: string): string {
    return prefix ? prefix + encodeURIComponent(url) : url
 }
 
-// isRelative reports whether v is a relative reference — one with no URL scheme
-// (e.g. "assets/ab/cd.jpg", "/img/x.jpg", "#frag"). A protocol-relative "//host"
-// ref counts as relative too: it has no scheme, and resolvePackRelative then
-// drops it, since it is not an asset key.
-export function isRelative(v: string): boolean {
-   return !ABS_SCHEME.test(v)
+// routeContentUrl's verdict on one URL-bearing value from article content:
+//   asset    — this store's asset key, as the resolved base + key (never proxied)
+//   external — a third-party absolute http(s) URL, verbatim
+//   scheme   — not http(s): the caller's own policy decides (the anchor
+//              allowlist; media leave it as it was)
+//   drop     — remove it
+type KeptUrl = { kind: "asset" | "external"; href: string }
+export type ContentUrl = KeptUrl | { kind: "scheme" } | { kind: "drop" }
+const DROP: ContentUrl = { kind: "drop" }
+const SCHEME: ContentUrl = { kind: "scheme" }
+
+// The server a URL reaches, as far as a credentialed request goes: its host (a
+// trailing root dot folded — the parser keeps it, DNS answers it the same) with
+// http's and https's default ports folded together, because a browser upgrades
+// an http subresource on an https page (mixed-content autoupgrade) and a front
+// proxy redirects port 80 to 443, so http://<host>/ reaches the handler behind
+// https://<host>/ whatever their two origins say. Any other port is another
+// server.
+function serverOf(u: { hostname: string; port: string }): string {
+   return u.hostname.replace(/\.$/, "") + ":" + (u.port === "80" || u.port === "443" ? "" : u.port)
 }
 
-// resolvePackRelative resolves a relative reference against the article's store
-// base — and only an asset key, matched whole. Anything else returns null, so the
-// caller drops the attribute. Staying inside the base is not enough: in the
-// self-hosted layout the store base IS the origin root, shared with the admin
-// API, so "assets/../api/…" (like "/api/…" or "api/…") normalizes onto a
-// same-origin endpoint the browser requests with the session cookie — and the
-// neighbour prefetch requests images before the article is even opened. The key
-// grammar admits no dot segment, query, fragment or escape, so a key can only
-// name an object under base/assets/; and a "//host" or "../" ref cannot leave the
-// base at all. Dropping the rest loses no working link: the writer absolutizes a
-// feed's own relative refs against the item's link at ingest, so the one store
-// object a relative ref in content can mean is an asset. The base is the
-// ARTICLE'S OWN store base (threaded from the caller): under multi-store a peer
-// article must resolve against its own store, never the home base
-// (docs/MULTI-STORE-SPEC.md MS7) — resolving a peer ref against home would let a
-// peer address the home origin.
-export function resolvePackRelative(v: string, base: URL): string | null {
-   if (!ASSET_KEY.test(v)) return null
-   const resolved = new URL(v, base).href
-   // A store base is a directory; one missing its trailing slash would resolve
-   // the key beside it rather than under it, so that is refused, not followed.
-   return resolved.startsWith(base.href) ? resolved : null
+// routeContentUrl is the ONE owner of which URL-bearing values from article
+// content the reader keeps: the sanitizer's media and link attributes, the
+// neighbour prefetch and the player's persisted src all ask it, so no site can
+// classify a value its own way. It judges the URL a value RESOLVES to, never its
+// spelling: "http:/api/x", "https:api/x" and "https:\api\x" carry a scheme
+// yet are relative refs to any parser whose base shares it, so a browser on the
+// page lands them on the page's own origin.
+//
+// Two servers are guarded: the store base's and the page's own, where the admin
+// API lives. In the self-hosted layout the store base IS the origin root the API
+// shares, and under multi-store a peer article's base is another origin while
+// the page's /api is still one credentialed request away. An http(s) URL that
+// reaches either is kept only when it is exactly base + an asset key — no dot
+// segment, query, fragment or escape survives resolution to fake one — and is
+// set as that resolved URL; anything else there is a same-origin request the
+// browser sends with the session cookie, from the neighbour prefetch before the
+// article is even opened. Dropping it costs no store object — the writer
+// absolutizes a feed's own refs against the item's link at ingest, so the one
+// store object content can mean is an asset — and only such third-party content
+// as happens to share the reader's host.
+//
+// An http(s) URL on any other server is third-party media or a link, kept
+// verbatim — but only when spelled with its authority ("https://host/…"), the
+// one form that resolves to the same URL against every base, so the document
+// base the browser resolves a kept value against cannot move it. A "//host" or
+// "https:host" ref means one thing against the store base here and another
+// against the page there, and is dropped.
+//
+// The base is the ARTICLE'S OWN store base (threaded from the caller): under
+// multi-store a peer article must resolve against its own store, never the home
+// base (docs/MULTI-STORE-SPEC.md MS7). A store base is a directory; one missing
+// its trailing slash would put the key beside it rather than under it, so it
+// keeps no key at all.
+export function routeContentUrl(v: string, base: URL): ContentUrl {
+   let u: URL
+   try {
+      u = new URL(v, base)
+   } catch {
+      return DROP
+   }
+   // A deny-listed scheme only the parse reveals ("java\tscript:", which
+   // URL_DENY's spelling test misses) goes; any other is the caller's to judge.
+   if (u.protocol !== "http:" && u.protocol !== "https:") return URL_DENY.test(u.href) ? DROP : SCHEME
+   const server = serverOf(u)
+   const page = globalThis.location
+   if (server === serverOf(base) || (page?.hostname && server === serverOf(page))) {
+      const key = base.href.endsWith("/") && u.href.startsWith(base.href) ? u.href.slice(base.href.length) : ""
+      return ASSET_KEY.test(key) ? { kind: "asset", href: u.href } : DROP
+   }
+   return HTTP_RE.test(v) ? { kind: "external", href: v } : DROP
 }
 
-// setPackRelative resolves a relative reference and sets it on node[attr],
-// dropping the attribute when the ref is not an asset key (see
-// resolvePackRelative). Reports whether it dropped it.
-function setPackRelative(node: Element, attr: string, base: URL, v: string): boolean {
-   const resolved = resolvePackRelative(v, base)
-   if (resolved) node.setAttribute(attr, resolved)
-   else node.removeAttribute(attr)
-   return !resolved
+// The URL a kept media value renders as — and the prefetch warms, so the two
+// share one cache entry: an asset at its base + key, a third-party URL through
+// the image proxy when `proxy` is set.
+function mediaHref(r: KeptUrl, proxyPrefix: string, proxy: boolean): string {
+   return proxy && r.kind === "external" ? imgProxy(r.href, proxyPrefix) : r.href
 }
 
-// resolveMediaAttr routes one URL-bearing attribute on a sanitized node: a
-// relative reference resolves against the pack base (an asset key only, dropped
-// otherwise), and — when proxy is set — an external http(s) reference goes
-// through the image proxy. Other values (absolute non-http, or already stripped
-// by the attribute loop) are left untouched. Centralizes the branch shared by
-// <img src>, <video src>, <video poster>, <audio src> and <source src>. Reports
-// whether it dropped a relative ref, so the caller can collapse the element.
+// resolveMediaAttr routes one URL-bearing attribute on a sanitized node through
+// routeContentUrl: a kept value is set as mediaHref renders it, a dropped one is
+// removed, and a non-http(s) one (or one already stripped by the attribute loop)
+// is left untouched. Centralizes the branch shared by <img src>, <video src>,
+// <video poster>, <audio src> and <source src>. Reports whether it dropped the
+// value, so the caller can collapse the element.
 function resolveMediaAttr(node: Element, attr: string, base: URL, proxyPrefix: string, proxy: boolean): boolean {
    const v = node.getAttribute(attr)
    if (!v) return false
-   if (isRelative(v)) return setPackRelative(node, attr, base, v)
-   if (proxy && HTTP_RE.test(v)) node.setAttribute(attr, imgProxy(v, proxyPrefix))
+   const r = routeContentUrl(v, base)
+   if (r.kind === "scheme") return false
+   if (r.kind === "drop") {
+      node.removeAttribute(attr)
+      return true
+   }
+   node.setAttribute(attr, mediaHref(r, proxyPrefix, proxy))
    return false
 }
 
@@ -219,13 +261,13 @@ export function sanitizeFragment(html: string, base: URL = PACK_BASE): DocumentF
       const tag = node.tagName
       if (tag === "A" || tag === "AREA") {
          node.setAttribute("rel", "noopener noreferrer")
-         // A relative href resolves against the pack base only as an asset key
-         // (a self-hosted "assets/…/doc.pdf"); any other relative href is
-         // dropped (resolvePackRelative). Absolute hrefs are kept only for the
-         // writer's allowlisted schemes (mailto/http/https/tel/geo/magnet — see
-         // ANCHOR_ABS_OK); any other absolute scheme (blob:, ftp:, …) is dropped
-         // to mirror the backend. URL_DENY href (javascript:/data:/…) was
-         // already stripped above.
+         // An href that resolves to http(s) is routeContentUrl's: an asset key
+         // (a self-hosted "assets/…/doc.pdf") becomes base + key, a third-party
+         // link stays as written, and anything on the page's or the store's
+         // server is dropped. Any other scheme is kept only when the writer
+         // allowlists it (mailto/tel/geo/magnet — see ANCHOR_ABS_OK), so blob:,
+         // ftp:, … are dropped to mirror the backend. URL_DENY href
+         // (javascript:/data:/…) was already stripped above.
          const href = node.getAttribute("href")
          if (href) {
             if (FRAGMENT_HREF.test(href)) {
@@ -236,8 +278,11 @@ export function sanitizeFragment(html: string, base: URL = PACK_BASE): DocumentF
                // before it is clicked (hover URL, middle-click, "open in new
                // tab" all now describe an in-page jump).
                node.setAttribute("target", "_self")
-            } else if (isRelative(href)) setPackRelative(node, "href", base, href)
-            else if (!ANCHOR_ABS_OK.test(href)) node.removeAttribute("href")
+            } else {
+               const r = routeContentUrl(href, base)
+               if (r.kind === "asset" || r.kind === "external") node.setAttribute("href", r.href)
+               else if (r.kind === "drop" || !ANCHOR_ABS_OK.test(href)) node.removeAttribute("href")
+            }
          }
       } else if (tag === "IMG") {
          node.removeAttribute("srcset")
@@ -399,13 +444,13 @@ export function handleFragmentClick(e: MouseEvent): void {
 }
 
 // The neighbor-prefetch's media lists (nav.ts schedulePrefetch). Every URL is
-// routed exactly as sanitizeHtml's render path routes it (resolveMediaAttr) —
-// a relative ref resolves against the pack base only as an asset key (dropped
-// otherwise: this list loads before the article is opened),
-// external http(s) images/posters take the image proxy, video sources pass
-// through un-proxied — so a prefetched URL and its rendered element share one
-// cache entry; anything else (data:, mailto:, …) is not a warmable fetch and is
-// skipped. images = <img src> + <video poster>; videos = <video src>, falling
+// routed exactly as sanitizeHtml's render path routes it (routeContentUrl, then
+// mediaHref) — an asset key resolves against the pack base, anything else on
+// the page's or the store's server is dropped (this list loads before the
+// article is opened), external http(s) images/posters take the image proxy,
+// video sources pass through un-proxied — so a prefetched URL and its rendered
+// element share one cache entry; anything else (data:, mailto:, …) is not a
+// warmable fetch and is skipped. images = <img src> + <video poster>; videos = <video src>, falling
 // back to the first <source> (the one the rendered element would pick). DOM
 // parse rather than regex: it runs off the critical path (idle callback),
 // template content is inert (nothing loads during the parse), and it natively
@@ -423,10 +468,8 @@ export function extractPrefetchMedia(html: string, base: URL = PACK_BASE): IPref
       const proxyPrefix = getImgProxy()
       const add = (set: Set<string>, v: string | null, proxy: boolean) => {
          if (!v) return
-         if (isRelative(v)) {
-            const resolved = resolvePackRelative(v, base)
-            if (resolved) set.add(resolved)
-         } else if (HTTP_RE.test(v)) set.add(proxy ? imgProxy(v, proxyPrefix) : v)
+         const r = routeContentUrl(v, base)
+         if (r.kind === "asset" || r.kind === "external") set.add(mediaHref(r, proxyPrefix, proxy))
       }
       for (const img of tmpl.content.querySelectorAll("img")) add(images, img.getAttribute("src"), true)
       for (const vid of tmpl.content.querySelectorAll("video")) {

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest"
 
-// fmt.ts's relative-ref rule (resolvePackRelative: an asset key or nothing)
-// under a SUBPATH pack base: against the root base used in fmt.test.ts a "../"
+// fmt.ts's content-URL rule (routeContentUrl: on the base's server, base + an
+// asset key or nothing) under a SUBPATH pack base: against the root base used in fmt.test.ts a "../"
 // ref normalizes back to the origin root, so only here can a traversal OFF the
 // subtree — and one that lands back inside it — be told apart. Dynamic import
 // after vi.mock so fmt binds the mocked base.
@@ -35,10 +35,20 @@ describe("sanitizeHtml relative URL bounds (subpath pack base)", () => {
       expect(attr('<a href=".">x</a>', "a", "href")).toBeNull()
    })
 
-   it("drops a traversal that lands back inside the subtree", () => {
+   it("drops a traversal that lands back inside the subtree, unless it lands on exactly a key", () => {
       // "assets/../x" normalizes to SUB + "x" — on the base, and still not a key.
       expect(attr('<img src="assets/../db.gz">', "img", "src")).toBeNull()
-      expect(attr('<img src="../feed/assets/ab/0123456789abcdef.jpg">', "img", "src")).toBeNull()
+      // The rule is on the resolved URL: this one IS SUB + key, so it names that
+      // asset and nothing else.
+      expect(attr('<img src="../feed/assets/ab/0123456789abcdef.jpg">', "img", "src")).toBe(
+         SUB + "assets/ab/0123456789abcdef.jpg",
+      )
+   })
+
+   it("drops the subpath's own origin spelled with a scheme but no authority", () => {
+      // "http:/srr/x" is relative to an http base, so it lands on this origin.
+      expect(attr('<img src="http:/srr/feed/x.jpg">', "img", "src")).toBeNull()
+      expect(attr('<img src="http:../../api/x">', "img", "src")).toBeNull()
    })
 
    it("drops a ../ traversal that escapes the pack subtree (img src)", () => {

@@ -110,10 +110,13 @@ describe("buildContent inert media", () => {
       '<p>before</p><audio src="https://cdn.example/ep.mp3" controls></audio>' +
       '<video src="https://cdn.example/v.mp4" poster="https://cdn.example/p.jpg" width="640" height="360"></video>' +
       '<img src="https://cdn.example/i.jpg"><p>after</p>'
+   // The store on a server of its own: the media above are third-party. On the
+   // store's server only an asset key is kept (fmt.ts routeContentUrl).
+   const base = new URL("https://store.example/")
 
    function build(inert: boolean): HTMLElement {
       const host = document.createElement("div")
-      host.append(buildContent({ f: 1, a: 1, c: html }, new URL("https://cdn.example/"), { inert }))
+      host.append(buildContent({ f: 1, a: 1, c: html }, base, { inert }))
       return host
    }
 
@@ -145,13 +148,9 @@ describe("buildContent inert media", () => {
    it("falls back to a 16:9 box when the video declares no intrinsic size", () => {
       const host = document.createElement("div")
       host.append(
-         buildContent(
-            { f: 1, a: 1, c: '<video src="https://cdn.example/v.mp4"></video>' },
-            new URL("https://cdn.example/"),
-            {
-               inert: true,
-            },
-         ),
+         buildContent({ f: 1, a: 1, c: '<video src="https://cdn.example/v.mp4"></video>' }, base, {
+            inert: true,
+         }),
       )
       expect((host.querySelector(".srr-media-stub") as HTMLElement).style.aspectRatio).toBe("16 / 9")
    })
