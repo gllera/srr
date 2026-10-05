@@ -186,6 +186,17 @@ export function routeContentUrl(v: string, base: URL): ContentUrl {
    return HTTP_RE.test(v) ? { kind: "external", href: v } : DROP
 }
 
+// linkHref is the href a content-supplied link may carry, or null to drop it:
+// whatever routeContentUrl keeps of an http(s) URL, and otherwise only a
+// scheme the writer allowlists (ANCHOR_ABS_OK). Shared by the sanitizer's
+// <a>/<area> branch and the reader masthead's permalink (article-view.ts),
+// which carries the article's own `l` — content, like any href inside it.
+export function linkHref(v: string, base: URL): string | null {
+   const r = routeContentUrl(v, base)
+   if (r.kind === "asset" || r.kind === "external") return r.href
+   return r.kind === "scheme" && ANCHOR_ABS_OK.test(v) ? v : null
+}
+
 // The URL a kept media value renders as — and the prefetch warms, so the two
 // share one cache entry: an asset at its base + key, a third-party URL through
 // the image proxy when `proxy` is set.
@@ -266,7 +277,7 @@ export function sanitizeFragment(html: string, base: URL = PACK_BASE): DocumentF
          // link stays as written, and anything on the page's or the store's
          // server is dropped. Any other scheme is kept only when the writer
          // allowlists it (mailto/tel/geo/magnet — see ANCHOR_ABS_OK), so blob:,
-         // ftp:, … are dropped to mirror the backend. URL_DENY href
+         // ftp:, … are dropped to mirror the backend (linkHref). URL_DENY href
          // (javascript:/data:/…) was already stripped above.
          const href = node.getAttribute("href")
          if (href) {
@@ -279,9 +290,9 @@ export function sanitizeFragment(html: string, base: URL = PACK_BASE): DocumentF
                // tab" all now describe an in-page jump).
                node.setAttribute("target", "_self")
             } else {
-               const r = routeContentUrl(href, base)
-               if (r.kind === "asset" || r.kind === "external") node.setAttribute("href", r.href)
-               else if (r.kind === "drop" || !ANCHOR_ABS_OK.test(href)) node.removeAttribute("href")
+               const kept = linkHref(href, base)
+               if (kept) node.setAttribute("href", kept)
+               else node.removeAttribute("href")
             }
          }
       } else if (tag === "IMG") {

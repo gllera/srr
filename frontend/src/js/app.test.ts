@@ -302,28 +302,33 @@ vi.mock("./picker", () => picker)
 // captured for assertions.
 const pickerHooks = () => (picker.setup as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[1]
 
-vi.mock("./fmt", async (importOriginal) => ({
-   sanitizeFragment: (s: string) => {
-      const t = document.createElement("template")
-      t.innerHTML = s
-      return t.content
-   },
-   formatDate: () => "01/01/2020 00:00",
-   readerDateline: () => ({ text: "1h ago", title: "01/01/2020 00:00" }),
-   srcColorIndex: () => 0,
-   stampSrc: (n: HTMLElement) => (n.dataset.src = "0"),
-   timeAgo: () => "1h",
-   timeAgoProse: (unix: number) => (unix === 0 ? "just now" : "4 minutes ago"),
-   isStale: (unix: number) => unix > 0 && unix < 1000,
-   countBadge: (n: number) => (n > 999 ? "999+" : String(n)),
-   CHECK_SVG: '<svg class="check"></svg>',
-   collapseBrokenMedia: () => {},
-   handleFragmentClick: () => {},
-   extractAssetKeys: vi.fn((): string[] => []),
-   // The real body: player.safeSrc's store-base rule runs through it, and a stub
-   // would either reject every store path or accept a foreign one.
-   routeContentUrl: (await importOriginal<typeof import("./fmt")>()).routeContentUrl,
-}))
+vi.mock("./fmt", async (importOriginal) => {
+   const real = await importOriginal<typeof import("./fmt")>()
+   return {
+      sanitizeFragment: (s: string) => {
+         const t = document.createElement("template")
+         t.innerHTML = s
+         return t.content
+      },
+      formatDate: () => "01/01/2020 00:00",
+      readerDateline: () => ({ text: "1h ago", title: "01/01/2020 00:00" }),
+      srcColorIndex: () => 0,
+      stampSrc: (n: HTMLElement) => (n.dataset.src = "0"),
+      timeAgo: () => "1h",
+      timeAgoProse: (unix: number) => (unix === 0 ? "just now" : "4 minutes ago"),
+      isStale: (unix: number) => unix > 0 && unix < 1000,
+      countBadge: (n: number) => (n > 999 ? "999+" : String(n)),
+      CHECK_SVG: '<svg class="check"></svg>',
+      collapseBrokenMedia: () => {},
+      handleFragmentClick: () => {},
+      extractAssetKeys: vi.fn((): string[] => []),
+      // The real bodies: player.safeSrc and the masthead permalink run the
+      // store-base rule through them, and a stub would either reject every store
+      // path or accept a foreign one.
+      routeContentUrl: real.routeContentUrl,
+      linkHref: real.linkHref,
+   }
+})
 
 const gestures = vi.hoisted(() => {
    // One stable resetScroll instance the setupGestures() result closes over, so

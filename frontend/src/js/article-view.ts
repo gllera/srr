@@ -12,9 +12,8 @@
 // rather than importing `el`, which is exactly what makes it reusable for a
 // surface index.html never declared. No controller imports.
 import * as data from "./data"
-import { readerDateline, sanitizeFragment, stampSrc } from "./fmt"
+import { linkHref, readerDateline, sanitizeFragment, stampSrc } from "./fmt"
 import { type IArticleWire } from "./format.gen"
-import { URL_DENY } from "./urlish"
 
 // An article surface's media elements IN ORDER — the positional identity FEB2's
 // harvest/restore (reader.ts), the mini-player's adopt/rehome and the queue
@@ -46,7 +45,7 @@ export interface ArticleRefs {
    content: HTMLElement
 }
 
-export function paintMasthead(refs: ArticleRefs, article: IArticleWire, feed: IFeed | undefined): void {
+export function paintMasthead(refs: ArticleRefs, article: IArticleWire, feed: IFeed | undefined, base: URL): void {
    // Titleless feeds (Telegram-style: the title is just the content's first line)
    // hide the <h1> so the body isn't shown twice; the masthead permalink stands
    // in for the hidden title's link.
@@ -61,10 +60,13 @@ export function paintMasthead(refs: ArticleRefs, article: IArticleWire, feed: IF
    // t/l are omitempty on the wire — an untitled article must not render "undefined"
    refs.title.textContent = article.t ?? ""
 
-   // Reject javascript:/data:/vbscript:/file: in case the writer pipeline let one
-   // through. The whole masthead row is the one permalink; an href makes it a
-   // link, its absence leaves it inert chrome.
-   const safeLink = article.l && !URL_DENY.test(article.l) ? article.l : ""
+   // The link is article content, so it takes the sanitizer's own rule for an
+   // <a href> (fmt.ts linkHref): no javascript:/data:/vbscript:/file: in case the
+   // writer pipeline let one through, and nothing on the page's or the store's
+   // server — where a click would reach the admin API with the session cookie —
+   // but an asset key. The whole masthead row is the one permalink; an href
+   // makes it a link, its absence leaves it inert chrome.
+   const safeLink = article.l ? linkHref(article.l, base) : null
    if (safeLink) refs.titleRow.href = safeLink
    else refs.titleRow.removeAttribute("href")
 

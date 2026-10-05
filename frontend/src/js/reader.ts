@@ -319,7 +319,7 @@ export function render(o: IShowFeed) {
    // Source tint, source name, desk, title, permalink and dateline in one call —
    // shared with the pager's preview page, so the two surfaces cannot drift (the
    // per-field prose lives in article-view.ts paintMasthead).
-   paintMasthead(readerRefs, o.article, feed)
+   paintMasthead(readerRefs, o.article, feed, data.activeStore().base)
    // The slide's arrival is already animated (flag consumed above); every other
    // entry dims first and fades in over the two rAFs below.
    if (slide) clearContentTransition()

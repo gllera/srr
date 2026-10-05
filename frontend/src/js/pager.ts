@@ -291,10 +291,11 @@ async function fillPage(s: PagerSide): Promise<void> {
       const article = await articleP
       if (my !== fillTok) return
       const feed = data.db.feeds[article.f]
-      paintMasthead(refs, article, feed)
+      const base = data.activeStore().base
+      paintMasthead(refs, article, feed, base)
       stampContentHost(refs.content, article)
       // inert: the preview never holds live audio/video (article-view §2).
-      refs.content.replaceChildren(buildContent(article, data.activeStore().base, { inert: true }))
+      refs.content.replaceChildren(buildContent(article, base, { inert: true }))
       box.classList.add("srr-pager-filled")
    } catch {}
 }

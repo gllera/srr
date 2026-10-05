@@ -29,14 +29,19 @@ function makeRefs(): ArticleRefs {
 
 describe("paintMasthead", () => {
    let refs: ArticleRefs
+   // The article's store, on a server of its own (the page is jsdom's location).
+   const base = new URL("https://store.example/s/")
    beforeEach(() => {
       refs = makeRefs()
    })
 
    it("fills source, title, desk and the source tint", () => {
-      paintMasthead(refs, { f: 7, a: 1, t: "Headline", l: "https://ex.com/a", c: "<p>x</p>" }, {
-         tag: "world",
-      } as IFeed)
+      paintMasthead(
+         refs,
+         { f: 7, a: 1, t: "Headline", l: "https://ex.com/a", c: "<p>x</p>" },
+         { tag: "world" } as IFeed,
+         base,
+      )
       expect(refs.source.textContent).toBe("The Wire")
       expect(refs.title.textContent).toBe("Headline")
       expect(refs.desk.textContent).toBe("#world")
@@ -45,18 +50,39 @@ describe("paintMasthead", () => {
    })
 
    it("renders an untitled article as empty text, never the string undefined", () => {
-      paintMasthead(refs, { f: 7, a: 1, c: "<p>x</p>" }, undefined)
+      paintMasthead(refs, { f: 7, a: 1, c: "<p>x</p>" }, undefined, base)
       expect(refs.title.textContent).toBe("")
       expect(refs.desk.textContent).toBe("")
    })
 
    it("refuses a javascript: permalink", () => {
-      paintMasthead(refs, { f: 7, a: 1, l: "javascript:alert(1)", c: "" }, undefined)
+      paintMasthead(refs, { f: 7, a: 1, l: "javascript:alert(1)", c: "" }, undefined, base)
       expect(refs.titleRow.hasAttribute("href")).toBe(false)
    })
 
+   it("refuses a permalink onto the page's server or the store's, however it is spelled", () => {
+      // The permalink is article content like any <a href> in it, and takes the
+      // same rule: the page is where the admin API lives, and a click would
+      // open it with the session cookie.
+      expect(location.origin).toBe("http://localhost:3000")
+      for (const l of [
+         "https:/api/x",
+         "https:api/x",
+         "HTTP:/api/x",
+         "/api/x",
+         "http://localhost:3000/api/preview?url=x&ingest=y",
+         "https://store.example/api/x",
+      ]) {
+         paintMasthead(refs, { f: 7, a: 1, l, c: "" }, undefined, base)
+         expect(refs.titleRow.hasAttribute("href"), l).toBe(false)
+      }
+      // The writer's other link schemes still make a permalink.
+      paintMasthead(refs, { f: 7, a: 1, l: "mailto:desk@example.org", c: "" }, undefined, base)
+      expect(refs.titleRow.getAttribute("href")).toBe("mailto:desk@example.org")
+   })
+
    it("marks a titleless feed on the root", () => {
-      paintMasthead(refs, { f: 7, a: 1, c: "" }, { nt: true } as IFeed)
+      paintMasthead(refs, { f: 7, a: 1, c: "" }, { nt: true } as IFeed, base)
       expect(refs.root.classList.contains("srr-reader-titleless")).toBe(true)
    })
 })
