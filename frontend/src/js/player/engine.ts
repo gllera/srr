@@ -279,7 +279,18 @@ export function playEntry(entry: QueueEntry, autoplay: boolean): boolean {
    if (!live) {
       // In-session captures came off a sanitized element and persisted ones
       // were validated at restore, but safeSrc is one call — run it anyway.
-      src = safeSrc(entry.src, data.activeStore().base)
+      //
+      // Against the base of the entry's OWN store, never the active one: a
+      // playlist outlives lane switches, so the active lane may be another
+      // mount entirely, and a src is only meaningful against the base it was
+      // rendered or validated on. Judged against a peer's base, a home episode
+      // in the self-hosted layout (home = the page origin) reads as a crafted
+      // same-origin URL and is dropped; a bare asset key would resolve to the
+      // other store's object at that key. An entry whose store has since been
+      // unmounted has no base left to judge it by, so it is refused — skipped
+      // like any unplayable entry, still listed.
+      const store = data.mountStore(entry.mid)
+      src = store ? safeSrc(entry.src, store.base) : null
       if (!src) return false
    }
    batch(() => {

@@ -1,13 +1,32 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { playerStateKey } from "./keys"
 
 // data.ts fires a db.gz fetch at module load, so it is mocked wholesale (the
 // house pattern — see app.test.ts / list.test.ts). fmt is mocked only for
 // srcColorIndex; urlish and keys are side-effect-free and used for real, which
 // is the point of the persisted-src validation tests below.
-const data = vi.hoisted(() => ({
-   feedTitle: (id: number) => (id === 7 ? "The Daily" : `Feed ${id}`),
-   activeStore: () => ({ mid: "0", base: new URL("https://cdn.example/store/") }),
-}))
+//
+// The mount table is a real (if tiny) one: a playlist outlives lane switches, so
+// an entry is validated against the base of the store it came from, which is
+// mountStore(entry.mid) and not whatever activeStore() is by then. The
+// multi-store cases below re-point `mounts`/`at`; beforeEach puts them back.
+const data = vi.hoisted(() => {
+   const HOME = { mid: "0", base: new URL("https://cdn.example/store/") }
+   const mounts = new Map<string, { mid: string; base: URL }>()
+   const at = { mid: "0" }
+   return {
+      feedTitle: (id: number) => (id === 7 ? "The Daily" : `Feed ${id}`),
+      activeStore: () => mounts.get(at.mid)!,
+      mountStore: (mid: string) => mounts.get(mid),
+      mounts,
+      at,
+      resetMounts: () => {
+         mounts.clear()
+         mounts.set(HOME.mid, HOME)
+         at.mid = HOME.mid
+      },
+   }
+})
 vi.mock("./data", () => data)
 vi.mock("./fmt", async (importOriginal) => {
    const fmt = await importOriginal<typeof import("./fmt")>()
@@ -180,6 +199,7 @@ beforeEach(async () => {
    // is what reveals it, and the reader IS the surface you press play on.
    q<HTMLElement>(".srr-reader").hidden = false
    localStorage.clear()
+   data.resetMounts()
    HTMLMediaElement.prototype.play = vi.fn().mockResolvedValue(undefined)
    HTMLMediaElement.prototype.pause = vi.fn()
    HTMLMediaElement.prototype.load = vi.fn()
@@ -946,6 +966,84 @@ describe("persistence", () => {
       )
       player.restorePersisted()
       expect(player.isActive()).toBe(false)
+   })
+})
+
+// A playlist outlives lane switches, so an entry queued in one store comes up
+// while another is the active lane. Its src is content of ITS store — what the
+// sanitizer rendered against that store's base, or what save() persisted from
+// such an element — so it is judged against that base and never the active
+// one. The self-hosted layout is what makes the difference fatal rather than
+// cosmetic: the home store IS the page origin, where only base + an asset key
+// is kept, so judged against a peer's base every home episode reads as a
+// crafted same-origin URL and is dropped.
+describe("multi-store: an entry is judged against its OWN store's base", () => {
+   const HOME_BASE = "http://localhost:3000/" // self-hosted: the store is the page origin
+   const PEER_BASE = "https://peer.example/store/"
+   const PEER = "p1"
+   const SRC_KEY = assetKey(50)
+
+   beforeEach(() => {
+      expect(location.origin + "/").toBe(HOME_BASE)
+      data.mounts.set("0", { mid: "0", base: new URL(HOME_BASE) })
+      data.mounts.set(PEER, { mid: PEER, base: new URL(PEER_BASE) })
+   })
+
+   // A one-entry playlist restored into the READY bar while `mid` is the active
+   // lane: the blob is per-mount, so restorePersisted reads it from that mount's
+   // own key and validates it against that mount's own base.
+   const restoreQueueIn = (mid: string, src: string) => {
+      data.at.mid = mid
+      localStorage.setItem(
+         playerStateKey(mid),
+         JSON.stringify({ queue: [{ chron: 50, index: 0, src, kind: "audio", title: "Queued", feedId: 7 }] }),
+      )
+      player.restorePersisted()
+      expect(bar().hidden, "restored into the ready bar").toBe(false)
+      expect(player.isActive()).toBe(false)
+   }
+   // Switch the active lane to `mid` with another of its articles on screen, so
+   // the queued entry is built detached rather than claimed in place.
+   const viewIn = (mid: string) => {
+      data.at.mid = mid
+      content().innerHTML = ""
+      player.noteMounted({ mid, chron: 7, title: "On screen", feedId: 2 })
+   }
+   const playReady = () => q<HTMLButtonElement>(".srr-player-toggle").click()
+   const built = () => media().querySelector("audio")
+
+   it("plays a queued home episode while a peer store is the active lane", () => {
+      // Absolute, as save() persists it off the rendered element.
+      restoreQueueIn("0", HOME_BASE + SRC_KEY)
+      viewIn(PEER)
+      playReady()
+      expect(player.isActive()).toBe(true)
+      expect(built()?.src).toBe(HOME_BASE + SRC_KEY)
+      expect(HTMLMediaElement.prototype.play).toHaveBeenCalled()
+   })
+
+   it.each([
+      ["absolute, as save() persists it", PEER_BASE + SRC_KEY],
+      ["a bare asset key, as an older build persisted it", SRC_KEY],
+   ])("plays a queued peer episode at the PEER's base while home is the active lane (%s)", (_, src) => {
+      restoreQueueIn(PEER, src)
+      viewIn("0")
+      playReady()
+      expect(player.isActive()).toBe(true)
+      // Never the home store's object at the same key.
+      expect(built()?.src).toBe(PEER_BASE + SRC_KEY)
+   })
+
+   it("refuses an entry whose store is no longer mounted — there is no base left to judge it by", () => {
+      restoreQueueIn(PEER, PEER_BASE + SRC_KEY)
+      viewIn("0")
+      data.mounts.delete(PEER)
+      playReady()
+      expect(player.isActive()).toBe(false)
+      expect(built()).toBeNull()
+      expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled()
+      // Refused, not dropped: it stays listed like any unplayable entry.
+      expect(bar().hidden).toBe(false)
    })
 })
 

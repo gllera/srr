@@ -781,6 +781,15 @@ already take the proxy prefix). This is a correctness requirement, not tidiness:
 MS7 depends on it, and a peer article resolving against the home base would let
 a peer address the home origin.
 
+The article's store is not always the active one by the time its content is
+judged, so the base is the store the content CAME FROM, never `activeStore()`
+read again later. The player's playlist outlives lane switches: a queued
+entry's src is validated against `data.mountStore(entry.mid)`, and an entry
+whose mount is gone is refused (skipped, still listed). Judged against the
+active lane instead, a home episode in the self-hosted layout (home = the page
+origin, where only base + an asset key is kept) is dropped whenever a peer is
+active.
+
 ### 11.4 ENG5, fixed
 
 Move `srr-hash` and `srr-reload-guard` into `keys.ts`; fix `design.ts`'s
