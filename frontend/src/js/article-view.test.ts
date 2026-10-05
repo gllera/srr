@@ -165,6 +165,22 @@ describe("buildContent inert media", () => {
       expect(stub.style.backgroundImage).toContain("p.jpg")
    })
 
+   it("keeps the poster one CSS string: a quote in it cannot open a second url()", () => {
+      // A third-party poster is kept as written, quote and all. Spliced raw into
+      // url("…"), the rest of it would parse as a second background layer —
+      // fetched against the document base, the page's own origin.
+      const poster = 'https://cdn.example/p.jpg"), url("/api/preview?url=x&amp;ingest=y'
+      const host = document.createElement("div")
+      host.append(
+         buildContent({ f: 1, a: 1, c: `<video src="https://cdn.example/v.mp4" poster='${poster}'></video>` }, base, {
+            inert: true,
+         }),
+      )
+      const bg = (host.querySelector(".srr-media-stub") as HTMLElement).style.backgroundImage
+      expect(bg).toContain("cdn.example/p.jpg")
+      expect(bg).not.toContain('url("/api')
+   })
+
    it("gives an audio stub its own class rather than a video box", () => {
       const stub = build(true).querySelectorAll(".srr-media-stub")[0] as HTMLElement
       expect(stub.classList.contains("srr-media-stub-audio")).toBe(true)

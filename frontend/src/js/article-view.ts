@@ -115,6 +115,14 @@ export function buildContent(article: IArticleWire, base: URL, opts: { inert: bo
    return frag
 }
 
+// A CSS string literal holding exactly `s`. A quote, a backslash or a newline
+// spliced in raw would end the string early and let the rest parse as CSS — in
+// url(), a second background layer the browser fetches against the document
+// base, the page's own origin — so each is written as its hex escape.
+function cssString(s: string): string {
+   return `"${s.replace(/["\\\n\r\f]/g, (c) => `\\${c.charCodeAt(0).toString(16)} `)}"`
+}
+
 // Replace every <audio>/<video> with a same-box stub. THREE independent reasons,
 // any one sufficient (spec §2):
 //   - FEB2's harvest/restore and player.ts's adopt/rehome pair state to elements
@@ -143,9 +151,10 @@ function makeMediaInert(frag: DocumentFragment): void {
       else if (w > 0 && h > 0) stub.style.aspectRatio = `${w} / ${h}`
       else stub.style.aspectRatio = "16 / 9"
       const poster = m.getAttribute("poster")
-      // The poster is already sanitizer-approved: sanitizeFragment resolved and
-      // bounds-checked it on the way in, so this re-reads a trusted value.
-      if (poster) stub.style.backgroundImage = `url("${poster}")`
+      // The poster is already sanitizer-approved as a URL: sanitizeFragment routed
+      // it on the way in. Not as CSS text, though — a third-party poster is kept
+      // as written, so it goes in as one escaped string (cssString).
+      if (poster) stub.style.backgroundImage = `url(${cssString(poster)})`
       m.replaceWith(stub)
    }
 }
