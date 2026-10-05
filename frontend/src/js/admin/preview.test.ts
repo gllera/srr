@@ -1,15 +1,18 @@
-// The console's two feed PROBES — the Feeds-row preview (GET /api/preview) and
-// the add/edit dialog's URL probe (GET /api/resolve) — must carry the feed's
-// SECRET GRANT. SEC5 made the grant fail-closed: with no `secrets` on the query
-// the server resolves `grantSecrets(ctx, recipes, recipe, nil)`, i.e. the
-// RECIPE's grant alone, so an external-ingest feed whose credentials come from
-// its own feed-level override probes as an auth failure or 0 items while its
-// real fetch cycle is fine — and the preview dialog renders a "feed-level
+// The console's two feed PROBES — the Feeds-row preview (POST /api/preview)
+// and the add/edit dialog's URL probe (POST /api/resolve) — must carry the
+// feed's SECRET GRANT. SEC5 made the grant fail-closed: with no `secrets` in
+// the body the server resolves `grantSecrets(ctx, recipes, recipe, nil)`, i.e.
+// the RECIPE's grant alone, so an external-ingest feed whose credentials come
+// from its own feed-level override probes as an auth failure or 0 items while
+// its real fetch cycle is fine — and the preview dialog renders a "feed-level
 // secrets override" chip above a preview that did not apply it.
 //
-// Nothing else pins either probe's query string, so the wire shape lives here:
-// one REPEATED `secrets=` param per scope, because the server reads q["secrets"]
-// (a slice), not a joined list.
+// Nothing else pins either probe's request, so the wire shape lives here: a
+// POST whose JSON body (`application/json`, the type the server requires)
+// carries `secrets` as an array, one entry per scope — and NOTHING on the query
+// string, because the server answers a GET of either route with 405: both run
+// the ingest command they are handed, so nothing a bare URL can trigger may
+// reach them.
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 import { renderPreviewInto } from "./preview"
@@ -57,10 +60,38 @@ function stubFetch(body: unknown) {
    return f
 }
 
-// nth fetched URL, split into the two halves the probes are asserted on.
-const called = (f: ReturnType<typeof stubFetch>, n: number): URL => new URL(f.mock.calls[n][0], "http://localhost")
-const query = (f: ReturnType<typeof stubFetch>, n: number): URLSearchParams => called(f, n).searchParams
-const path = (f: ReturnType<typeof stubFetch>, n: number): string => called(f, n).pathname
+// The nth request, split into what the probes are asserted on: where it went,
+// how, and the JSON body it carried.
+interface Sent {
+   path: string
+   search: string
+   method?: string
+   contentType?: string
+   body: Record<string, unknown>
+}
+
+function sent(f: ReturnType<typeof stubFetch>, n: number): Sent {
+   const [input, init] = f.mock.calls[n]
+   const u = new URL(input, "http://localhost")
+   return {
+      path: u.pathname,
+      search: u.search,
+      method: init?.method,
+      contentType: (init?.headers as Record<string, string> | undefined)?.["Content-Type"],
+      body: typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {},
+   }
+}
+
+// expectProbe asserts the request shape both probes share — a POST to `path`
+// with a JSON body and nothing on the query string — and returns that body.
+function expectProbe(f: ReturnType<typeof stubFetch>, n: number, path: string): Record<string, unknown> {
+   const s = sent(f, n)
+   expect(s.path).toBe(path)
+   expect(s.method).toBe("POST")
+   expect(s.search).toBe("")
+   expect(s.contentType).toBe("application/json")
+   return s.body
+}
 
 const clickByLabel = (label: string): void =>
    (document.querySelector(`button[aria-label="${label}"]`) as HTMLButtonElement).click()
@@ -96,24 +127,25 @@ afterEach(() => {
 })
 
 describe("/api/preview probe", () => {
-   it("sends one secrets= param per scope, beside the pipe and ingest overrides", async () => {
+   it("POSTs the scopes as an array, beside the pipe and ingest overrides", async () => {
       const f = stubFetch([])
       await renderPreviewInto(document.createElement("div"), FEED.url, "tg", FEED.pipe, FEED.ingest, FEED.secrets)
 
       expect(f).toHaveBeenCalledTimes(1)
-      expect(path(f, 0)).toBe("/api/preview")
-      const q = query(f, 0)
-      expect(q.getAll("secrets")).toEqual(["tg", "alerts"])
-      expect(q.get("ingest")).toBe("srr-telegram")
-      expect(q.getAll("pipe")).toEqual(["#default"])
-      expect(q.get("recipe")).toBe("tg")
+      expect(expectProbe(f, 0, "/api/preview")).toEqual({
+         url: FEED.url,
+         recipe: "tg",
+         pipe: ["#default"],
+         ingest: "srr-telegram",
+         secrets: ["tg", "alerts"],
+      })
    })
 
-   it("sends no secrets param at all when the feed grants none", async () => {
+   it("sends no secrets at all when the feed grants none", async () => {
       const f = stubFetch([])
       await renderPreviewInto(document.createElement("div"), FEED.url, "default")
 
-      expect(query(f, 0).getAll("secrets")).toEqual([])
+      expect(expectProbe(f, 0, "/api/preview").secrets ?? []).toEqual([])
    })
 
    it("is what the Feeds-row Preview action passes the feed's own grant through", async () => {
@@ -122,8 +154,7 @@ describe("/api/preview probe", () => {
       clickByLabel("Preview")
 
       await vi.waitFor(() => expect(f).toHaveBeenCalledTimes(1))
-      expect(path(f, 0)).toBe("/api/preview")
-      expect(query(f, 0).getAll("secrets")).toEqual(["tg", "alerts"])
+      expect(expectProbe(f, 0, "/api/preview").secrets).toEqual(["tg", "alerts"])
    })
 })
 
@@ -142,22 +173,22 @@ describe("/api/resolve probe", () => {
       urlIn.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", cancelable: true }))
       await vi.waitFor(() => expect(resolveStatus()).toContain("3 items"))
       expect(f).toHaveBeenCalledTimes(1)
-      expect(path(f, 0)).toBe("/api/resolve")
-      const first = query(f, 0)
-      expect(first.getAll("secrets")).toEqual(["tg", "alerts"])
-      expect(first.get("url")).toBe(FEED.url)
-      expect(first.get("recipe")).toBe("tg")
-      expect(first.get("ingest")).toBe("srr-telegram")
+      expect(expectProbe(f, 0, "/api/resolve")).toEqual({
+         url: FEED.url,
+         recipe: "tg",
+         ingest: "srr-telegram",
+         secrets: ["tg", "alerts"],
+      })
 
       // Editing the grant changes what the probe can authenticate as, so it must
       // re-run even though the URL did not move.
       secretsIn.value = "tg"
       secretsIn.dispatchEvent(new Event("change"))
       await vi.waitFor(() => expect(f).toHaveBeenCalledTimes(2))
-      expect(query(f, 1).getAll("secrets")).toEqual(["tg"])
+      expect(expectProbe(f, 1, "/api/resolve").secrets).toEqual(["tg"])
    })
 
-   it("sends no secrets param when the scopes field is empty", async () => {
+   it("sends no secrets when the scopes field is empty", async () => {
       const f = stubFetch({ url: FEED.url, title: "Telegram wire", items: 3 })
       state.snapshot = snapshot([{ ...FEED, secrets: [] }])
       renderers.feeds()
@@ -168,6 +199,6 @@ describe("/api/resolve probe", () => {
       urlIn.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", cancelable: true }))
 
       await vi.waitFor(() => expect(f).toHaveBeenCalledTimes(1))
-      expect(query(f, 0).getAll("secrets")).toEqual([])
+      expect(expectProbe(f, 0, "/api/resolve").secrets ?? []).toEqual([])
    })
 })

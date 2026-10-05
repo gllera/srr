@@ -97,7 +97,7 @@ func previewFetch(ctx context.Context, recipes map[string]Recipe, recipeName, in
 	return result, nil
 }
 
-// resolveProbe is the look-before-you-subscribe probe behind GET /api/resolve
+// resolveProbe is the look-before-you-subscribe probe behind POST /api/resolve
 // and srr_resolve_feed: it fetches rawURL through the recipe's ingest (with the
 // same feed-level overrides as renderPreview) and reports the resolved feed URL
 // (subscribe-time discovery folds a homepage to its advertised feed), the
@@ -126,7 +126,7 @@ func resolveProbe(ctx context.Context, recipeName, ingestOverride string, secret
 }
 
 // previewURL is renderPreview over the store's own recipes — the one entry
-// point `srr preview`, GET /api/preview and srr_preview_feed share. The
+// point `srr preview`, POST /api/preview and srr_preview_feed share. The
 // recipes are read in a short read-only scope that closes before the network
 // preview starts.
 func previewURL(ctx context.Context, recipeName string, pipeOverride []string, ingestOverride string, secretsOverride []string, rawURL string) ([]*Item, error) {

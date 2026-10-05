@@ -3,7 +3,7 @@
 // fetch/preview/edit, and the add/edit feed modal with its URL probe and the
 // Advanced fold. Ported from app.js's feeds section.
 
-import { api, apiGet, streamSSE } from "./api"
+import { api, streamSSE } from "./api"
 import { banner } from "./banner"
 import { el, iconBtn, relTime, srcColorIndex } from "./dom"
 import { renderers, refresh, state } from "./store"
@@ -457,7 +457,7 @@ async function deleteFeed(f: FeedListView): Promise<boolean> {
 
 const feedDialog = lazyDialog({ id: "feedModal" })
 // openFeedModal is both halves of feed CRUD. Add mode is URL-first: paste a site
-// or feed URL and checkURL reads the wire's own label (GET /api/resolve). Edit
+// or feed URL and checkURL reads the wire's own label (POST /api/resolve). Edit
 // mode keeps the familiar title-first order; the same probe runs on a repointed URL.
 function openFeedModal(f: FeedListView | null): void {
    const dlg = feedDialog()
@@ -603,14 +603,18 @@ function openFeedModal(f: FeedListView | null): void {
       probing = true
       status.replaceChildren(el("span", { class: "muted" }, "reading feed…"))
       try {
-         let qs = `url=${encodeURIComponent(u)}&recipe=${encodeURIComponent(recipeVal)}&ingest=${encodeURIComponent(ingestIn.value.trim())}`
          // The probe simulates the feed's own fetch, so it carries the feed-level
          // secret grant too (SEC5 is fail-closed: without it the server resolves
          // the RECIPE's grant alone and an external ingest needing its own
-         // credentials probes as an auth failure). REPEATED param, one per scope
-         // — the server reads q["secrets"], a slice, not a joined list.
-         for (const s of splitScopes(secretsIn.value)) qs += `&secrets=${encodeURIComponent(s)}`
-         const r = (await apiGet(`/api/resolve?${qs}`)) as ResolveResult
+         // credentials probes as an auth failure). A POST with a JSON body, never
+         // a query string: the probe runs the ingest it is handed, so serve
+         // answers no GET of it.
+         const r = (await api("POST", "/api/resolve", {
+            url: u,
+            recipe: recipeVal,
+            ingest: ingestIn.value.trim(),
+            secrets: splitScopes(secretsIn.value),
+         })) as ResolveResult
          if (url.value.trim() !== u) return // field changed while probing — stale result
          if (r.url && r.url !== u) url.value = r.url // homepage → its discovered feed
          probed = url.value.trim()

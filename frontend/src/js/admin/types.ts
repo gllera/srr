@@ -84,14 +84,14 @@ export interface FeedProgress {
    new: number
 }
 
-// GET /api/resolve — the add-feed URL probe (backend resolve handler).
+// POST /api/resolve — the add-feed URL probe (backend resolve handler).
 export interface ResolveResult {
    url?: string
    title?: string
    items: number
 }
 
-// One previewed article (GET /api/preview) — content is raw article HTML.
+// One previewed article (POST /api/preview) — content is raw article HTML.
 export interface PreviewArticle {
    title?: string
    link?: string

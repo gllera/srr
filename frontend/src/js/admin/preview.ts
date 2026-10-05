@@ -4,7 +4,7 @@
 // each article body rides a sandboxed inert iframe (srcdoc), so a recipe that
 // omits #sanitize cannot run feed-supplied JS on the admin origin.
 
-import { apiGet } from "./api"
+import { api } from "./api"
 import { el } from "./dom"
 import type { PreviewArticle } from "./types"
 
@@ -27,12 +27,10 @@ export async function renderPreviewInto(
 ): Promise<void> {
    out.replaceChildren(el("div", { class: "muted" }, "loading…"))
    try {
-      let qs = `url=${encodeURIComponent(url)}&recipe=${encodeURIComponent(recipe)}`
-      for (const p of pipe || []) qs += `&pipe=${encodeURIComponent(p)}`
-      if (ingest) qs += `&ingest=${encodeURIComponent(ingest)}`
-      // REPEATED param, one per scope — the server reads q["secrets"], a slice.
-      for (const s of secrets || []) qs += `&secrets=${encodeURIComponent(s)}`
-      const arts = (await apiGet(`/api/preview?${qs}`)) as PreviewArticle[]
+      // A POST with a JSON body, never a query string: the probe runs the ingest
+      // and pipe it is handed, so serve answers no GET of it (unset overrides
+      // drop out of the JSON and mean "the recipe's").
+      const arts = (await api("POST", "/api/preview", { url, recipe, pipe, ingest, secrets })) as PreviewArticle[]
       out.replaceChildren(el("div", { class: "muted" }, `${arts.length} articles`))
       for (const a of arts) {
          out.append(

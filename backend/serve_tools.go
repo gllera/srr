@@ -9,8 +9,8 @@ import (
 	"strings"
 )
 
-// previewArticle is the JSON shape GET /api/preview returns (decoupled from the
-// internal Item type).
+// previewArticle is the JSON shape POST /api/preview returns (decoupled from
+// the internal Item type).
 type previewArticle struct {
 	Title     string `json:"title"`
 	Link      string `json:"link"`
@@ -18,14 +18,30 @@ type previewArticle struct {
 	Content   string `json:"content"`
 }
 
+// probeRequest is the body of POST /api/preview and POST /api/resolve: the URL
+// plus the feed-level overrides the probe simulates (resolve runs no pipe, so
+// it ignores Pipe). A JSON body, never a query string, because both run the
+// ingest command they are handed — and preview its pipe — so nothing a bare
+// URL can make a browser request (an image, a link) may reach them.
+type probeRequest struct {
+	URL     string   `json:"url"`
+	Recipe  string   `json:"recipe"`
+	Ingest  string   `json:"ingest"`
+	Pipe    []string `json:"pipe"`
+	Secrets []string `json:"secrets"`
+}
+
 func handlePreview(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	rawURL := q.Get("url")
-	if rawURL == "" {
+	var req probeRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if req.URL == "" {
 		writeErr(w, fmt.Errorf("url is required"))
 		return
 	}
-	items, err := previewURL(r.Context(), q.Get("recipe"), q["pipe"], q.Get("ingest"), q["secrets"], rawURL)
+	items, err := previewURL(r.Context(), req.Recipe, req.Pipe, req.Ingest, req.Secrets, req.URL)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -38,12 +54,16 @@ func handlePreview(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleResolve probes a URL through a recipe's ingest without touching the
-// store: GET /api/resolve?url=&recipe=&ingest=&secrets= → {url, title?, items}
-// (resolveProbe). The add-feed dialog calls it to read the wire's own label
-// before the operator commits.
+// store: POST /api/resolve {url, recipe?, ingest?, secrets?} → {url, title?,
+// items} (resolveProbe). The add-feed dialog calls it to read the wire's own
+// label before the operator commits.
 func handleResolve(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	out, err := resolveProbe(r.Context(), q.Get("recipe"), q.Get("ingest"), q["secrets"], q.Get("url"))
+	var req probeRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	out, err := resolveProbe(r.Context(), req.Recipe, req.Ingest, req.Secrets, req.URL)
 	if err != nil {
 		writeErr(w, err)
 		return

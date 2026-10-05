@@ -197,7 +197,7 @@ type previewFeedOut struct {
 }
 
 // mcpPreviewFeed wraps previewURL (cmd_preview.go) — the same code path as
-// `srr preview` and GET /api/preview. Nothing is stored: this is a dry run.
+// `srr preview` and POST /api/preview. Nothing is stored: this is a dry run.
 func mcpPreviewFeed(ctx context.Context, _ *mcp.CallToolRequest, in previewFeedIn) (*mcp.CallToolResult, previewFeedOut, error) {
 	limit := in.Limit
 	if limit <= 0 {

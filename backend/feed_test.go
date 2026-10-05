@@ -1820,7 +1820,7 @@ func TestFeedFetchSecretScopeGrant(t *testing.T) {
 }
 
 // grantSecrets (feed.go) is the SECOND, hand-written copy of the grant above —
-// the one the PROBE surfaces use (renderPreview, GET /api/resolve,
+// the one the PROBE surfaces use (renderPreview, POST /api/resolve,
 // srr_resolve_feed), where Feed.Fetch inlines the same steps because it already
 // holds the resolved recipes. Both must resolve the same axis, and neither can
 // report its own failure: the grant is fail-CLOSED, so an unstamped ctx merges

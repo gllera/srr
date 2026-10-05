@@ -69,7 +69,7 @@ type Result struct {
 	// Title is the feed's own channel/feed-level title ("" when the source
 	// declares none). Set by the built-in #feed fetcher; an external strategy
 	// MAY set it too — omitempty keeps the wire protocol backward-compatible.
-	// Consumed by serve's GET /api/resolve to pre-fill the add-feed dialog;
+	// Consumed by serve's POST /api/resolve to pre-fill the add-feed dialog;
 	// the fetch loop ignores it (a stored feed's title is operator-owned).
 	Title string `json:"title,omitempty"`
 	// Lang is the feed's OWN declared language — the root xml:lang or the

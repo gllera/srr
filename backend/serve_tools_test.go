@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,12 +19,22 @@ const sampleRSS = `<?xml version="1.0"?><rss version="2.0"><channel>
 <item><title>Hello</title><link>https://e.example/a</link><description>&lt;p&gt;Body&lt;/p&gt;</description></item>
 </channel></rss>`
 
+// probeBody is the JSON body the two probe routes take.
+func probeBody(t *testing.T, fields map[string]any) string {
+	t.Helper()
+	b, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
 func TestPreview(t *testing.T) {
 	setupTestDB(t)
 	allowLoopback(t)
 	url := rssServer(t)
 
-	rec := doReq(t, newMux(), "GET", "/api/preview?url="+url, "")
+	rec := doReq(t, newMux(), "POST", "/api/preview", probeBody(t, map[string]any{"url": url}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
 	}
@@ -93,13 +104,67 @@ func TestRenderPreviewDefaultOverrideResolvesRecipe(t *testing.T) {
 
 func TestPreviewRequiresURL(t *testing.T) {
 	setupTestDB(t)
-	rec := doReq(t, newMux(), "GET", "/api/preview", "")
+	rec := doReq(t, newMux(), "POST", "/api/preview", `{}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
 }
 
-// GET /api/resolve reads the wire's own label: the feed-level title, the item
+// The body's pipe and ingest overrides reach the probes with the same
+// feed-level semantics the query string used to carry.
+func TestProbeBodyOverrides(t *testing.T) {
+	setupTestDB(t)
+	allowLoopback(t)
+	url := rssServer(t)
+
+	rec := doReq(t, newMux(), "POST", "/api/preview",
+		probeBody(t, map[string]any{"url": url, "pipe": []string{"#filter drop_title=/Hello/"}}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preview status = %d (%s)", rec.Code, rec.Body)
+	}
+	var arts []previewArticle
+	if err := json.Unmarshal(rec.Body.Bytes(), &arts); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(arts) != 0 {
+		t.Errorf("preview with a dropping pipe override = %d articles, want 0", len(arts))
+	}
+
+	rec = doReq(t, newMux(), "POST", "/api/resolve",
+		probeBody(t, map[string]any{"url": "https://x.example/f", "ingest": `printf '{"title":"wire","items":[]}'`}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resolve status = %d (%s)", rec.Code, rec.Body)
+	}
+	var got struct {
+		Title string `json:"title"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Title != "wire" {
+		t.Errorf("resolve with an ingest override: title = %q, want %q", got.Title, "wire")
+	}
+}
+
+// The probes run the ingest (and, for preview, the pipe) they are handed, so
+// they answer POST only: a GET — anything a URL alone can trigger — runs
+// nothing.
+func TestProbesRefuseGET(t *testing.T) {
+	setupTestDB(t)
+	marker := filepath.Join(t.TempDir(), "ran")
+	q := neturl.Values{"url": {"https://x.example/f"}, "ingest": {"touch " + marker}}
+	for _, path := range []string{"/api/preview", "/api/resolve"} {
+		rec := doReq(t, newMux(), "GET", path+"?"+q.Encode(), "")
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Errorf("GET %s = %d, want 405 (%s)", path, rec.Code, rec.Body)
+		}
+		if _, err := os.Stat(marker); err == nil {
+			t.Fatalf("GET %s ran its ingest command", path)
+		}
+	}
+}
+
+// POST /api/resolve reads the wire's own label: the feed-level title, the item
 // count, and the (possibly discovery-resolved) feed URL — what the add-feed
 // dialog pre-fills before the operator commits.
 func TestResolve(t *testing.T) {
@@ -107,7 +172,7 @@ func TestResolve(t *testing.T) {
 	allowLoopback(t)
 	url := rssServer(t)
 
-	rec := doReq(t, newMux(), "GET", "/api/resolve?url="+url, "")
+	rec := doReq(t, newMux(), "POST", "/api/resolve", probeBody(t, map[string]any{"url": url}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
 	}
@@ -126,7 +191,7 @@ func TestResolve(t *testing.T) {
 
 func TestResolveInvalidURL(t *testing.T) {
 	setupTestDB(t)
-	rec := doReq(t, newMux(), "GET", "/api/resolve?url=notaurl", "")
+	rec := doReq(t, newMux(), "POST", "/api/resolve", `{"url":"notaurl"}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
@@ -220,7 +285,7 @@ func TestHandleImportMalformedOPML(t *testing.T) {
 // error branch (only the validFeedURL guard was previously covered).
 func TestResolveFetchFails(t *testing.T) {
 	setupTestDB(t)
-	rec := doReq(t, newMux(), "GET", "/api/resolve?url=http://127.0.0.1:9/feed", "")
+	rec := doReq(t, newMux(), "POST", "/api/resolve", `{"url":"http://127.0.0.1:9/feed"}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (fetch failure)", rec.Code)
 	}
@@ -509,7 +574,7 @@ func TestRenderPreviewSecretScopeGrant(t *testing.T) {
 	}
 }
 
-// GET /api/resolve probes a URL through a recipe's ingest and must resolve the
+// POST /api/resolve probes a URL through a recipe's ingest and must resolve the
 // same grant the real fetch would: an external ingest needing its credentials
 // has to get them here too, and only the scopes the request names.
 func TestResolveSecretScopeGrant(t *testing.T) {
@@ -519,9 +584,10 @@ func TestResolveSecretScopeGrant(t *testing.T) {
 
 	// The URL is never dereferenced — the external ingest ignores it — but it
 	// still has to clear handleResolve's validFeedURL gate.
-	title := func(extra string) string {
+	title := func(secrets []string) string {
 		t.Helper()
-		rec := doReq(t, newMux(), "GET", "/api/resolve?url=https://x.example/f&recipe=probe"+extra, "")
+		body := probeBody(t, map[string]any{"url": "https://x.example/f", "recipe": "probe", "secrets": secrets})
+		rec := doReq(t, newMux(), "POST", "/api/resolve", body)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
 		}
@@ -534,10 +600,10 @@ func TestResolveSecretScopeGrant(t *testing.T) {
 		return got.Title
 	}
 
-	if got := title("&secrets=tg"); got != "granted" {
+	if got := title([]string{"tg"}); got != "granted" {
 		t.Errorf("granted scope: ingest command saw %q, want %q", got, "granted")
 	}
-	if got := title(""); got != "ambient" {
+	if got := title(nil); got != "ambient" {
 		t.Errorf("ungranted resolve: ingest command saw %q, want the ambient %q", got, "ambient")
 	}
 }
