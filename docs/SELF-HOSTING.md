@@ -57,6 +57,14 @@ srr -o /srv/srr frontend update
 Re-run that after every release you want to pick up; it is the operator's
 command, never run automatically.
 
+The admin page it installs and `srr serve` speak a private API that is not
+versioned separately from the release: a route can change method or body
+shape between releases. Upgrade the two together, installing the frontend
+shell from the same release as the `srr` binary that serves `/api/*`. An
+admin page from one release against a serve from another can see some of
+its calls refused, typically with `405 Method Not Allowed`. The reader never
+calls `/api/*`, so the pairing concerns the admin page alone.
+
 ## 3. Caddy example
 
 A worked reverse-proxy config. It terminates TLS, forward-authenticates
