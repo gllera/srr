@@ -531,6 +531,47 @@ describe("relative refs: only an asset key resolves against the store base", () 
    })
 })
 
+// A relative ref the reader drops used to resolve onto the store base and 404,
+// and the `error` collapsed the element (collapseBrokenMedia). Without a src
+// nothing loads and nothing errors, so the sanitizer gives the element that
+// treatment itself — an archived article's dead figure must not turn into a
+// blank box the size of its width/height.
+describe("a dropped relative media src reads as a failed load", () => {
+   const frag = (html: string) => {
+      const t = document.createElement("template")
+      t.innerHTML = sanitizeHtml(html)
+      return t.content
+   }
+
+   it("collapses an img whose src was dropped, keeping its alt as the caption", () => {
+      const c = frag('<p>a</p><img src="fig.png" width="600" height="400"><img src="chart.png" alt="Chart of latency">')
+      const [fig, chart] = c.querySelectorAll("img")
+      expect(fig.classList.contains("srr-broken")).toBe(true)
+      expect(fig.hasAttribute("src")).toBe(false)
+      expect(chart.classList.contains("srr-broken")).toBe(true)
+      expect(chart.nextElementSibling?.className).toBe("srr-broken-alt")
+      expect(chart.nextElementSibling?.textContent).toBe("Chart of latency")
+      expect(c.querySelectorAll(".srr-broken-alt").length).toBe(1)
+   })
+
+   it("collapses a video or audio whose src was dropped", () => {
+      const c = frag('<video src="clip.mp4"></video><audio src="/ep.mp3"></audio>')
+      expect(c.querySelector("video")!.classList.contains("srr-broken")).toBe(true)
+      expect(c.querySelector("audio")!.classList.contains("srr-broken")).toBe(true)
+   })
+
+   it("leaves media that still loads, or never named a src, as it was", () => {
+      const c = frag(
+         '<img src="assets/ab/0123456789abcdef.jpg"><img src="https://cdn.example/x.jpg"><img alt="no src">' +
+            '<video src="https://cdn.example/v.mp4" poster="poster.jpg"></video>',
+      )
+      expect(c.querySelector(".srr-broken")).toBeNull()
+      expect(c.querySelector(".srr-broken-alt")).toBeNull()
+      // A dropped poster is not a failed load: the video still plays.
+      expect(c.querySelector("video")!.hasAttribute("poster")).toBe(false)
+   })
+})
+
 // FEB1: a footnote round-trip needs BOTH halves — the marker link must stay
 // same-document, and its target's id must survive. Before this, the anchor was
 // pack-base-resolved into an absolute CDN URL that <base target="_blank"> opened

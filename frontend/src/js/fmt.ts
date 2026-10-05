@@ -147,11 +147,12 @@ export function resolvePackRelative(v: string, base: URL): string | null {
 
 // setPackRelative resolves a relative reference and sets it on node[attr],
 // dropping the attribute when the ref is not an asset key (see
-// resolvePackRelative).
-function setPackRelative(node: Element, attr: string, base: URL, v: string): void {
+// resolvePackRelative). Reports whether it dropped it.
+function setPackRelative(node: Element, attr: string, base: URL, v: string): boolean {
    const resolved = resolvePackRelative(v, base)
    if (resolved) node.setAttribute(attr, resolved)
    else node.removeAttribute(attr)
+   return !resolved
 }
 
 // resolveMediaAttr routes one URL-bearing attribute on a sanitized node: a
@@ -159,12 +160,14 @@ function setPackRelative(node: Element, attr: string, base: URL, v: string): voi
 // otherwise), and — when proxy is set — an external http(s) reference goes
 // through the image proxy. Other values (absolute non-http, or already stripped
 // by the attribute loop) are left untouched. Centralizes the branch shared by
-// <img src>, <video src>, <video poster> and <a href>.
-function resolveMediaAttr(node: Element, attr: string, base: URL, proxyPrefix: string, proxy: boolean): void {
+// <img src>, <video src>, <video poster>, <audio src> and <source src>. Reports
+// whether it dropped a relative ref, so the caller can collapse the element.
+function resolveMediaAttr(node: Element, attr: string, base: URL, proxyPrefix: string, proxy: boolean): boolean {
    const v = node.getAttribute(attr)
-   if (!v) return
-   if (isRelative(v)) setPackRelative(node, attr, base, v)
-   else if (proxy && HTTP_RE.test(v)) node.setAttribute(attr, imgProxy(v, proxyPrefix))
+   if (!v) return false
+   if (isRelative(v)) return setPackRelative(node, attr, base, v)
+   if (proxy && HTTP_RE.test(v)) node.setAttribute(attr, imgProxy(v, proxyPrefix))
+   return false
 }
 
 // <template> parses HTML without executing scripts, unlike a div
@@ -196,6 +199,8 @@ export function sanitizeFragment(html: string, base: URL = PACK_BASE): DocumentF
    }
    const walker = document.createTreeWalker(tmpl.content, NodeFilter.SHOW_ELEMENT)
    const proxyPrefix = getImgProxy()
+   // Media whose own src was dropped: collapsed after the walk (collapseMedia).
+   const dead: Element[] = []
    let node: Element | null
    while ((node = walker.nextNode() as Element | null)) {
       const attrs = node.attributes
@@ -248,12 +253,13 @@ export function sanitizeFragment(html: string, base: URL = PACK_BASE): DocumentF
          // A relative src resolves against the pack base as an asset key; external
          // http(s) keeps the proxy path (proxy:true) so the user's IP isn't leaked
          // to feed hosts.
-         resolveMediaAttr(node, "src", base, proxyPrefix, true)
+         if (resolveMediaAttr(node, "src", base, proxyPrefix, true)) dead.push(node)
       } else if (tag === "VIDEO") {
          // src passes external URLs through (proxy:false — image proxies don't
          // handle video); poster IS an image, so external posters take the proxy
-         // path like img.src (leaving them direct would leak the user's IP).
-         resolveMediaAttr(node, "src", base, proxyPrefix, false)
+         // path like img.src (leaving them direct would leak the user's IP). A
+         // dropped poster only loses the still frame; the video still plays.
+         if (resolveMediaAttr(node, "src", base, proxyPrefix, false)) dead.push(node)
          resolveMediaAttr(node, "poster", base, proxyPrefix, true)
          // A feed <video> that omits `controls` renders as a dead frame with no
          // way to play it — the same failure <audio> gets forced controls for.
@@ -274,16 +280,25 @@ export function sanitizeFragment(html: string, base: URL = PACK_BASE): DocumentF
          // http(s) src passes through (proxy:false — image proxies don't handle
          // audio), exactly like <video src>.
          node.setAttribute("controls", "")
-         resolveMediaAttr(node, "src", base, proxyPrefix, false)
+         if (resolveMediaAttr(node, "src", base, proxyPrefix, false)) dead.push(node)
       } else if (tag === "SOURCE") {
          // srcset is stripped unconditionally: a multi-value descriptor bypasses
          // URL_DENY and the single-src asset-key rule (same reason <img srcset> is
          // stripped). src takes the same relative-ref rule as <video src>
-         // (proxy:false — image proxies don't handle video).
+         // (proxy:false — image proxies don't handle video). A <source> left
+         // without a src needs no collapse here: the browser's source selection
+         // fires `error` at it, which collapseBrokenMedia already answers.
          node.removeAttribute("srcset")
          resolveMediaAttr(node, "src", base, proxyPrefix, false)
       }
    }
+   // A media element whose src was dropped has nothing to load, so it never
+   // fires the `error` that collapses a dead one — and an archived article's
+   // relative figure, which used to resolve onto the store base and 404, would
+   // stay a blank box at its width × height with its alt caption lost. It gets
+   // the failed load's treatment instead, with no request. After the walk,
+   // because the caption is a new sibling the walker would visit and strip.
+   for (const m of dead) collapseMedia(m)
    return tmpl.content
 }
 
@@ -309,7 +324,12 @@ export function collapseBrokenMedia(e: Event): void {
          : t.tagName === "IMG" || t.tagName === "VIDEO" || t.tagName === "AUDIO"
            ? t
            : null
-   if (!victim) return
+   if (victim) collapseMedia(victim)
+}
+
+// The collapse itself, shared with sanitizeFragment, which applies it to media
+// whose src it dropped.
+function collapseMedia(victim: Element): void {
    victim.classList.add("srr-broken")
    // An <img alt="…"> whose bytes are gone still carries what the picture SAID.
    // Collapsing it discards the only surviving description — worst exactly where
