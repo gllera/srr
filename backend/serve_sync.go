@@ -47,9 +47,11 @@ import (
 // PLACEMENT: the routes are registered on the same mux as /api/* and are
 // therefore behind the same `hostGuard` — unconditional loopback Host, plus
 // the Origin carve-out that only a browser-set `Sec-Fetch-Site: same-origin`
-// satisfies. That is NOT weakened here, and it has a deployment consequence
-// worth stating plainly: a browser reader served from a DIFFERENT origin than
-// this endpoint is refused (its request is cross-site, by construction). The
+// satisfies, plus the fetch()-only destination rule (sync.ts's GET and PUT,
+// keepalive flush included, are all fetch() calls). That is NOT weakened
+// here, and it has a deployment consequence worth stating plainly: a browser
+// reader served from a DIFFERENT origin than this endpoint is refused (its
+// request is cross-site, by construction). The
 // supported shape is one hostname routing the reader and /sync/ to their
 // respective origins — e.g. a reverse proxy that rewrites Host to the loopback
 // address (docs/SELF-HOSTING.md) with a path rule sending /sync/* and /api/*

@@ -76,6 +76,23 @@ srr.example.com {
 		@portal path /auth /auth/*
 		reverse_proxy @portal 127.0.0.1:9091
 
+		# srr serve is called with fetch() (Sec-Fetch-Dest: empty) and nothing
+		# else, bar the admin page's Export download. Any other browser destination
+		# — an <img>, a frame, a form post — is markup riding this origin, so it is
+		# refused here, before the gate, as well as by srr serve itself. A request
+		# with no Sec-Fetch-Dest at all (curl, an older browser) is left to serve.
+		@notfetch {
+			path /api/* /sync/*
+			header Sec-Fetch-Dest *
+			not header Sec-Fetch-Dest empty
+			not {
+				method GET HEAD
+				path /api/export
+				header Sec-Fetch-Dest document
+			}
+		}
+		respond @notfetch 403
+
 		# Browsers fetch the service-worker script WITHOUT cookies, so gating it
 		# 302s the registration to the login page and the SW never installs. It is
 		# public build output (no store data), so it alone skips the gate.
@@ -210,6 +227,20 @@ serve`'s `hostGuard` requires a loopback Host on every request, and a
 proxied browser mutation is additionally let through only when the
 browser-set `Sec-Fetch-Site: same-origin` header confirms the request
 originated from the admin page's own origin (see `backend/cmd_serve.go`).
+
+**Same-origin is not the same as "the admin page asked".** Feed articles are
+rendered on this origin too, and their markup can make the browser request any
+same-origin path — an `<img src>`, a stylesheet, a frame, a form post — with
+the session cookie attached. Through the proxy such a request carries the
+loopback Host and, being a GET or same-origin, nothing the Origin check
+refuses. The browser-set `Sec-Fetch-Dest` header tells the two apart: the
+admin page and the reader call `/api/*` and `/sync/*` with `fetch()` only
+(`empty`), and the one navigation serve answers is the admin page's Export
+download (`document`, `GET /api/export`). `srr serve` refuses every other
+destination with a 403, and the `@notfetch` block above does the same at the
+proxy, before the auth gate, so the rule does not rest on the serve binary
+alone. A request with no `Sec-Fetch-Dest` — a non-browser client, or a
+browser that predates fetch metadata — is not refused on that ground.
 
 ## 6. CLI from another box
 

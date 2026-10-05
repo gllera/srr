@@ -148,7 +148,9 @@ func secHeaders(next http.Handler) http.Handler {
 // only when the browser-set (unforgeable) fetch metadata asserts the request
 // initiator shares that outer origin. The Host check stays unconditional: a
 // DNS-rebinding page is same-origin to the browser but cannot present a
-// loopback Host.
+// loopback Host. Neither check can tell the admin page's own calls from a
+// request markup made the browser send on the same origin (an <img src>, a
+// form post), so fetchDestAllowed refuses those by their fetch metadata.
 func hostGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !loopbackHost(r.Host) {
@@ -162,8 +164,35 @@ func hostGuard(next http.Handler) http.Handler {
 				return
 			}
 		}
+		if !fetchDestAllowed(r) {
+			http.Error(w, "forbidden: not a fetch() request", http.StatusForbidden)
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// fetchDestAllowed reads the browser-set (unforgeable) Sec-Fetch-Dest. The
+// admin page and the reader reach this server only through fetch(), whose
+// destination is "empty"; any other destination means the browser is loading
+// the response AS something — an image, a script, a frame, a document — on
+// behalf of markup, and a feed article's markup is exactly what shares this
+// origin. The one navigation the API serves is the admin page's Export
+// download (a GET of /api/export, query and all). A request with no fetch
+// metadata at all — curl, MCP, a browser predating it — is not a browser
+// loading markup we can identify, so it keeps meeting only the checks above.
+func fetchDestAllowed(r *http.Request) bool {
+	dest, sent := r.Header["Sec-Fetch-Dest"]
+	if !sent {
+		return true
+	}
+	switch strings.Join(dest, ",") {
+	case "empty":
+		return true
+	case "document":
+		return (r.Method == http.MethodGet || r.Method == http.MethodHead) && r.URL.Path == "/api/export"
+	}
+	return false
 }
 
 func loopbackHost(host string) bool {

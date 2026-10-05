@@ -7,7 +7,9 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -142,6 +144,80 @@ func TestServeHostGuardRebindingDespiteSameOrigin(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("rebound Host with same-origin fetch metadata = %d, want 403", rec.Code)
+	}
+}
+
+// Markup can make a browser request a same-origin URL with no script at all:
+// an <img>/<video>/<audio> src, a stylesheet, a frame, a form post. Through the
+// Host-rewriting proxy such a request presents a loopback Host and, being a
+// GET or same-origin, nothing the Origin check refuses — the same shape as the
+// admin page's own calls. Fetch metadata tells them apart: the admin page and
+// the reader reach serve only through fetch(), whose destination is "empty",
+// and the one navigation serve answers is the admin page's Export download.
+// A request carrying no Sec-Fetch-Dest at all (curl, MCP, an older browser)
+// keeps passing.
+func TestServeHostGuardFetchDestination(t *testing.T) {
+	setupTestDB(t)
+	for _, tc := range []struct {
+		method, target, dest string
+		want                 int
+	}{
+		{"GET", "/api/overview", "image", http.StatusForbidden},
+		{"GET", "/api/overview", "script", http.StatusForbidden},
+		{"GET", "/api/overview", "style", http.StatusForbidden},
+		{"GET", "/api/overview", "video", http.StatusForbidden},
+		{"GET", "/api/overview", "iframe", http.StatusForbidden},
+		{"GET", "/api/overview", "document", http.StatusForbidden},
+		{"GET", "/sync/phone", "image", http.StatusForbidden},
+		{"POST", "/api/feeds", "document", http.StatusForbidden}, // a form post
+		{"POST", "/api/feeds", "iframe", http.StatusForbidden},   // a form posted into a frame
+		{"GET", "/api/export", "image", http.StatusForbidden},
+		{"GET", "/api/export", "iframe", http.StatusForbidden},
+		{"POST", "/api/export", "document", http.StatusForbidden},
+		{"GET", "/api/export/x", "document", http.StatusForbidden},
+
+		{"GET", "/api/overview", "empty", http.StatusOK},
+		{"GET", "/api/overview", "", http.StatusOK},
+		{"GET", "/api/export", "document", http.StatusOK},
+		{"GET", "/api/export?format=json", "document", http.StatusOK},
+		{"HEAD", "/api/export", "document", http.StatusOK},
+	} {
+		req := httptest.NewRequest(tc.method, tc.target, nil)
+		req.Host = "localhost:8088"
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		if tc.method != http.MethodGet && tc.method != http.MethodHead {
+			req.Header.Set("Origin", "https://srr.example.com")
+		}
+		if tc.dest != "" {
+			req.Header.Set("Sec-Fetch-Dest", tc.dest)
+		}
+		rec := httptest.NewRecorder()
+		newMux().ServeHTTP(rec, req)
+		if rec.Code != tc.want {
+			t.Errorf("%s %s with Sec-Fetch-Dest %q = %d, want %d (%s)", tc.method, tc.target, tc.dest, rec.Code, tc.want, rec.Body)
+		}
+	}
+}
+
+// The guard runs before any handler: an image pointed at a probe route must
+// not get as far as the ingest command it names.
+func TestServeHostGuardImageCannotRunProbe(t *testing.T) {
+	setupTestDB(t)
+	marker := filepath.Join(t.TempDir(), "ran")
+	q := url.Values{"url": {"https://x.example/f"}, "ingest": {"touch " + marker}}
+	for _, path := range []string{"/api/preview", "/api/resolve"} {
+		req := httptest.NewRequest(http.MethodGet, path+"?"+q.Encode(), nil)
+		req.Host = "localhost:8088"
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		req.Header.Set("Sec-Fetch-Dest", "image")
+		rec := httptest.NewRecorder()
+		newMux().ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("image GET %s = %d, want 403 (%s)", path, rec.Code, rec.Body)
+		}
+		if _, err := os.Stat(marker); err == nil {
+			t.Fatalf("image GET %s ran its ingest command", path)
+		}
 	}
 }
 
