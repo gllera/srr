@@ -5,9 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 // the prefetch ends up assigning — the ones fmt's routing lets through.
 const data = vi.hoisted(() => ({
    loadArticle: vi.fn(),
-   activeStore: () => ({ mid: "0", base: new URL("http://localhost:3000/") }),
+   activeStore: vi.fn(),
 }))
 vi.mock("./data", () => data)
+
+const KEY = "assets/ab/0123456789abcdef.jpg"
 
 import { abortPrefetch, schedulePrefetch } from "./prefetch"
 
@@ -34,16 +36,28 @@ describe("schedulePrefetch", () => {
 
    it("warms the neighbour's asset key and never a same-origin path a crafted ref spells", async () => {
       // The self-hosted base is the origin root, which the admin API shares.
-      const key = "assets/ab/0123456789abcdef.jpg"
+      data.activeStore.mockReturnValue({ mid: "0", base: new URL("http://localhost:3000/") })
       data.loadArticle.mockResolvedValue({
          c:
             '<img src="assets/../api/preview?url=x&ingest=y"><img src="/api/overview">' +
             '<video poster="api/preview" src="assets/ab/../../api/x"></video>' +
-            `<img src="${key}">`,
+            `<img src="${KEY}">`,
       })
       schedulePrefetch(7)
       await vi.waitFor(() => expect(assigned.length).toBeGreaterThan(0))
       expect(data.loadArticle).toHaveBeenCalledWith(7)
-      expect(assigned).toEqual(["http://localhost:3000/" + key])
+      expect(assigned).toEqual(["http://localhost:3000/" + KEY])
+   })
+
+   it("resolves a peer article's key against the peer's base, never the home one", async () => {
+      // A base other than PACK_BASE, the home base fmt falls back to: a prefetch
+      // that stopped passing the active store's base would warm the home URL
+      // (docs/MULTI-STORE-SPEC.md MS7).
+      const peer = "https://peer.example/store/"
+      data.activeStore.mockReturnValue({ mid: "1", base: new URL(peer) })
+      data.loadArticle.mockResolvedValue({ c: `<img src="${KEY}">` })
+      schedulePrefetch(3)
+      await vi.waitFor(() => expect(assigned.length).toBeGreaterThan(0))
+      expect(assigned).toEqual([peer + KEY])
    })
 })

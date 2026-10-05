@@ -86,6 +86,16 @@ describe("buildContent", () => {
       expect(host.querySelector("p")?.textContent).toBe("hello")
    })
 
+   it("resolves an asset key against the article's own store base, not the home one", () => {
+      // A base other than PACK_BASE, the home base fmt falls back to: a peer
+      // article's keys resolve against its own store (docs/MULTI-STORE-SPEC.md MS7).
+      const key = "assets/ab/0123456789abcdef.jpg"
+      const peer = new URL("https://peer.example/store/")
+      const host = document.createElement("div")
+      host.append(buildContent({ f: 1, a: 1, c: `<img src="${key}">` }, peer, { inert: false }))
+      expect(host.querySelector("img")?.getAttribute("src")).toBe(peer.href + key)
+   })
+
    it("returns the compaction tombstone when content is absent", () => {
       const frag = buildContent({ f: 1, a: 1 } as IArticleWire, new URL("https://cdn.example/"), { inert: false })
       const host = document.createElement("div")
