@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"mime"
@@ -279,16 +280,24 @@ const maxRequestBody = 8 << 20
 // decodeJSON decodes a JSON request body into v. It writes the rejection
 // itself and reports false when the handler must stop: 415 unless the body is
 // labelled application/json (parameters such as charset ride along), 400 when
-// it does not decode. The label is the point: an HTML form can submit only
-// text/plain, urlencoded or multipart bodies, and a text/plain one can be made
-// to parse as JSON, so a route that decoded whatever arrived could be driven
-// by a form. Every route that takes a JSON body goes through here.
+// it is not exactly one JSON value (whitespace may follow it). The label is
+// the point: an HTML form can submit only text/plain, urlencoded or multipart
+// bodies, and a text/plain one can be made to parse as JSON, so a route that
+// decoded whatever arrived could be driven by a form. Every route that takes a
+// JSON body goes through here.
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
 		writeErrStatus(w, http.StatusUnsupportedMediaType, "request body must be Content-Type: application/json")
 		return false
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody)).Decode(v); err != nil {
+	// Unmarshal, not a json.Decoder: Decode stops at the end of the first
+	// value, so a second value or garbage after it would be dropped and the
+	// first acted on, where Unmarshal refuses it — as `srr feed apply` does.
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
+	if err == nil {
+		err = json.Unmarshal(body, v)
+	}
+	if err != nil {
 		writeErr(w, fmt.Errorf("decode request body: %w", err))
 		return false
 	}

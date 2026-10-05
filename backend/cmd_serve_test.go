@@ -160,6 +160,76 @@ func TestServeJSONContentTypeParametersAndCase(t *testing.T) {
 	}
 }
 
+// A JSON body is one JSON value and nothing after it. A streaming decoder
+// stops at the end of the first value, so a route reading through one would
+// act on that value and drop whatever followed — a second value, or garbage —
+// with a 200, where `srr feed apply` rejects the same input. Every JSON-body
+// route answers 400 instead, before touching the store or running a probe.
+func TestServeJSONBodyRejectsTrailingData(t *testing.T) {
+	setupTestDB(t)
+	stubPassthroughResolve()
+	if rec := doReq(t, newMux(), "POST", "/api/feeds", `{"title":"Keep","url":"https://keep.example/feed"}`); rec.Code != http.StatusOK {
+		t.Fatalf("seed = %d (%s)", rec.Code, rec.Body)
+	}
+	marker := filepath.Join(t.TempDir(), "ran")
+	probe := probeBody(t, map[string]any{"url": "https://x.example/f", "ingest": "touch " + marker})
+	routes := []struct{ method, path, body string }{
+		{"POST", "/api/feeds", `{"title":"T","url":"https://x.example/feed"}`},
+		{"PUT", "/api/feeds/0", `{"title":"T","url":"https://keep.example/feed"}`},
+		{"POST", "/api/feeds/apply", `{"title":"T","url":"https://x.example/feed"}`},
+		{"POST", "/api/feeds/apply", `[{"title":"T","url":"https://x.example/feed"}]`},
+		{"PUT", "/api/recipes/x", `{"pipe":["#sanitize"]}`},
+		{"PUT", "/api/syndicate/x", `{"format":"rss","ext":true}`},
+		{"PUT", "/api/dedup", `{"days":14}`},
+		{"POST", "/api/preview", probe},
+		{"POST", "/api/resolve", probe},
+	}
+	before := doReq(t, newMux(), "GET", "/api/overview", "").Body.String()
+	for _, rt := range routes {
+		// "}" and "]" are the stray closers a check for "is another value
+		// coming?" would read as the end of an enclosing one.
+		for _, tail := range []string{"\n" + rt.body, " trailing-garbage", "}", "]"} {
+			rec := doReq(t, newMux(), rt.method, rt.path, rt.body+tail)
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "decode request body") {
+				t.Errorf("%s %s with %q after the value = %d (%s), want 400 from the decode", rt.method, rt.path, tail, rec.Code, rec.Body)
+			}
+		}
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("a probe ran its ingest command on a body with trailing data")
+	}
+	if after := doReq(t, newMux(), "GET", "/api/overview", "").Body.String(); after != before {
+		t.Errorf("a body with trailing data changed the store:\nbefore %s\nafter  %s", before, after)
+	}
+}
+
+// Whitespace after the value is not data: a body ending in a newline, as a
+// file sent with `curl --data-binary @feeds.json` usually does, is accepted
+// on every JSON-body route.
+func TestServeJSONBodyAllowsTrailingWhitespace(t *testing.T) {
+	setupTestDB(t)
+	stubPassthroughResolve()
+	allowLoopback(t)
+	probe := probeBody(t, map[string]any{"url": rssServer(t)})
+	for _, rt := range []struct{ method, path, body string }{
+		{"POST", "/api/feeds", `{"title":"T","url":"https://x.example/feed"}`},
+		{"PUT", "/api/feeds/0", `{"title":"U","url":"https://x.example/feed"}`},
+		{"POST", "/api/feeds/apply", `{"title":"A","url":"https://a.example/feed"}`},
+		{"POST", "/api/feeds/apply", `[{"title":"B","url":"https://b.example/feed"}]`},
+		{"PUT", "/api/recipes/x", `{"pipe":["#sanitize"]}`},
+		{"PUT", "/api/syndicate/x", `{"format":"rss","ext":true}`},
+		{"PUT", "/api/dedup", `{"days":14}`},
+		{"POST", "/api/preview", probe},
+		{"POST", "/api/resolve", probe},
+	} {
+		for _, tail := range []string{"\n", " \t\r\n"} {
+			if rec := doReq(t, newMux(), rt.method, rt.path, rt.body+tail); rec.Code != http.StatusOK {
+				t.Errorf("%s %s with %q after the value = %d, want 200 (%s)", rt.method, rt.path, tail, rec.Code, rec.Body)
+			}
+		}
+	}
+}
+
 func TestServeHostGuardRejectsNonLoopback(t *testing.T) {
 	h := newMux()
 	req := httptest.NewRequest("GET", "/api/overview", nil)
