@@ -110,15 +110,11 @@ func TestPreviewRequiresURL(t *testing.T) {
 	}
 }
 
-// The body's pipe and ingest overrides reach the probes with the same
-// feed-level semantics the query string used to carry.
-func TestProbeBodyOverrides(t *testing.T) {
-	setupTestDB(t)
-	allowLoopback(t)
-	url := rssServer(t)
-
-	rec := doReq(t, newMux(), "POST", "/api/preview",
-		probeBody(t, map[string]any{"url": url, "pipe": []string{"#filter drop_title=/Hello/"}}))
+// previewTitles POSTs body to /api/preview and returns the processed
+// articles' titles.
+func previewTitles(t *testing.T, body string) []string {
+	t.Helper()
+	rec := doReq(t, newMux(), "POST", "/api/preview", body)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("preview status = %d (%s)", rec.Code, rec.Body)
 	}
@@ -126,11 +122,39 @@ func TestProbeBodyOverrides(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &arts); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(arts) != 0 {
-		t.Errorf("preview with a dropping pipe override = %d articles, want 0", len(arts))
+	titles := make([]string, 0, len(arts))
+	for _, a := range arts {
+		titles = append(titles, a.Title)
+	}
+	return titles
+}
+
+// The body's recipe, pipe and ingest reach the probes with feed-level
+// semantics. Each preview case is built so that a dropped field changes the
+// answer: without its recipe or its pipe the feed's "Hello" survives, and
+// without its ingest the feed itself is read instead.
+func TestProbeBodyOverrides(t *testing.T) {
+	setupTestDB(t)
+	allowLoopback(t)
+	url := rssServer(t)
+	if err := withDB(true, func(ctx context.Context, db *DB) error {
+		return setRecipe(ctx, db, "dropper", "", []string{"#filter drop_title=/Hello/"}, nil)
+	}); err != nil {
+		t.Fatalf("seed recipe: %v", err)
 	}
 
-	rec = doReq(t, newMux(), "POST", "/api/resolve",
+	if got := previewTitles(t, probeBody(t, map[string]any{"url": url, "pipe": []string{"#filter drop_title=/Hello/"}})); len(got) != 0 {
+		t.Errorf("preview with a dropping pipe override = %q, want none", got)
+	}
+	if got := previewTitles(t, probeBody(t, map[string]any{"url": url, "recipe": "dropper"})); len(got) != 0 {
+		t.Errorf("preview through a dropping recipe = %q, want none", got)
+	}
+	ingest := `printf '{"items":[{"title":"from ingest","link":"https://e.example/i"}]}'`
+	if got := previewTitles(t, probeBody(t, map[string]any{"url": url, "ingest": ingest})); len(got) != 1 || got[0] != "from ingest" {
+		t.Errorf("preview with an ingest override = %q, want [\"from ingest\"]", got)
+	}
+
+	rec := doReq(t, newMux(), "POST", "/api/resolve",
 		probeBody(t, map[string]any{"url": "https://x.example/f", "ingest": `printf '{"title":"wire","items":[]}'`}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("resolve status = %d (%s)", rec.Code, rec.Body)
@@ -571,6 +595,31 @@ func TestRenderPreviewSecretScopeGrant(t *testing.T) {
 	}
 	if got := run(nil); got != "ambient" {
 		t.Errorf("ungranted preview: pipe step saw %q, want the ambient %q", got, "ambient")
+	}
+}
+
+// POST /api/preview hands the body's secrets to grantSecrets as the feed-level
+// axis, so a feed whose ingest needs a scope it grants itself previews with it.
+// The recipe grants nothing, so whatever the ingest sees came from the body.
+func TestPreviewSecretScopeGrant(t *testing.T) {
+	setupTestDB(t)
+	setSecretScopeFixture(t)
+
+	ingest := fmt.Sprintf(`printf '{"items":[{"title":"%%s","link":"https://e.example/i"}]}' "$%s"`, secretScopeEnv)
+	title := func(secrets []string) string {
+		t.Helper()
+		got := previewTitles(t, probeBody(t, map[string]any{"url": "https://x.example/f", "ingest": ingest, "secrets": secrets}))
+		if len(got) != 1 {
+			t.Fatalf("preview = %q, want one article", got)
+		}
+		return got[0]
+	}
+
+	if got := title([]string{"tg"}); got != "granted" {
+		t.Errorf("granted scope: ingest command saw %q, want %q", got, "granted")
+	}
+	if got := title(nil); got != "ambient" {
+		t.Errorf("ungranted preview: ingest command saw %q, want the ambient %q", got, "ambient")
 	}
 }
 
