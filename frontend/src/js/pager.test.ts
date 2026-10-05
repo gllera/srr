@@ -7,17 +7,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 // directly. What the preview RENDERS into those nodes is article-view.ts's and
 // is tested there; this suite owns the surface's lifecycle.
 
-const mocks = vi.hoisted(() => ({
-   setPager: vi.fn(),
-   currentChron: vi.fn(() => 2),
-   neighborOlder: vi.fn(async () => 1),
-   neighborNewer: vi.fn(async () => 3),
-   loadMeta: vi.fn(async () => ({ f: 4, w: 1_700_000_000, t: "Neighbor title" })),
-   loadArticle: vi.fn(async () => ({ f: 4, a: 1_700_000_000, t: "Neighbor title", c: "<p>body</p>" })),
-   feedTitle: vi.fn(() => "Feed A"),
-   db: { feeds: {} as Record<number, unknown> },
-   activeStore: vi.fn(() => ({ base: new URL("https://cdn.example/") })),
-}))
+const mocks = vi.hoisted(() => {
+   const db = { feeds: {} as Record<number, unknown> }
+   const store = { mid: "0", base: new URL("https://cdn.example/"), db }
+   return {
+      setPager: vi.fn(),
+      currentChron: vi.fn(() => 2),
+      neighborOlder: vi.fn(async () => 1),
+      neighborNewer: vi.fn(async () => 3),
+      loadMeta: vi.fn(async () => ({ f: 4, w: 1_700_000_000, t: "Neighbor title" })),
+      loadArticle: vi.fn(async () => ({ f: 4, a: 1_700_000_000, t: "Neighbor title", c: "<p>body</p>" })),
+      feedTitle: vi.fn(() => "Feed A"),
+      db,
+      store,
+      activeStore: vi.fn(() => store),
+   }
+})
 vi.mock("./gestures", () => ({ setPager: mocks.setPager }))
 vi.mock("./nav", () => ({
    currentChron: mocks.currentChron,
@@ -113,8 +118,8 @@ describe("page mode visuals", () => {
       spec.engage("next")
       await flush()
       expect(mocks.neighborNewer).toHaveBeenCalledWith(2)
-      expect(mocks.loadMeta).toHaveBeenCalledWith(3)
-      expect(mocks.loadArticle).toHaveBeenCalledWith(3)
+      expect(mocks.loadMeta).toHaveBeenCalledWith(3, mocks.store)
+      expect(mocks.loadArticle).toHaveBeenCalledWith(3, mocks.store)
       expect(page()!.querySelector(".srr-title")!.textContent).toBe("Neighbor title")
       expect(page()!.querySelector(".srr-source")!.textContent).toBe("Feed A")
       expect((page()!.querySelector(".srr-reader") as HTMLElement).dataset.src).toBeDefined()
@@ -257,7 +262,7 @@ describe("prev direction (the mirrored branches)", () => {
       await flush()
       expect(mocks.neighborOlder).toHaveBeenCalledWith(2)
       expect(mocks.neighborNewer).not.toHaveBeenCalled()
-      expect(mocks.loadMeta).toHaveBeenCalledWith(1)
+      expect(mocks.loadMeta).toHaveBeenCalledWith(1, mocks.store)
    })
 
    it("commits outward to the right, then rests", async () => {
@@ -563,6 +568,44 @@ describe("cold neighbour", () => {
       release({ f: 7, a: 1, t: "Stale", c: "<p>stale body</p>" })
       await flush()
       expect(page()).toBeNull()
+   })
+})
+
+// The fill awaits the neighbour probe, its meta card and its article, and the
+// active lane can move across any of them. What the preview paints is the
+// article of the store the fill started in, so its content URLs are that
+// store's — judged against the lane it lands in instead, a home asset (home
+// being the page origin in the self-hosted layout) reads as a crafted
+// same-origin URL on a peer's base and is dropped, and a bare key is resolved
+// on the wrong store.
+describe("multi-store", () => {
+   const KEY = "assets/ab/0123456789abcdef.jpg"
+   const HOME = { mid: "0", base: new URL("http://localhost:3000/"), db: { feeds: {} } }
+   const PEER = { mid: "1", base: new URL("https://peer.example/store/"), db: { feeds: {} } }
+   afterEach(() => mocks.activeStore.mockImplementation(() => mocks.store))
+
+   it("paints the neighbour against the store the fill started in, even if the lane changes mid-fill", async () => {
+      mocks.activeStore.mockImplementation(() => HOME)
+      let release!: (a: { f: number; a: number; t: string; l: string; c: string }) => void
+      mocks.loadArticle.mockReturnValueOnce(new Promise((r) => (release = r)))
+      spec.engage("next")
+      await flush()
+      mocks.activeStore.mockImplementation(() => PEER)
+      release({
+         f: 4,
+         a: 1_700_000_000,
+         t: "Neighbor title",
+         l: `http://localhost:3000/${KEY}`,
+         c: `<img src="${KEY}"><img src="http://localhost:3000/${KEY}">`,
+      })
+      await flush()
+      const box = page()!
+      expect(box.classList.contains("srr-pager-filled")).toBe(true)
+      expect([...box.querySelectorAll(".srr-content img")].map((i) => i.getAttribute("src"))).toEqual([
+         HOME.base.href + KEY,
+         HOME.base.href + KEY,
+      ])
+      expect(box.querySelector<HTMLAnchorElement>(".srr-title-row")!.getAttribute("href")).toBe(HOME.base.href + KEY)
    })
 })
 

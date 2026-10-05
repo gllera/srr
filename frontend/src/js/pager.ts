@@ -267,6 +267,12 @@ async function fillPage(s: PagerSide): Promise<void> {
    refs.content.replaceChildren()
    delete refs.root.dataset.src
    box.classList.remove("srr-pager-filled")
+   // The neighbour is a chron of the store active NOW, and the fill awaits three
+   // times before it paints. Pin the store here and read everything from it —
+   // the card, the article, the feed and the base its content URLs are routed
+   // against (fmt.routeContentUrl) — so a lane change mid-fill can never judge
+   // one store's article against another store's base.
+   const store = data.activeStore()
    try {
       const from = nav.currentChron()
       const target = await (s === "prev" ? nav.neighborOlder(from) : nav.neighborNewer(from))
@@ -279,23 +285,22 @@ async function fillPage(s: PagerSide): Promise<void> {
       // The article load starts alongside the card, not after it: on the cold
       // path that is one round-trip window instead of two (a rejection surfaces
       // at its await below, so the early one is swallowed here).
-      const articleP = data.loadArticle(target)
+      const articleP = data.loadArticle(target, store)
       articleP.catch(() => {})
-      const card = await data.loadMeta(target)
+      const card = await data.loadMeta(target, store)
       if (my !== fillTok) return
       stampSrc(refs.root, card.f)
-      refs.source.textContent = data.feedTitle(card.f)
+      refs.source.textContent = data.feedTitle(card.f, store)
       refs.date.textContent = timeAgo(card.w)
       refs.title.textContent = card.t ?? ""
       refs.content.replaceChildren(skeleton())
       const article = await articleP
       if (my !== fillTok) return
-      const feed = data.db.feeds[article.f]
-      const base = data.activeStore().base
-      paintMasthead(refs, article, feed, base)
+      const feed = store.db.feeds[article.f]
+      paintMasthead(refs, article, feed, store.base)
       stampContentHost(refs.content, article)
       // inert: the preview never holds live audio/video (article-view §2).
-      refs.content.replaceChildren(buildContent(article, base, { inert: true }))
+      refs.content.replaceChildren(buildContent(article, store.base, { inert: true }))
       box.classList.add("srr-pager-filled")
    } catch {}
 }
