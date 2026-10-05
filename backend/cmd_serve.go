@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -269,11 +270,23 @@ func writeErr(w http.ResponseWriter, err error) {
 // payload.
 const maxRequestBody = 8 << 20
 
-func decodeJSON(r *http.Request, v any) error {
-	if err := json.NewDecoder(http.MaxBytesReader(nil, r.Body, maxRequestBody)).Decode(v); err != nil {
-		return fmt.Errorf("decode request body: %w", err)
+// decodeJSON decodes a JSON request body into v. It writes the rejection
+// itself and reports false when the handler must stop: 415 unless the body is
+// labelled application/json (parameters such as charset ride along), 400 when
+// it does not decode. The label is the point: an HTML form can submit only
+// text/plain, urlencoded or multipart bodies, and a text/plain one can be made
+// to parse as JSON, so a route that decoded whatever arrived could be driven
+// by a form. Every route that takes a JSON body goes through here.
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+		writeErrStatus(w, http.StatusUnsupportedMediaType, "request body must be Content-Type: application/json")
+		return false
 	}
-	return nil
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody)).Decode(v); err != nil {
+		writeErr(w, fmt.Errorf("decode request body: %w", err))
+		return false
+	}
+	return true
 }
 
 func pathID(r *http.Request) (int, error) {

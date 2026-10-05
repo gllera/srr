@@ -29,6 +29,29 @@ describe("apiLooksMissing", () => {
 })
 
 describe("api()", () => {
+   // serve answers 415 to a JSON body labelled anything but application/json,
+   // and the OPML import is the one body sent raw under a type of its own.
+   it("labels a JSON body application/json and a raw body with its own type", async () => {
+      // The generic declares the CALL signature so mock.calls types the init.
+      const f = vi.fn<(input: string, init?: RequestInit) => Promise<{ ok: boolean; text: () => Promise<string> }>>(
+         async () => ({ ok: true, text: async () => "{}" }),
+      )
+      vi.stubGlobal("fetch", f)
+      await api("PUT", "/api/dedup", { days: 3 })
+      await api("POST", "/api/import?dry_run=1", "<opml/>", "application/xml")
+      await api("GET", "/api/overview")
+
+      const sent = f.mock.calls.map(([, init]) => [
+         (init?.headers as Record<string, string>)["Content-Type"],
+         init?.body,
+      ])
+      expect(sent).toEqual([
+         ["application/json", '{"days":3}'],
+         ["application/xml", "<opml/>"],
+         [undefined, undefined],
+      ])
+   })
+
    it("rejects with an ApiError carrying the status on a failed request", async () => {
       vi.stubGlobal(
          "fetch",

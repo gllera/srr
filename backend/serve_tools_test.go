@@ -235,7 +235,7 @@ func TestServeExportImportRoundTrip(t *testing.T) {
 	// Fresh store; import the exported OPML.
 	setupTestDB(t)
 	stubPassthroughResolve()
-	imp := doReq(t, newMux(), "POST", "/api/import", opml)
+	imp := doRawReq(t, newMux(), "POST", "/api/import", "application/xml", opml)
 	if imp.Code != http.StatusOK {
 		t.Fatalf("import = %d (%s)", imp.Code, imp.Body)
 	}
@@ -252,7 +252,7 @@ func TestHandleImportTagOverrideSkipsGroupResolution(t *testing.T) {
 	// a ?tag= override must skip that resolution (the CLI -g does).
 	opml := `<opml version="2.0"><body><outline text="2024">` +
 		`<outline text="Alpha" type="rss" xmlUrl="https://a.example/feed"/></outline></body></opml>`
-	rec := doReq(t, newMux(), "POST", "/api/import?tag=mytag&dry_run=1", opml)
+	rec := doRawReq(t, newMux(), "POST", "/api/import?tag=mytag&dry_run=1", "application/xml", opml)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("import status = %d, body %s", rec.Code, rec.Body.String())
 	}
@@ -273,7 +273,7 @@ func TestHandleImportTagOverrideSkipsGroupResolution(t *testing.T) {
 // A malformed OPML upload is a 400 from ParseOPMLBytes, before any walk or probe.
 func TestHandleImportMalformedOPML(t *testing.T) {
 	setupTestDB(t)
-	rec := doReq(t, newMux(), "POST", "/api/import", "not-xml")
+	rec := doRawReq(t, newMux(), "POST", "/api/import", "application/xml", "not-xml")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (%s)", rec.Code, rec.Body)
 	}

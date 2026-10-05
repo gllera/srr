@@ -33,8 +33,7 @@ type probeRequest struct {
 
 func handlePreview(w http.ResponseWriter, r *http.Request) {
 	var req probeRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.URL == "" {
@@ -59,8 +58,7 @@ func handlePreview(w http.ResponseWriter, r *http.Request) {
 // label before the operator commits.
 func handleResolve(w http.ResponseWriter, r *http.Request) {
 	var req probeRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	out, err := resolveProbe(r.Context(), req.Recipe, req.Ingest, req.Secrets, req.URL)
@@ -80,8 +78,7 @@ func handleDedup(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Days int `json:"days"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
-		writeErr(w, err)
+	if !decodeJSON(w, r, &body) {
 		return
 	}
 	if err := validateStoreDedupDays(body.Days); err != nil {

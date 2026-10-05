@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -14,7 +15,20 @@ import (
 	"testing"
 )
 
+// doReq sends body as JSON, labelled the way the admin console's api() labels
+// every body it sends.
 func doReq(t *testing.T, h http.Handler, method, target, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	contentType := ""
+	if body != "" {
+		contentType = "application/json"
+	}
+	return doRawReq(t, h, method, target, contentType, body)
+}
+
+// doRawReq is doReq with the Content-Type spelled out ("" sends none): the
+// non-JSON bodies (an OPML import) and the media-type checks themselves.
+func doRawReq(t *testing.T, h http.Handler, method, target, contentType, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	var r io.Reader
 	if body != "" {
@@ -22,6 +36,9 @@ func doReq(t *testing.T, h http.Handler, method, target, body string) *httptest.
 	}
 	req := httptest.NewRequest(method, target, r)
 	req.Host = "localhost"
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
@@ -73,6 +90,72 @@ func TestServeMalformedJSONBodyRejected(t *testing.T) {
 		rec := doReq(t, newMux(), tc.method, tc.path, `{bad`)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("%s %s with malformed body = %d, want 400 (%s)", tc.method, tc.path, rec.Code, rec.Body)
+		}
+	}
+}
+
+// A JSON body must say it is JSON. A plain HTML form submits only
+// text/plain, application/x-www-form-urlencoded or multipart/form-data, and a
+// text/plain form can carry a body that parses as JSON — so a route that
+// decoded whatever arrived could be driven by a form. Every JSON-body route
+// answers anything but application/json with 415, before touching the store
+// or running a probe.
+func TestServeJSONBodyRequiresJSONContentType(t *testing.T) {
+	setupTestDB(t)
+	stubPassthroughResolve()
+	marker := filepath.Join(t.TempDir(), "ran")
+	probe := probeBody(t, map[string]any{"url": "https://x.example/f", "ingest": "touch " + marker})
+	routes := []struct{ method, path, body string }{
+		{"POST", "/api/feeds", `{"title":"T","url":"https://x.example/feed"}`},
+		{"PUT", "/api/feeds/0", `{"title":"T","url":"https://x.example/feed"}`},
+		{"POST", "/api/feeds/apply", `[{"title":"T","url":"https://x.example/feed"}]`},
+		{"PUT", "/api/recipes/x", `{"pipe":["#sanitize"]}`},
+		{"PUT", "/api/syndicate/x", `{"format":"rss","ext":true}`},
+		{"PUT", "/api/dedup", `{"days":14}`},
+		{"POST", "/api/preview", probe},
+		{"POST", "/api/resolve", probe},
+	}
+	for _, rt := range routes {
+		for _, ct := range []string{
+			"",
+			"text/plain",
+			"text/plain;charset=UTF-8",
+			"application/x-www-form-urlencoded",
+			"multipart/form-data; boundary=x",
+			"application/jsonx",
+			"application/json, text/plain",
+		} {
+			rec := doRawReq(t, newMux(), rt.method, rt.path, ct, rt.body)
+			if rec.Code != http.StatusUnsupportedMediaType {
+				t.Errorf("%s %s with Content-Type %q = %d, want 415 (%s)", rt.method, rt.path, ct, rec.Code, rec.Body)
+			}
+		}
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("a probe ran its ingest command on a non-JSON body")
+	}
+	var ov overviewView
+	if err := json.Unmarshal(doReq(t, newMux(), "GET", "/api/overview", "").Body.Bytes(), &ov); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ov.Recipes["x"]; len(ov.Feeds) != 0 || ok || len(ov.Out) != 0 || ov.DedupDays != defaultDedupDays {
+		t.Errorf("a non-JSON body changed the store: %+v", ov)
+	}
+}
+
+// The check is on the media type alone: parameters ride along and the type
+// is case-insensitive.
+func TestServeJSONContentTypeParametersAndCase(t *testing.T) {
+	setupTestDB(t)
+	for i, ct := range []string{
+		"application/json",
+		"application/json; charset=utf-8",
+		"application/json;charset=UTF-8",
+		"Application/JSON",
+	} {
+		rec := doRawReq(t, newMux(), "PUT", "/api/dedup", ct, fmt.Sprintf(`{"days":%d}`, 10+i))
+		if rec.Code != http.StatusOK {
+			t.Errorf("Content-Type %q = %d, want 200 (%s)", ct, rec.Code, rec.Body)
 		}
 	}
 }

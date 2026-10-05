@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 )
 
@@ -150,8 +150,7 @@ func saveFeedTwoPhase(ctx context.Context, requireTitle bool, build func(db *DB)
 // createFeed + updateFeed.
 func handleFeedSave(w http.ResponseWriter, r *http.Request, id *int) {
 	var v feedView
-	if err := decodeJSON(r, &v); err != nil {
-		writeErr(w, err)
+	if !decodeJSON(w, r, &v) {
 		return
 	}
 	v.ID = id
@@ -185,9 +184,10 @@ func createFeed(w http.ResponseWriter, r *http.Request) {
 }
 
 func applyFeedsHandler(w http.ResponseWriter, r *http.Request) {
-	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
-	if err != nil {
-		writeErr(w, err)
+	// Raw, because parseApplyInput (shared with `srr feed apply`) decides
+	// between one object and an array itself.
+	var data json.RawMessage
+	if !decodeJSON(w, r, &data) {
 		return
 	}
 	views, err := parseApplyInput(data)

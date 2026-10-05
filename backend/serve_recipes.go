@@ -12,8 +12,7 @@ func putRecipe(w http.ResponseWriter, r *http.Request) {
 		Pipe    []string `json:"pipe"`
 		Secrets []string `json:"secrets"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
-		writeErr(w, err)
+	if !decodeJSON(w, r, &body) {
 		return
 	}
 	mutateStore(w, r, "ok", func(ctx context.Context, db *DB) error {

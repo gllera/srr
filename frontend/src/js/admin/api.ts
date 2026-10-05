@@ -50,7 +50,8 @@ export function apiLooksMissing(err: unknown): boolean {
 
 // api(method, path, body?, contentType?) issues a JSON request — or, when
 // contentType is set, sends body raw under that header (the OPML import's XML
-// dry-run) — and returns the parsed body.
+// dry-run) — and returns the parsed body. The application/json label is not
+// decoration: serve answers 415 to a JSON body labelled anything else.
 // Errors are NOT always our JSON {error}: hostGuard and intermediaries (the
 // reverse proxy, a forward-auth gate) answer plain text or HTML — that body is
 // surfaced verbatim, which is how a topology error (a 403, an auth login page)
