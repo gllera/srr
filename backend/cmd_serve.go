@@ -178,10 +178,14 @@ func hostGuard(next http.Handler) http.Handler {
 // destination is "empty"; any other destination means the browser is loading
 // the response AS something — an image, a script, a frame, a document — on
 // behalf of markup, and a feed article's markup is exactly what shares this
-// origin. The one navigation the API serves is the admin page's Export
-// download (a GET of /api/export, query and all). A request with no fetch
-// metadata at all — curl, MCP, a browser predating it — is not a browser
-// loading markup we can identify, so it keeps meeting only the checks above.
+// origin. "empty" alone does not prove fetch(): markup's <a ping> (a POST, on
+// a click) and <link rel=prefetch> carry it too, but in mode "no-cors", where
+// fetch() — the reader's keepalive PUT included — runs in "cors" (or
+// "same-origin" if asked), so Sec-Fetch-Mode must say one of those.
+// The one navigation the API serves is the admin page's Export download (a GET
+// of /api/export, query and all). A request with no fetch metadata at all —
+// curl, MCP, a browser predating it — is not a browser loading markup we can
+// identify, so it keeps meeting only the checks above.
 func fetchDestAllowed(r *http.Request) bool {
 	dest, sent := r.Header["Sec-Fetch-Dest"]
 	if !sent {
@@ -189,7 +193,9 @@ func fetchDestAllowed(r *http.Request) bool {
 	}
 	switch strings.Join(dest, ",") {
 	case "empty":
-		return true
+		mode, sent := r.Header["Sec-Fetch-Mode"]
+		m := strings.Join(mode, ",")
+		return !sent || m == "cors" || m == "same-origin"
 	case "document":
 		return (r.Method == http.MethodGet || r.Method == http.MethodHead) && r.URL.Path == "/api/export"
 	}

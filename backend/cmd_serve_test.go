@@ -304,6 +304,51 @@ func TestServeHostGuardImageCannotRunProbe(t *testing.T) {
 	}
 }
 
+// Destination "empty" is not fetch() alone: markup reaches it too — an
+// <a ping> (a POST, on a click) and a <link rel=prefetch> — in mode "no-cors".
+// fetch() and the reader's keepalive PUT run in mode "cors" ("same-origin" if a
+// caller ever asks for it), and the Export download is a "navigate". The
+// headers are what Chrome sends for each.
+func TestServeHostGuardFetchMode(t *testing.T) {
+	setupTestDB(t)
+	for _, tc := range []struct {
+		name, method, target, dest, mode, contentType, body string
+		want                                                int
+	}{
+		{"a ping", "POST", "/api/fetch?id=1", "empty", "no-cors", "text/ping", "PING", http.StatusForbidden},
+		{"a prefetch", "GET", "/api/overview", "empty", "no-cors", "", "", http.StatusForbidden},
+		{"a prefetch of the sync blob", "GET", "/sync/phone", "empty", "no-cors", "", "", http.StatusForbidden},
+
+		{"fetch()", "GET", "/api/overview", "empty", "cors", "", "", http.StatusOK},
+		{"fetch() same-origin mode", "GET", "/api/overview", "empty", "same-origin", "", "", http.StatusOK},
+		{"the Export download", "GET", "/api/export", "document", "navigate", "", "", http.StatusOK},
+		{"fetch metadata without a mode", "GET", "/api/overview", "empty", "", "", "", http.StatusOK},
+	} {
+		var body io.Reader
+		if tc.body != "" {
+			body = strings.NewReader(tc.body)
+		}
+		req := httptest.NewRequest(tc.method, tc.target, body)
+		req.Host = "localhost:8088"
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		req.Header.Set("Sec-Fetch-Dest", tc.dest)
+		if tc.mode != "" {
+			req.Header.Set("Sec-Fetch-Mode", tc.mode)
+		}
+		if tc.method != http.MethodGet && tc.method != http.MethodHead {
+			req.Header.Set("Origin", "https://srr.example.com")
+		}
+		if tc.contentType != "" {
+			req.Header.Set("Content-Type", tc.contentType)
+		}
+		rec := httptest.NewRecorder()
+		newMux().ServeHTTP(rec, req)
+		if rec.Code != tc.want {
+			t.Errorf("%s: %s %s (dest %q, mode %q) = %d, want %d (%s)", tc.name, tc.method, tc.target, tc.dest, tc.mode, rec.Code, tc.want, rec.Body)
+		}
+	}
+}
+
 // secHeaders (SEC3) stamps the static security headers on EVERY response —
 // wrapped outside hostGuard so even a 403 carries them.
 func TestServeSecHeaders(t *testing.T) {

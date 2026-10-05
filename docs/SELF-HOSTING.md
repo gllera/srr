@@ -92,6 +92,17 @@ srr.example.com {
 			}
 		}
 		respond @notfetch 403
+		# "empty" is fetch()'s destination, but markup's <a ping> and
+		# <link rel=prefetch> carry it too, in mode no-cors; fetch() runs in mode
+		# cors (or same-origin).
+		@notfetchmode {
+			path /api/* /sync/*
+			header Sec-Fetch-Dest empty
+			header Sec-Fetch-Mode *
+			not header Sec-Fetch-Mode cors
+			not header Sec-Fetch-Mode same-origin
+		}
+		respond @notfetchmode 403
 
 		# Browsers fetch the service-worker script WITHOUT cookies, so gating it
 		# 302s the registration to the login page and the SW never installs. It is
@@ -237,10 +248,14 @@ refuses. The browser-set `Sec-Fetch-Dest` header tells the two apart: the
 admin page and the reader call `/api/*` and `/sync/*` with `fetch()` only
 (`empty`), and the one navigation serve answers is the admin page's Export
 download (`document`, `GET /api/export`). `srr serve` refuses every other
-destination with a 403, and the `@notfetch` block above does the same at the
-proxy, before the auth gate, so the rule does not rest on the serve binary
-alone. A request with no `Sec-Fetch-Dest` — a non-browser client, or a
-browser that predates fetch metadata — is not refused on that ground.
+destination with a 403. `empty` on its own is not proof of `fetch()`: an
+`<a ping>` (a POST, sent on a click) and a `<link rel=prefetch>` carry it too,
+but `Sec-Fetch-Mode: no-cors`, where `fetch()` runs in `cors` (or
+`same-origin`), so serve also refuses an `empty` request in any other mode. The
+`@notfetch` and `@notfetchmode` blocks above do the same at the proxy, before
+the auth gate, so the rule does not rest on the serve binary alone. A request
+with no fetch metadata — a non-browser client, or a browser that predates it —
+is not refused on that ground.
 
 ## 6. CLI from another box
 
