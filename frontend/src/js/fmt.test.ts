@@ -250,6 +250,38 @@ describe("sanitizeHtml security edge cases", () => {
       setImgProxy("https://p.example/?u=")
       expect(attr('<audio src="https://feed.example/a.mp3">', "audio", "src")).toBe("https://feed.example/a.mp3")
    })
+
+   // The browser resolves these against the document base, which in the
+   // self-hosted layout is the origin root the admin API shares, and the writer's
+   // allowlist keeps none of them — they reach the reader only from content that
+   // skipped #sanitize (a pipe without it, or a peer store's articles).
+   it("drops ping from a link and an area: a click would POST to every URL it lists", () => {
+      const html =
+         '<a href="https://example.org/x" ping="/api/fetch">x</a>' +
+         '<map name="m"><area href="https://example.org/y" ping="http://localhost:3000/api/fetch"></map>'
+      expect(attr(html, "a", "ping")).toBeNull()
+      expect(attr(html, "area", "ping")).toBeNull()
+      // The link itself is unaffected.
+      expect(attr(html, "a", "href")).toBe("https://example.org/x")
+   })
+
+   it("drops the legacy background attribute, an image fetch on render", () => {
+      const html =
+         '<table background="/api/overview"><tr><td background="api/inspect?mode=validate">x</td></tr></table>'
+      expect(attr(html, "table", "background")).toBeNull()
+      expect(attr(html, "td", "background")).toBeNull()
+   })
+
+   it("removes <track> and <input>, whose src the reader never routes", () => {
+      const out = sanitizeHtml(
+         '<video src="https://cdn.example/v.mp4"><track default src="/api/overview"></video>' +
+            '<input type="image" src="/api/overview"><p>ok</p>',
+      )
+      expect(out).not.toContain("<track")
+      expect(out).not.toContain("<input")
+      expect(out).not.toContain("/api/")
+      expect(out).toContain("<p>ok</p>")
+   })
 })
 
 describe("collapseBrokenMedia", () => {

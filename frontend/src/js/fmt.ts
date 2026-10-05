@@ -14,14 +14,19 @@ const URL_ATTRS = new Set([
    "poster",
    "srcset",
    "cite",
-   "ping",
-   "background",
    "formaction",
    "action",
    "data",
    "longdesc",
    "xlink:href",
 ])
+// URL attributes dropped whatever their value. The browser fetches each one
+// against the document base — ping POSTs to every URL it lists when the link is
+// followed, background loads an image on render — and in the self-hosted layout
+// that base is the origin root the admin API shares. The reader routes neither
+// (nothing here resolves them the way resolvePackRelative resolves media), and
+// the writer's allowlist keeps neither, so content carrying one skipped #sanitize.
+const DROP_ATTRS = new Set(["ping", "background"])
 // Absolute <a>/<area> href schemes the backend bluemonday allowlist keeps
 // (mailto/http/https + the user-actionable tel/geo/magnet — click-to-call, map,
 // torrent); any other absolute scheme (blob:, ftp:, intent:, …) is dropped to
@@ -50,10 +55,13 @@ const ID_TOKEN = /^(?!srr-)[A-Za-z][\w:.-]{0,63}$/
 // SVG/MATH carry their own script + foreign-content surface; bluemonday strips
 // them server-side, so mirror that here. <template> is included because its
 // content lives in a DocumentFragment the sanitizer's TreeWalker never descends
-// into — removing the element removes that unwalked subtree with it. CSS
-// selector — querySelectorAll matches case-insensitively for HTML and matches
-// SVG/MathML by their normalized names, so we don't need a separate case-folding pass.
-const DANGEROUS_SELECTOR = "script,style,iframe,embed,object,form,link,meta,base,svg,math,template"
+// into — removing the element removes that unwalked subtree with it. <track> and
+// <input> are the elements left that fetch a src the attribute pass below does
+// not route (a caption file, an image button), against the document base — the
+// writer strips both too. CSS selector — querySelectorAll matches
+// case-insensitively for HTML and matches SVG/MathML by their normalized names,
+// so we don't need a separate case-folding pass.
+const DANGEROUS_SELECTOR = "script,style,iframe,embed,object,form,link,meta,base,svg,math,template,track,input"
 
 // A reference carrying a URL scheme (http:, mailto:, the URL_DENY set, …) is
 // absolute; everything else is a relative reference. ABS_SCHEME detects the
@@ -197,6 +205,7 @@ export function sanitizeFragment(html: string, base: URL = PACK_BASE): DocumentF
             attr.name === "style" ||
             attr.name === "class" ||
             attr.name.startsWith("on") ||
+            DROP_ATTRS.has(attr.name) ||
             (attr.name === "id" && !ID_TOKEN.test(attr.value)) ||
             (URL_ATTRS.has(attr.name) && URL_DENY.test(attr.value))
          )

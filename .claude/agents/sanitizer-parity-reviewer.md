@@ -24,15 +24,15 @@ When invoked, audit both sides for parity and report any divergences that could 
 ### 1. Read both sides
 
 - `backend/mod/sanitize.go` — extract every `AllowElements(...)`, `AllowAttrs(...)`, `AllowURLSchemes(...)`, and the `RequireParseableURLs` / `AllowRelativeURLs` settings.
-- `frontend/src/js/fmt.ts` — extract `DANGEROUS_SELECTOR`, `URL_ATTRS` (the URL-bearing attribute set — **`URL_DENY` is tested only against these attributes' values, not every attribute**: applying it everywhere would strip benign text like a `title` starting with a scheme-like word), `ANCHOR_ABS_OK` (the absolute-scheme allowlist for `<a>`/`<area>` href), the attribute-stripping loop (removes `style`, `class`, any `on*`-prefixed attribute, and deny-listed URL values on `URL_ATTRS`), the pack-base resolution helpers (`resolvePackRelative`/`setPackRelative`/`resolveMediaAttr`), and the per-tag rewrites (`A`, `IMG`, `VIDEO`, `AUDIO`, `SOURCE` branches).
+- `frontend/src/js/fmt.ts` — extract `DANGEROUS_SELECTOR`, `URL_ATTRS` (the URL-bearing attribute set — **`URL_DENY` is tested only against these attributes' values, not every attribute**: applying it everywhere would strip benign text like a `title` starting with a scheme-like word), `ANCHOR_ABS_OK` (the absolute-scheme allowlist for `<a>`/`<area>` href), `DROP_ATTRS` (URL attributes removed whatever their value), the attribute-stripping loop (removes `style`, `class`, any `on*`-prefixed attribute, every `DROP_ATTRS` attribute, and deny-listed URL values on `URL_ATTRS`), the pack-base resolution helpers (`resolvePackRelative`/`setPackRelative`/`resolveMediaAttr`), and the per-tag rewrites (`A`, `IMG`, `VIDEO`, `AUDIO`, `SOURCE` branches).
 - `frontend/src/js/urlish.ts` — extract `URL_DENY` (the denied-scheme regex).
 
 ### 2. Build mental allowlist/denylist tables
 
 For each side, list:
 - **Backend allowlist** — every tag the bluemonday policy permits, with allowed attributes and matchers.
-- **Frontend denylist** — every tag named in `DANGEROUS_SELECTOR` (currently `script,style,iframe,embed,object,form,link,meta,base,svg,math,template` — `svg`/`math` are foreign-content/script-surface removals mirroring bluemonday's server-side stripping; `template` is included because its content lives in a DocumentFragment the TreeWalker never descends into). Each is removed whole-subtree BEFORE the walker runs. Everything else is allowed by structure (the walker only strips dangerous attributes).
-- **Frontend attribute filter** — `style` removed, `class` removed, any `on*`-prefixed attribute removed, any `URL_ATTRS` value matching `URL_DENY` removed, plus the per-tag rewrites.
+- **Frontend denylist** — every tag named in `DANGEROUS_SELECTOR` (currently `script,style,iframe,embed,object,form,link,meta,base,svg,math,template,track,input` — `svg`/`math` are foreign-content/script-surface removals mirroring bluemonday's server-side stripping; `template` is included because its content lives in a DocumentFragment the TreeWalker never descends into; `track`/`input` because they fetch a `src` no per-tag branch routes). Each is removed whole-subtree BEFORE the walker runs. Everything else is allowed by structure (the walker only strips dangerous attributes).
+- **Frontend attribute filter** — `style` removed, `class` removed, any `on*`-prefixed attribute removed, every `DROP_ATTRS` attribute (`ping`, `background` — fetched against the document base, routed by no branch) removed whatever its value, any `URL_ATTRS` value matching `URL_DENY` removed, plus the per-tag rewrites. A URL-bearing attribute the browser FETCHES must either be routed by a per-tag branch or be dropped: in the self-hosted layout the document base is the origin root the admin API shares.
 
 ### 3. Run parity checks
 
