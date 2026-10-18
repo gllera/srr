@@ -154,3 +154,5 @@ See [backend/README.md](backend/README.md) and [frontend/README.md](frontend/REA
 ## License
 
 [MIT](LICENSE)
+
+> **Retired 2026-10.** srr is no longer developed; its successor is drr (`gllera/drr`), a server-read fork taken at `drr-fork-point`.
